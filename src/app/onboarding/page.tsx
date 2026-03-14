@@ -1,19 +1,48 @@
-import Link from 'next/link';
+'use client';
 
-/**
- * Onboarding flow — single step: connect Stripe.
- * In production this would use Stripe OAuth (Connect) or a manual API key form.
- * The UX goal: no friction, done in 60 seconds.
- */
+import Link from 'next/link';
+import { useState, FormEvent } from 'react';
+import { useRouter } from 'next/navigation';
+
 export default function OnboardingPage() {
+  const router = useRouter();
+  const [apiKey, setApiKey] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+
+    try {
+      const res = await fetch('/api/onboarding/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey, orgId: '00000000-0000-0000-0000-000000000001' }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        setError(data.error || 'Something went wrong.');
+        return;
+      }
+
+      router.push('/dashboard');
+    } catch {
+      setError('Network error. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <div className="flex min-h-screen flex-col items-center justify-center px-6 py-16">
-      {/* Logo */}
       <Link href="/" className="mb-10 text-xl font-semibold tracking-tight">
         Churn<span className="text-brand-400">Lens</span>
       </Link>
 
-      {/* Progress indicator */}
       <div className="mb-8 flex items-center gap-2 text-sm text-muted">
         <span className="flex h-6 w-6 items-center justify-center rounded-full bg-brand-500 text-xs font-semibold text-white">
           1
@@ -26,7 +55,6 @@ export default function OnboardingPage() {
         <span>Done</span>
       </div>
 
-      {/* Card */}
       <div className="w-full max-w-md card">
         <h1 className="mb-1 text-xl font-bold text-zinc-50">
           Connect your Stripe account
@@ -39,12 +67,10 @@ export default function OnboardingPage() {
           . We listen — you get clarity. Read-only access only.
         </p>
 
-        {/* Option A: OAuth (preferred) */}
         <button
           type="button"
           className="mb-3 flex w-full items-center justify-center gap-3 rounded-lg bg-[#635BFF] px-5 py-3 text-sm font-semibold text-white hover:bg-[#5147e6] transition-colors"
         >
-          {/* Stripe S-mark SVG */}
           <svg width="18" height="18" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
             <path d="M15.448 14.27c-2.488-.624-3.288-1.044-3.288-2.004 0-.888.78-1.404 2.076-1.404 1.548 0 3.132.588 4.476 1.584l1.884-3.564C18.924 7.698 17.04 7 14.448 7c-4.032 0-6.804 2.064-6.804 5.34 0 3.54 2.64 4.584 5.58 5.316 2.496.624 3.18 1.128 3.18 2.1 0 1.02-.888 1.584-2.364 1.584-1.884 0-3.66-.732-5.136-1.98L7 22.836C8.652 24.312 11.028 25 13.944 25c4.224 0 6.96-1.98 6.96-5.484 0-3.348-2.34-4.608-5.456-5.246z" fill="white"/>
           </svg>
@@ -57,8 +83,7 @@ export default function OnboardingPage() {
           <div className="h-px flex-1 bg-surface-700" />
         </div>
 
-        {/* Option B: API key */}
-        <div className="space-y-4">
+        <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label htmlFor="stripe-key" className="mb-1.5 block text-sm font-medium text-zinc-300">
               Stripe Restricted API Key
@@ -68,6 +93,8 @@ export default function OnboardingPage() {
               type="password"
               placeholder="rk_live_..."
               autoComplete="off"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
               className="w-full rounded-lg border border-surface-600 bg-surface-700 px-4 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
             />
             <p className="mt-1.5 text-xs text-muted">
@@ -77,15 +104,21 @@ export default function OnboardingPage() {
             </p>
           </div>
 
-          <button
-            type="button"
-            className="w-full rounded-lg bg-brand-500 px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-600 transition-colors"
-          >
-            Save and activate
-          </button>
-        </div>
+          {error && (
+            <p className="rounded-lg bg-red-500/10 border border-red-500/20 px-4 py-2.5 text-sm text-red-400">
+              {error}
+            </p>
+          )}
 
-        {/* Trust signals */}
+          <button
+            type="submit"
+            disabled={loading || !apiKey.trim()}
+            className="w-full rounded-lg bg-brand-500 px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {loading ? 'Saving…' : 'Save and activate'}
+          </button>
+        </form>
+
         <div className="mt-8 space-y-2 border-t border-surface-700 pt-6">
           {[
             'We never charge your customers — we only read cancellation events.',

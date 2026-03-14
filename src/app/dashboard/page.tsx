@@ -126,7 +126,7 @@ export default function DashboardPage() {
             <span className="h-4 w-px bg-surface-600" />
             <span className="text-brand-400 font-medium">Starter plan</span>
             <span className="h-4 w-px bg-surface-600" />
-            <button className="hover:text-zinc-100 transition-colors">Settings</button>
+            <a href="/settings" className="hover:text-zinc-100 transition-colors">Settings</a>
           </div>
         </div>
       </nav>

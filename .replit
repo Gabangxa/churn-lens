@@ -38,3 +38,5 @@ externalPort = 80
 
 [userenv.development]
 NEXT_PUBLIC_APP_URL = "https://4b1389a7-8103-4323-8a98-9c3d21e46375-00-93axkv796730.pike.replit.dev"
+
+[userenv.shared]

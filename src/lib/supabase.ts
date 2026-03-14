@@ -21,6 +21,7 @@ export interface Organization {
   id: string;
   name: string;
   stripe_account_id: string | null;
+  stripe_api_key_enc: string | null;
   resend_verified: boolean;
   plan: 'free' | 'starter' | 'growth';
   created_at: string;

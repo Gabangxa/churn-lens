@@ -24,11 +24,13 @@ src/
       themes/            # AI theme clustering cron job
       webhooks/stripe/   # Stripe webhook handler
     dashboard/           # Founder analytics dashboard
-    onboarding/          # Stripe connection setup
+    onboarding/          # Stripe connection setup (client component)
+    settings/            # Settings page with Stripe disconnect
     survey/[token]/      # Customer exit survey page
     layout.tsx
     page.tsx             # Landing page
   lib/
+    crypto.ts            # AES-256-GCM encryption for API keys
     openai.ts
     resend.ts
     stripe.ts
@@ -61,4 +63,5 @@ See `.env.example` for required variables:
 - `OPENAI_API_KEY`
 - `RESEND_API_KEY`
 - `NEXT_PUBLIC_APP_URL`
+- `ENCRYPTION_KEY` — 32-byte hex string (64 chars) for AES-256-GCM encryption of Stripe API keys
 - `CRON_SECRET` — random secret string; must match the value used in scheduled job requests
