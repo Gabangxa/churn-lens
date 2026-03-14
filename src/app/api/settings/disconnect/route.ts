@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAdminClient } from '@/lib/supabase';
+import { query, queryOne } from '@/lib/db';
 import { decryptApiKey } from '@/lib/crypto';
 import { requireOrgId, clearOrgCookie } from '@/lib/auth';
 import Stripe from 'stripe';
@@ -10,15 +10,12 @@ export async function DELETE(req: NextRequest) {
   const { orgId } = auth;
 
   try {
-    const supabase = getAdminClient();
+    const org = await queryOne<{ stripe_api_key_enc: string | null; stripe_account_id: string | null }>(
+      'SELECT stripe_api_key_enc, stripe_account_id FROM organizations WHERE id = $1',
+      [orgId],
+    );
 
-    const { data: org, error: fetchError } = await supabase
-      .from('organizations')
-      .select('stripe_api_key_enc, stripe_account_id')
-      .eq('id', orgId)
-      .single();
-
-    if (fetchError || !org) {
+    if (!org) {
       return NextResponse.json({ error: 'Organization not found.' }, { status: 404 });
     }
 
@@ -32,15 +29,10 @@ export async function DELETE(req: NextRequest) {
       );
     }
 
-    const { error: updateError } = await supabase
-      .from('organizations')
-      .update({ stripe_api_key_enc: null, stripe_account_id: null })
-      .eq('id', orgId);
-
-    if (updateError) {
-      console.error('Failed to clear Stripe data:', updateError);
-      return NextResponse.json({ error: 'Failed to disconnect.' }, { status: 500 });
-    }
+    await query(
+      'UPDATE organizations SET stripe_api_key_enc = NULL, stripe_account_id = NULL WHERE id = $1',
+      [orgId],
+    );
 
     const appUrl = process.env.NEXT_PUBLIC_APP_URL || '';
     const response = NextResponse.redirect(`${appUrl}/onboarding`, { status: 303 });

@@ -1,12 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAdminClient } from '@/lib/supabase';
+import { execute } from '@/lib/db';
 
-/**
- * POST /api/survey
- *
- * Receives completed survey form submission.
- * Token is validated before writing to DB.
- */
 export async function POST(req: NextRequest) {
   const body = await req.formData();
 
@@ -19,7 +13,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
   }
 
-  // Decode and validate the token
   let payload: { orgId: string; subscriptionId: string; exp: number };
   try {
     payload = JSON.parse(Buffer.from(token, 'base64url').toString());
@@ -31,26 +24,22 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Survey link expired' }, { status: 410 });
   }
 
-  const db = getAdminClient();
+  try {
+    const updated = await execute(
+      `UPDATE survey_responses
+       SET reason_category = $1, open_text = $2, comeback_text = $3, surveyed_at = $4
+       WHERE token = $5 AND org_id = $6 AND surveyed_at IS NULL`,
+      [reason, openText ?? null, comebackText ?? null, new Date().toISOString(), token, payload.orgId],
+    );
 
-  const { error } = await db
-    .from('survey_responses')
-    .update({
-      reason_category: reason,
-      open_text: openText ?? null,
-      comeback_text: comebackText ?? null,
-      surveyed_at: new Date().toISOString(),
-    })
-    .eq('token', token)
-    .eq('org_id', payload.orgId)
-    .is('surveyed_at', null); // Prevent duplicate submissions
-
-  if (error) {
-    console.error('Survey update error:', error);
+    if (updated === 0) {
+      return NextResponse.json({ error: 'Survey not found or already submitted' }, { status: 404 });
+    }
+  } catch (err) {
+    console.error('Survey update error:', err);
     return NextResponse.json({ error: 'Failed to save response' }, { status: 500 });
   }
 
-  // Redirect to thank-you screen
   return NextResponse.redirect(
     new URL('/survey/thanks', req.url),
     { status: 303 },

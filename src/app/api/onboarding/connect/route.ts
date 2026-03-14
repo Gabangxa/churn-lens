@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAdminClient } from '@/lib/supabase';
+import { query, queryOne } from '@/lib/db';
 import { encryptApiKey } from '@/lib/crypto';
 import { setOrgCookie } from '@/lib/auth';
 
@@ -24,32 +24,22 @@ export async function POST(req: NextRequest) {
     }
 
     const encrypted = encryptApiKey(apiKey);
-    const supabase = getAdminClient();
 
-    const { data: existing } = await supabase
-      .from('organizations')
-      .select('id')
-      .eq('id', orgId)
-      .single();
-
-    let error;
+    const existing = await queryOne<{ id: string }>(
+      'SELECT id FROM organizations WHERE id = $1',
+      [orgId],
+    );
 
     if (existing) {
-      const result = await supabase
-        .from('organizations')
-        .update({ stripe_api_key_enc: encrypted })
-        .eq('id', orgId);
-      error = result.error;
+      await query(
+        'UPDATE organizations SET stripe_api_key_enc = $1 WHERE id = $2',
+        [encrypted, orgId],
+      );
     } else {
-      const result = await supabase
-        .from('organizations')
-        .insert({ id: orgId, name: 'My Organization', stripe_api_key_enc: encrypted });
-      error = result.error;
-    }
-
-    if (error) {
-      console.error('Failed to save encrypted key:', error);
-      return NextResponse.json({ error: 'Failed to save API key.' }, { status: 500 });
+      await query(
+        `INSERT INTO organizations (id, name, stripe_api_key_enc) VALUES ($1, $2, $3)`,
+        [orgId, 'My Organization', encrypted],
+      );
     }
 
     const response = NextResponse.json({ success: true });

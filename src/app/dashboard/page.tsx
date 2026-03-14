@@ -1,4 +1,4 @@
-import type { SurveyResponse, Theme } from '@/lib/supabase';
+import type { SurveyResponse, Theme } from '@/lib/db';
 
 // --- Stub data for the mockup ---
 const STUB_THEMES: Theme[] = [

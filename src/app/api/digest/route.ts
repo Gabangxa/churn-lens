@@ -1,41 +1,34 @@
 import { NextResponse } from 'next/server';
-import { getAdminClient } from '@/lib/supabase';
+import { query, queryOne, queryCount } from '@/lib/db';
 import { resend, FROM_EMAIL } from '@/lib/resend';
 
-/**
- * POST /api/digest
- *
- * Sends the weekly founder digest email.
- * Scheduled after /api/themes (Monday 07:00 UTC).
- *
- * Vercel Cron:
- *   { "path": "/api/digest", "schedule": "0 7 * * 1" }
- */
 export async function POST(req: Request) {
   const authHeader = req.headers.get('authorization');
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const db = getAdminClient();
-
   const weekOf = new Date();
   weekOf.setDate(weekOf.getDate() - weekOf.getDay() + 1);
   weekOf.setHours(0, 0, 0, 0);
   const weekOfStr = weekOf.toISOString().split('T')[0];
 
-  // Orgs with themes this week
-  const { data: themes } = await db
-    .from('themes')
-    .select('org_id, label, response_count, representative_quotes, mrr_impact')
-    .eq('week_of', weekOfStr)
-    .order('response_count', { ascending: false });
+  const themes = await query<{
+    org_id: string;
+    label: string;
+    response_count: number;
+    representative_quotes: string[];
+    mrr_impact: number;
+  }>(
+    `SELECT org_id, label, response_count, representative_quotes, mrr_impact
+     FROM themes WHERE week_of = $1 ORDER BY response_count DESC`,
+    [weekOfStr],
+  );
 
-  if (!themes || themes.length === 0) {
+  if (!themes.length) {
     return NextResponse.json({ sent: 0 });
   }
 
-  // Group themes by org
   const byOrg = themes.reduce<Record<string, typeof themes>>((acc, t) => {
     acc[t.org_id] = acc[t.org_id] ?? [];
     acc[t.org_id].push(t);
@@ -44,39 +37,34 @@ export async function POST(req: Request) {
 
   const orgIds = Object.keys(byOrg);
 
-  const { data: orgs } = await db
-    .from('organizations')
-    .select('id, name')
-    .in('id', orgIds);
+  const orgs = await query<{ id: string; name: string }>(
+    `SELECT id, name FROM organizations WHERE id = ANY($1)`,
+    [orgIds],
+  );
 
-  // For each org, fetch total MRR lost and response count this week
   let sent = 0;
 
-  for (const org of orgs ?? []) {
-    const { data: founderUser } = await db
-      .from('users')
-      .select('email, name')
-      .eq('org_id', org.id)
-      .eq('role', 'owner')
-      .single();
+  for (const org of orgs) {
+    const founderUser = await queryOne<{ email: string; name: string | null }>(
+      `SELECT email, name FROM users WHERE org_id = $1 AND role = 'owner' LIMIT 1`,
+      [org.id],
+    );
 
     if (!founderUser?.email) continue;
 
     const orgThemes = (byOrg[org.id] ?? []).slice(0, 3);
 
-    const { count: totalResponses } = await db
-      .from('survey_responses')
-      .select('id', { count: 'exact', head: true })
-      .eq('org_id', org.id)
-      .gte('surveyed_at', weekOf.toISOString());
+    const totalResponses = await queryCount(
+      `SELECT COUNT(*) FROM survey_responses WHERE org_id = $1 AND surveyed_at >= $2`,
+      [org.id, weekOf.toISOString()],
+    );
 
-    const { data: mrrRows } = await db
-      .from('survey_responses')
-      .select('mrr_lost')
-      .eq('org_id', org.id)
-      .gte('surveyed_at', weekOf.toISOString());
+    const mrrRows = await query<{ mrr_lost: number }>(
+      `SELECT mrr_lost FROM survey_responses WHERE org_id = $1 AND surveyed_at >= $2`,
+      [org.id, weekOf.toISOString()],
+    );
 
-    const totalMrr = (mrrRows ?? []).reduce((s, r) => s + (r.mrr_lost ?? 0), 0);
+    const totalMrr = mrrRows.reduce((s, r) => s + (r.mrr_lost ?? 0), 0);
 
     const firstName = founderUser.name?.split(' ')[0] ?? 'there';
     const dashboardUrl = `${process.env.NEXT_PUBLIC_APP_URL}/dashboard`;

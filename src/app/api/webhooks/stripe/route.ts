@@ -1,17 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { constructWebhookEvent } from '@/lib/stripe';
-import { getAdminClient } from '@/lib/supabase';
+import { query, queryOne, queryCount } from '@/lib/db';
 import { resend, FROM_EMAIL } from '@/lib/resend';
 
-/**
- * POST /api/webhooks/stripe
- *
- * Stripe sends events here. We only care about:
- *   customer.subscription.deleted — trigger exit survey email.
- *
- * Security: signature verified via constructWebhookEvent (HMAC-SHA256).
- * Body must be read as raw buffer — do NOT use bodyParser.
- */
 export async function POST(req: NextRequest) {
   const rawBody = Buffer.from(await req.arrayBuffer());
   const signature = req.headers.get('stripe-signature');
@@ -29,7 +20,6 @@ export async function POST(req: NextRequest) {
   }
 
   if (event.type !== 'customer.subscription.deleted') {
-    // Acknowledge non-targeted events immediately
     return NextResponse.json({ received: true });
   }
 
@@ -40,38 +30,33 @@ export async function POST(req: NextRequest) {
     items: { data: Array<{ price: { unit_amount: number | null } }> };
   };
 
-  const db = getAdminClient();
+  const stripeAccountId = event.account ?? subscription.metadata.account_id;
 
-  // Look up the org that owns this Stripe account
-  const { data: org } = await db
-    .from('organizations')
-    .select('id, plan')
-    .eq('stripe_account_id', event.account ?? subscription.metadata.account_id)
-    .single();
+  const org = await queryOne<{ id: string; plan: string }>(
+    'SELECT id, plan FROM organizations WHERE stripe_account_id = $1 LIMIT 1',
+    [stripeAccountId],
+  );
 
   if (!org) {
     console.warn('No org found for Stripe account:', event.account);
     return NextResponse.json({ received: true });
   }
 
-  // Free plan: cap at 10 cancellations/mo — count first
   if (org.plan === 'free') {
     const startOfMonth = new Date();
     startOfMonth.setDate(1);
     startOfMonth.setHours(0, 0, 0, 0);
 
-    const { count } = await db
-      .from('survey_responses')
-      .select('id', { count: 'exact', head: true })
-      .eq('org_id', org.id)
-      .gte('surveyed_at', startOfMonth.toISOString());
+    const count = await queryCount(
+      'SELECT COUNT(*) FROM survey_responses WHERE org_id = $1 AND surveyed_at >= $2',
+      [org.id, startOfMonth.toISOString()],
+    );
 
-    if ((count ?? 0) >= 10) {
+    if (count >= 10) {
       return NextResponse.json({ received: true, skipped: 'free_tier_limit' });
     }
   }
 
-  // Retrieve customer email from Stripe
   const { stripe } = await import('@/lib/stripe');
   const customer = await stripe.customers.retrieve(subscription.customer as string);
   if (customer.deleted) {
@@ -83,13 +68,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ received: true, skipped: 'no_customer_email' });
   }
 
-  // Create a signed survey token (JWT) — simplified: in production use jose
   const token = Buffer.from(
     JSON.stringify({
       orgId: org.id,
       customerId: subscription.customer,
       subscriptionId: subscription.id,
-      exp: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
+      exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
     }),
   ).toString('base64url');
 
@@ -99,17 +83,12 @@ export async function POST(req: NextRequest) {
     (subscription.items.data[0]?.price.unit_amount ?? 0) / 100,
   );
 
-  // Store a pending survey record
-  await db.from('survey_responses').insert({
-    org_id: org.id,
-    customer_email: customerEmail,
-    customer_name: customer.name ?? null,
-    stripe_subscription_id: subscription.id,
-    mrr_lost: mrrLost,
-    token,
-  });
+  await query(
+    `INSERT INTO survey_responses (org_id, customer_email, customer_name, stripe_subscription_id, mrr_lost, token)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [org.id, customerEmail, customer.name ?? null, subscription.id, mrrLost, token],
+  );
 
-  // Send exit survey email via Resend
   await resend.emails.send({
     from: FROM_EMAIL,
     to: customerEmail,
