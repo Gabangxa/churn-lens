@@ -1,15 +1,16 @@
 import OpenAI from 'openai';
 
-if (!process.env.OPENAI_API_KEY) {
-  throw new Error('OPENAI_API_KEY is not set');
-}
-
-export const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
 export interface ThemeCluster {
   label: string;
   quotes: string[];
   count: number;
+}
+
+function getClient(): OpenAI {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error('OPENAI_API_KEY is not set');
+  }
+  return new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 }
 
 /**
@@ -21,6 +22,8 @@ export interface ThemeCluster {
 export async function clusterResponses(
   responses: { text: string; reason: string }[],
 ): Promise<ThemeCluster[]> {
+  const openai = getClient();
+
   const prompt = `You are analyzing cancellation survey responses for a SaaS product.
 
 Responses (JSON array):
@@ -48,7 +51,6 @@ Respond ONLY with a valid JSON array of objects with this shape:
   });
 
   const raw = completion.choices[0].message.content ?? '{"themes":[]}';
-  // The model may wrap in a top-level key — handle both forms
   const parsed = JSON.parse(raw);
   return Array.isArray(parsed) ? parsed : (parsed.themes ?? []);
 }

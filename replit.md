@@ -41,6 +41,15 @@ supabase/
 
 The app runs via the "Start application" workflow using `npm run dev -p 5000`.
 
+## Scheduled Jobs
+
+Cron jobs are handled internally via `src/instrumentation.ts` (Next.js instrumentation hook), which runs once on server startup. No external cron service is needed.
+
+- **Monday 06:00 UTC** — POST `/api/themes` (AI theme clustering)
+- **Monday 07:00 UTC** — POST `/api/digest` (weekly founder email)
+
+Both endpoints are secured with a `CRON_SECRET` bearer token. The scheduler uses plain `setTimeout` so there are no npm dependencies and no webpack bundling issues.
+
 ## Environment Variables
 
 See `.env.example` for required variables:
@@ -52,3 +61,4 @@ See `.env.example` for required variables:
 - `OPENAI_API_KEY`
 - `RESEND_API_KEY`
 - `NEXT_PUBLIC_APP_URL`
+- `CRON_SECRET` — random secret string; must match the value used in scheduled job requests
