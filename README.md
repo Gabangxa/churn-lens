@@ -18,11 +18,7 @@ ChurnLens fills the gap: exit interviews + AI theme synthesis at indie-founder p
 
 ---
 
-## How it works
 
-1. **Connect Stripe** — paste a restricted API key or use OAuth (60 seconds)
-2. **Customer cancels** — ChurnLens intercepts the webhook, sends a 3-question survey email within 5 minutes
-3. **You get clarity** — every Monday: top themes, representative quotes, MRR impact in a plain-English digest
 
 ---
 
@@ -107,13 +103,7 @@ stripe listen --forward-to localhost:3000/api/webhooks/stripe
 
 ---
 
-## Path to $10K MRR
 
-- 345 Starter subscribers **or**
-- 127 Growth subscribers **or**
-- Mix: ~200 Starter + ~50 Growth
-
-Distribution: Indie Hackers, Product Hunt, Twitter #buildinpublic, Hacker News Show HN, r/SaaS.
 
 ---
 
