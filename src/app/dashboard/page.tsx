@@ -102,7 +102,8 @@ const THEME_COLORS: Record<string, string> = {
   'Switched to Churnkey': 'bg-purple-500/15 text-purple-300 border-purple-500/30',
 };
 
-function fmt(iso: string) {
+function fmt(iso: string | null) {
+  if (!iso) return '—';
   return new Date(iso).toLocaleDateString('en-GB', {
     day: 'numeric',
     month: 'short',
