@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { execute } from '@/lib/db';
+import { verifySurveyToken } from '@/lib/crypto';
 
 export async function POST(req: NextRequest) {
   const body = await req.formData();
@@ -13,10 +14,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
   }
 
-  let payload: { orgId: string; subscriptionId: string; exp: number };
-  try {
-    payload = JSON.parse(Buffer.from(token, 'base64url').toString());
-  } catch {
+  const payload = verifySurveyToken(token);
+  if (!payload) {
     return NextResponse.json({ error: 'Invalid token' }, { status: 400 });
   }
 

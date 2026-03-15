@@ -9,36 +9,41 @@ export async function DELETE(req: NextRequest) {
   if ('error' in auth) return auth.error;
   const { orgId } = auth;
 
-  try {
-    const org = await queryOne<{ stripe_api_key_enc: string | null; stripe_account_id: string | null }>(
-      'SELECT stripe_api_key_enc, stripe_account_id FROM organizations WHERE id = $1',
-      [orgId],
-    );
+  const org = await queryOne<{
+    stripe_api_key_enc: string | null;
+    stripe_webhook_id: string | null;
+  }>(
+    'SELECT stripe_api_key_enc, stripe_webhook_id FROM organizations WHERE id = $1',
+    [orgId],
+  );
 
-    if (!org) {
-      return NextResponse.json({ error: 'Organization not found.' }, { status: 404 });
-    }
+  if (!org) {
+    return NextResponse.json({ error: 'Organization not found.' }, { status: 404 });
+  }
 
-    if (org.stripe_api_key_enc) {
+  // Delete only the webhook endpoint ChurnLens registered — never touch others.
+  if (org.stripe_api_key_enc && org.stripe_webhook_id) {
+    try {
       const apiKey = decryptApiKey(org.stripe_api_key_enc);
       const stripeClient = new Stripe(apiKey, { apiVersion: '2024-04-10', typescript: true });
-
-      const webhooks = await stripeClient.webhookEndpoints.list({ limit: 100 });
-      await Promise.all(
-        webhooks.data.map((wh) => stripeClient.webhookEndpoints.del(wh.id)),
-      );
+      await stripeClient.webhookEndpoints.del(org.stripe_webhook_id);
+    } catch (err) {
+      // Log but don't block disconnect — the org record must be cleared regardless.
+      console.error('Failed to delete Stripe webhook endpoint:', err);
     }
-
-    await query(
-      'UPDATE organizations SET stripe_api_key_enc = NULL, stripe_account_id = NULL WHERE id = $1',
-      [orgId],
-    );
-
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL || '';
-    const response = NextResponse.redirect(`${appUrl}/onboarding`, { status: 303 });
-    return clearOrgCookie(response);
-  } catch (err) {
-    console.error('Disconnect error:', err);
-    return NextResponse.json({ error: 'Failed to disconnect. Could not clean up Stripe webhooks.' }, { status: 500 });
   }
+
+  await query(
+    `UPDATE organizations
+     SET stripe_api_key_enc = NULL,
+         stripe_account_id = NULL,
+         stripe_webhook_id = NULL,
+         stripe_webhook_secret_enc = NULL
+     WHERE id = $1`,
+    [orgId],
+  );
+
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || '';
+  const response = NextResponse.redirect(`${appUrl}/onboarding`, { status: 303 });
+  return clearOrgCookie(response);
 }

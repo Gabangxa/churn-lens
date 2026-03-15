@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createHmac } from 'crypto';
+import { createHmac, timingSafeEqual } from 'crypto';
 
 const ORG_COOKIE = 'churnlens_org_id';
 
@@ -19,7 +19,10 @@ function verify(signed: string): string | null {
   if (idx === -1) return null;
   const value = signed.substring(0, idx);
   const expected = sign(value);
-  if (expected !== signed) return null;
+  const expectedBuf = Buffer.from(expected);
+  const signedBuf = Buffer.from(signed);
+  if (expectedBuf.length !== signedBuf.length) return null;
+  if (!timingSafeEqual(expectedBuf, signedBuf)) return null;
   return value;
 }
 
@@ -37,6 +40,22 @@ export function setOrgCookie(response: NextResponse, orgId: string): NextRespons
 export function clearOrgCookie(response: NextResponse): NextResponse {
   response.cookies.delete(ORG_COOKIE);
   return response;
+}
+
+/**
+ * For use in server components. Pass the return value of `cookies()` from
+ * `next/headers`. Returns the verified orgId or null if missing/invalid.
+ *
+ * Example:
+ *   import { cookies } from 'next/headers';
+ *   const orgId = getOrgIdFromCookieStore(cookies());
+ */
+export function getOrgIdFromCookieStore(
+  cookieStore: { get(name: string): { value: string } | undefined },
+): string | null {
+  const raw = cookieStore.get(ORG_COOKIE)?.value;
+  if (!raw) return null;
+  return verify(raw);
 }
 
 export function requireOrgId(req: NextRequest): { orgId: string } | { error: NextResponse } {

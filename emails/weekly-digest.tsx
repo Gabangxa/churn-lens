@@ -69,8 +69,7 @@ export default function WeeklyDigest({
     <Html lang="en">
       <Head />
       <Preview>
-        Week of {weekOf}: {totalCancellations} cancellations · ${totalMrrLost} MRR
-        lost · top theme: {themes[0]?.label}
+        {`Week of ${weekOf}: ${totalCancellations} cancellations · $${totalMrrLost} MRR lost · top theme: ${themes[0]?.label}`}
       </Preview>
       <Body style={bodyStyle}>
         <Container style={containerStyle}>

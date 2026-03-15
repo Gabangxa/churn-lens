@@ -1,12 +1,15 @@
 import { Pool } from 'pg';
 
 if (!process.env.DATABASE_URL) {
-  console.error('DATABASE_URL is not set — database queries will fail.');
+  throw new Error('DATABASE_URL is not set. Add it to Replit Secrets.');
 }
 
+const dbUrl = process.env.DATABASE_URL ?? '';
+const isLocalDb = dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1');
+
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: false,
+  connectionString: dbUrl || undefined,
+  ssl: isLocalDb ? false : { rejectUnauthorized: false },
 });
 
 pool.on('error', (err) => {
@@ -52,6 +55,8 @@ export interface Organization {
   name: string;
   stripe_account_id: string | null;
   stripe_api_key_enc: string | null;
+  stripe_webhook_id: string | null;
+  stripe_webhook_secret_enc: string | null;
   resend_verified: boolean;
   plan: 'free' | 'starter' | 'growth';
   created_at: string;

@@ -19,7 +19,7 @@ export default function OnboardingPage() {
       const res = await fetch('/api/onboarding/connect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey, orgId: '00000000-0000-0000-0000-000000000001' }),
+        body: JSON.stringify({ apiKey }),
       });
 
       const data = await res.json();

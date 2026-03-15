@@ -1,10 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { constructWebhookEvent } from '@/lib/stripe';
-import { query, queryOne, queryCount, execute } from '@/lib/db';
-import { signSurveyToken } from '@/lib/crypto';
+import Stripe from 'stripe';
+import { queryOne, queryCount, execute } from '@/lib/db';
+import { decryptApiKey, signSurveyToken } from '@/lib/crypto';
 import { resend, FROM_EMAIL } from '@/lib/resend';
 
-export async function POST(req: NextRequest) {
+export async function POST(
+  req: NextRequest,
+  { params }: { params: { orgId: string } },
+) {
+  const { orgId } = params;
+
   const rawBody = Buffer.from(await req.arrayBuffer());
   const signature = req.headers.get('stripe-signature');
 
@@ -12,11 +17,30 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Missing stripe-signature' }, { status: 400 });
   }
 
-  let event;
+  // Look up org and its per-org webhook signing secret before verifying.
+  const org = await queryOne<{
+    id: string;
+    plan: string;
+    stripe_api_key_enc: string | null;
+    stripe_webhook_secret_enc: string | null;
+  }>(
+    `SELECT id, plan, stripe_api_key_enc, stripe_webhook_secret_enc
+     FROM organizations WHERE id = $1`,
+    [orgId],
+  );
+
+  if (!org || !org.stripe_webhook_secret_enc) {
+    return NextResponse.json({ error: 'Unknown organization' }, { status: 404 });
+  }
+
+  const webhookSecret = decryptApiKey(org.stripe_webhook_secret_enc);
+
+  let event: Stripe.Event;
   try {
-    event = constructWebhookEvent(rawBody, signature);
+    // Verify using the org's own webhook signing secret (not the platform-level secret).
+    event = Stripe.webhooks.constructEvent(rawBody, signature, webhookSecret);
   } catch (err) {
-    console.error('Webhook signature verification failed:', err);
+    console.error(`Webhook signature verification failed for org ${orgId}:`, err);
     return NextResponse.json({ error: 'Invalid signature' }, { status: 400 });
   }
 
@@ -27,21 +51,8 @@ export async function POST(req: NextRequest) {
   const subscription = event.data.object as {
     id: string;
     customer: string;
-    metadata: Record<string, string>;
     items: { data: Array<{ price: { unit_amount: number | null } }> };
   };
-
-  const stripeAccountId = event.account ?? subscription.metadata.account_id;
-
-  const org = await queryOne<{ id: string; plan: string }>(
-    'SELECT id, plan FROM organizations WHERE stripe_account_id = $1 LIMIT 1',
-    [stripeAccountId],
-  );
-
-  if (!org) {
-    console.warn('No org found for Stripe account:', event.account);
-    return NextResponse.json({ received: true });
-  }
 
   if (org.plan === 'free') {
     const startOfMonth = new Date();
@@ -58,8 +69,15 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const { stripe } = await import('@/lib/stripe');
-  const customer = await stripe.customers.retrieve(subscription.customer as string);
+  if (!org.stripe_api_key_enc) {
+    console.warn(`Org ${orgId} has no Stripe API key stored — cannot retrieve customer.`);
+    return NextResponse.json({ received: true, skipped: 'no_api_key' });
+  }
+
+  const apiKey = decryptApiKey(org.stripe_api_key_enc);
+  const stripeClient = new Stripe(apiKey, { apiVersion: '2024-04-10', typescript: true });
+
+  const customer = await stripeClient.customers.retrieve(subscription.customer);
   if (customer.deleted) {
     return NextResponse.json({ received: true, skipped: 'customer_deleted' });
   }
@@ -71,7 +89,7 @@ export async function POST(req: NextRequest) {
 
   const token = signSurveyToken({
     orgId: org.id,
-    customerId: subscription.customer as string,
+    customerId: subscription.customer,
     subscriptionId: subscription.id,
     exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
   });
@@ -82,7 +100,7 @@ export async function POST(req: NextRequest) {
     (subscription.items.data[0]?.price.unit_amount ?? 0) / 100,
   );
 
-  // ON CONFLICT guard: if Stripe retries the event, skip inserting and emailing again.
+  // Idempotency guard: skip if this subscription has already been processed.
   const inserted = await execute(
     `INSERT INTO survey_responses (org_id, customer_email, customer_name, stripe_subscription_id, mrr_lost, token)
      VALUES ($1, $2, $3, $4, $5, $6)

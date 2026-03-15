@@ -1,8 +1,11 @@
 const { Pool } = require('pg');
 
+const dbUrl = process.env.DATABASE_URL ?? '';
+const isLocalDb = dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1');
+
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: false,
+  connectionString: dbUrl || undefined,
+  ssl: isLocalDb ? false : { rejectUnauthorized: false },
 });
 
 async function migrate() {
@@ -59,6 +62,17 @@ async function migrate() {
     );
 
     CREATE INDEX IF NOT EXISTS themes_org_week ON themes (org_id, week_of DESC);
+  `);
+
+  // Additive migrations — safe to run on an existing schema
+  await pool.query(`
+    ALTER TABLE organizations
+      ADD COLUMN IF NOT EXISTS stripe_webhook_id text,
+      ADD COLUMN IF NOT EXISTS stripe_webhook_secret_enc text;
+
+    ALTER TABLE survey_responses
+      ADD CONSTRAINT IF NOT EXISTS survey_responses_stripe_subscription_id_key
+      UNIQUE (stripe_subscription_id);
   `);
   console.log('Database migration complete');
   await pool.end();

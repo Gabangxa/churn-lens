@@ -12,6 +12,9 @@
 export async function register() {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
 
+  const { validateEnv } = await import('./lib/env');
+  validateEnv();
+
   const appUrl = process.env.NEXT_PUBLIC_APP_URL;
   const cronSecret = process.env.CRON_SECRET;
 
