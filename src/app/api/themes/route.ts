@@ -64,13 +64,23 @@ export async function POST(req: Request) {
       );
     }
 
+    // Back-tag responses by matching quotes to row IDs — never update by open_text
+    // directly as it risks matching the wrong row if two responses are identical.
+    const responseRows = await query<{ id: string; open_text: string | null }>(
+      `SELECT id, open_text FROM survey_responses
+       WHERE org_id = $1 AND surveyed_at >= $2 AND open_text IS NOT NULL`,
+      [org.id, weekOf.toISOString()],
+    );
+
     for (const theme of themes) {
       for (const quote of theme.quotes) {
-        await query(
-          `UPDATE survey_responses SET theme_tags = $1
-           WHERE org_id = $2 AND open_text = $3`,
-          [[theme.label], org.id, quote],
-        );
+        const match = responseRows.find((r) => r.open_text === quote);
+        if (match) {
+          await query(
+            `UPDATE survey_responses SET theme_tags = $1 WHERE id = $2`,
+            [[theme.label], match.id],
+          );
+        }
       }
     }
 

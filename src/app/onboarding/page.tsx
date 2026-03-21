@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 
 export default function OnboardingPage() {
   const router = useRouter();
+  const [email, setEmail] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -19,7 +20,7 @@ export default function OnboardingPage() {
       const res = await fetch('/api/onboarding/connect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey }),
+        body: JSON.stringify({ email, apiKey }),
       });
 
       const data = await res.json();
@@ -85,6 +86,23 @@ export default function OnboardingPage() {
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
+            <label htmlFor="email" className="mb-1.5 block text-sm font-medium text-zinc-300">
+              Your email address
+            </label>
+            <input
+              id="email"
+              type="email"
+              placeholder="you@yourcompany.com"
+              required
+              autoComplete="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full rounded-lg border border-surface-600 bg-surface-700 px-4 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+            />
+            <p className="mt-1.5 text-xs text-muted">Used to send you the weekly ChurnLens digest.</p>
+          </div>
+
+          <div>
             <label htmlFor="stripe-key" className="mb-1.5 block text-sm font-medium text-zinc-300">
               Stripe Restricted API Key
             </label>
@@ -112,7 +130,7 @@ export default function OnboardingPage() {
 
           <button
             type="submit"
-            disabled={loading || !apiKey.trim()}
+            disabled={loading || !email.trim() || !apiKey.trim()}
             className="w-full rounded-lg bg-brand-500 px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {loading ? 'Saving…' : 'Save and activate'}

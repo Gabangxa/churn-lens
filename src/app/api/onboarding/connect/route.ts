@@ -8,7 +8,11 @@ import { setOrgCookie, requireOrgId } from '@/lib/auth';
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { apiKey } = body;
+    const { apiKey, email } = body;
+
+    if (!email || typeof email !== 'string' || !email.includes('@')) {
+      return NextResponse.json({ error: 'A valid email address is required.' }, { status: 400 });
+    }
 
     if (!apiKey || typeof apiKey !== 'string') {
       return NextResponse.json({ error: 'API key is required.' }, { status: 400 });
@@ -78,6 +82,20 @@ export async function POST(req: NextRequest) {
          SET stripe_webhook_id = $1, stripe_webhook_secret_enc = $2
          WHERE id = $3`,
         [webhookEndpoint.id, encryptApiKey(webhookEndpoint.secret!), orgId],
+      );
+    }
+
+    // Upsert the founder's user row so the weekly digest can reach them.
+    const existingUser = await queryOne<{ id: string }>(
+      'SELECT id FROM users WHERE org_id = $1',
+      [orgId],
+    );
+    if (existingUser) {
+      await query('UPDATE users SET email = $1 WHERE org_id = $2', [email, orgId]);
+    } else {
+      await query(
+        'INSERT INTO users (org_id, email, role) VALUES ($1, $2, $3)',
+        [orgId, email, 'owner'],
       );
     }
 

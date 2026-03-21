@@ -1,12 +1,14 @@
 /**
  * Survey page — the page a churned customer lands on.
  *
- * The [token] is a signed JWT (HS256) encoding:
+ * The [token] is an HMAC-signed payload encoding:
  *   { orgId, customerId, subscriptionId, exp }
  *
  * WCAG AA minimum: labels explicitly associated with inputs,
  * sufficient color contrast, focus indicators, no color-only cues.
  */
+
+import { verifySurveyToken } from '@/lib/crypto';
 
 const CANCELLATION_REASONS = [
   'Too expensive for my budget',
@@ -19,9 +21,25 @@ const CANCELLATION_REASONS = [
   'Other',
 ];
 
-export default function SurveyPage({ params }: { params: { token: string } }) {
-  // In production, validate JWT server-side here and 404 if expired/invalid.
-  void params.token;
+export default async function SurveyPage({ params }: { params: { token: string } }) {
+  const payload = verifySurveyToken(params.token);
+  const expired = !payload || Date.now() > payload.exp;
+
+  if (expired) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center bg-zinc-950 px-6 py-16 text-center">
+        <div className="w-full max-w-sm">
+          <span className="text-sm text-zinc-500">
+            Powered by Churn<span className="text-brand-400">Lens</span>
+          </span>
+          <h1 className="mt-8 text-xl font-bold text-zinc-100">This link has expired</h1>
+          <p className="mt-3 text-sm text-zinc-400 leading-relaxed">
+            Survey links are valid for 7 days. This one is no longer active.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-zinc-950 px-6 py-16">

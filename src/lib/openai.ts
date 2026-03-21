@@ -34,14 +34,16 @@ Task:
 2. For each theme, pick 1–2 representative verbatim quotes from the responses.
 3. Count how many responses belong to each theme.
 
-Respond ONLY with a valid JSON array of objects with this shape:
-[
-  {
-    "label": "Theme name (3–6 words)",
-    "quotes": ["verbatim quote 1", "verbatim quote 2"],
-    "count": <number>
-  }
-]`;
+Respond ONLY with a JSON object in exactly this shape — no other keys:
+{
+  "themes": [
+    {
+      "label": "Theme name (3–6 words)",
+      "quotes": ["verbatim quote 1", "verbatim quote 2"],
+      "count": <number>
+    }
+  ]
+}`;
 
   const completion = await openai.chat.completions.create({
     model: 'gpt-4o-mini',
@@ -52,5 +54,5 @@ Respond ONLY with a valid JSON array of objects with this shape:
 
   const raw = completion.choices[0].message.content ?? '{"themes":[]}';
   const parsed = JSON.parse(raw);
-  return Array.isArray(parsed) ? parsed : (parsed.themes ?? []);
+  return parsed.themes ?? [];
 }
