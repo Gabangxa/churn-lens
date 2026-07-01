@@ -59,8 +59,11 @@ export async function POST(
     startOfMonth.setDate(1);
     startOfMonth.setHours(0, 0, 0, 0);
 
+    // Free tier caps surveys *sent* per month, so count by created_at. Counting
+    // by surveyed_at (responses) let free orgs send unlimited surveys since most
+    // customers never respond.
     const count = await queryCount(
-      'SELECT COUNT(*) FROM survey_responses WHERE org_id = $1 AND surveyed_at >= $2',
+      'SELECT COUNT(*) FROM survey_responses WHERE org_id = $1 AND created_at >= $2',
       [org.id, startOfMonth.toISOString()],
     );
 
@@ -87,6 +90,15 @@ export async function POST(
     return NextResponse.json({ received: true, skipped: 'no_customer_email' });
   }
 
+  // Respect prior opt-outs (CAN-SPAM): never re-survey a customer who unsubscribed.
+  const suppressed = await queryCount(
+    'SELECT COUNT(*) FROM unsubscribes WHERE org_id = $1 AND customer_email = $2',
+    [org.id, customerEmail],
+  );
+  if (suppressed > 0) {
+    return NextResponse.json({ received: true, skipped: 'unsubscribed' });
+  }
+
   const token = signSurveyToken({
     orgId: org.id,
     customerId: subscription.customer,
@@ -95,6 +107,7 @@ export async function POST(
   });
 
   const surveyUrl = `${process.env.NEXT_PUBLIC_APP_URL}/survey/${token}`;
+  const optOutUrl = `${process.env.NEXT_PUBLIC_APP_URL}/api/survey/opt-out?token=${token}`;
 
   const mrrLost = Math.round(
     (subscription.items.data[0]?.price.unit_amount ?? 0) / 100,
@@ -130,7 +143,7 @@ Thanks,
 The team
 
 ---
-You received this because you had an active subscription. Unsubscribe from exit surveys: ${surveyUrl}?opt_out=1
+You received this because you had an active subscription. Unsubscribe from exit surveys: ${optOutUrl}
 `,
   });
 
