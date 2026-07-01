@@ -1,30 +1,44 @@
 import { NextResponse } from 'next/server';
-import { query } from '@/lib/db';
+import { query, execute } from '@/lib/db';
 import { clusterResponses } from '@/lib/openai';
+import { verifyCronSecret } from '@/lib/auth';
+import { reportingWeek } from '@/lib/week';
 
 export async function POST(req: Request) {
-  const authHeader = req.headers.get('authorization');
-  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (!verifyCronSecret(req.headers.get('authorization'))) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const weekOf = new Date();
-  weekOf.setDate(weekOf.getDate() - weekOf.getDay() + 1);
-  weekOf.setHours(0, 0, 0, 0);
+  // Report on the week that just ended: [previous Monday, this Monday).
+  const { weekStart, weekEnd, weekOfStr } = reportingWeek();
+  const startIso = weekStart.toISOString();
+  const endIso = weekEnd.toISOString();
+
+  // At-most-once-per-week guard: a duplicate fire (restart, extra instance,
+  // manual retry) loses the ON CONFLICT race and exits without re-spending
+  // OpenAI tokens.
+  const claimed = await execute(
+    `INSERT INTO cron_runs (job, week_of) VALUES ('themes', $1)
+     ON CONFLICT (job, week_of) DO NOTHING`,
+    [weekOfStr],
+  );
+  if (claimed === 0) {
+    return NextResponse.json({ skipped: 'already_ran', weekOf: weekOfStr });
+  }
 
   const orgs = await query<{ id: string }>(
     "SELECT id FROM organizations WHERE plan IN ('starter', 'growth')",
   );
 
-  if (!orgs.length) return NextResponse.json({ processed: 0 });
+  if (!orgs.length) return NextResponse.json({ processed: 0, weekOf: weekOfStr });
 
   let processed = 0;
 
   for (const org of orgs) {
     const responses = await query<{ reason_category: string; open_text: string | null }>(
       `SELECT reason_category, open_text FROM survey_responses
-       WHERE org_id = $1 AND surveyed_at >= $2 AND surveyed_at IS NOT NULL`,
-      [org.id, weekOf.toISOString()],
+       WHERE org_id = $1 AND surveyed_at >= $2 AND surveyed_at < $3`,
+      [org.id, startIso, endIso],
     );
 
     if (responses.length < 2) continue;
@@ -45,13 +59,11 @@ export async function POST(req: Request) {
 
     const mrrRows = await query<{ mrr_lost: number }>(
       `SELECT mrr_lost FROM survey_responses
-       WHERE org_id = $1 AND surveyed_at >= $2`,
-      [org.id, weekOf.toISOString()],
+       WHERE org_id = $1 AND surveyed_at >= $2 AND surveyed_at < $3`,
+      [org.id, startIso, endIso],
     );
 
     const totalMrr = mrrRows.reduce((sum, r) => sum + (r.mrr_lost ?? 0), 0);
-
-    const weekOfStr = weekOf.toISOString().split('T')[0];
 
     for (const theme of themes) {
       const mrrImpact = Math.round((theme.count / input.length) * totalMrr);
@@ -66,15 +78,21 @@ export async function POST(req: Request) {
 
     // Back-tag responses by matching quotes to row IDs — never update by open_text
     // directly as it risks matching the wrong row if two responses are identical.
+    // Match on a normalized form since GPT frequently trims/pads verbatim quotes.
     const responseRows = await query<{ id: string; open_text: string | null }>(
       `SELECT id, open_text FROM survey_responses
-       WHERE org_id = $1 AND surveyed_at >= $2 AND open_text IS NOT NULL`,
-      [org.id, weekOf.toISOString()],
+       WHERE org_id = $1 AND surveyed_at >= $2 AND surveyed_at < $3 AND open_text IS NOT NULL`,
+      [org.id, startIso, endIso],
     );
+
+    const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
 
     for (const theme of themes) {
       for (const quote of theme.quotes) {
-        const match = responseRows.find((r) => r.open_text === quote);
+        const q = norm(quote);
+        const match = responseRows.find(
+          (r) => r.open_text && norm(r.open_text) === q,
+        );
         if (match) {
           await query(
             `UPDATE survey_responses SET theme_tags = $1 WHERE id = $2`,
@@ -87,5 +105,9 @@ export async function POST(req: Request) {
     processed++;
   }
 
-  return NextResponse.json({ processed, weekOf: weekOf.toISOString() });
+  return NextResponse.json({ processed, weekOf: weekOfStr });
 }
+
+// Vercel Cron issues GET requests; alias to the same handler. Safe to expose as
+// GET because it is CRON_SECRET-gated and idempotent (cron_runs guard).
+export const GET = POST;
