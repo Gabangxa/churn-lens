@@ -3,9 +3,22 @@ const { Pool } = require('pg');
 const dbUrl = process.env.DATABASE_URL ?? '';
 const isLocalDb = dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1');
 
+// TLS: verify the server certificate when a CA is provided (DATABASE_CA_CERT).
+// Falling back to an unverified connection is a MITM risk, so we warn loudly
+// rather than doing it silently. See src/lib/db.ts for the request-path copy.
+function sslConfig() {
+  if (isLocalDb) return false;
+  const ca = process.env.DATABASE_CA_CERT;
+  if (ca) return { ca, rejectUnauthorized: true };
+  console.warn(
+    '[migrate] DATABASE_CA_CERT not set — DB TLS certificate verification is DISABLED (MITM risk). Set DATABASE_CA_CERT to enable it.',
+  );
+  return { rejectUnauthorized: false };
+}
+
 const pool = new Pool({
   connectionString: dbUrl || undefined,
-  ssl: isLocalDb ? false : { rejectUnauthorized: false },
+  ssl: sslConfig(),
 });
 
 async function migrate() {
@@ -64,16 +77,52 @@ async function migrate() {
     CREATE INDEX IF NOT EXISTS themes_org_week ON themes (org_id, week_of DESC);
   `);
 
-  // Additive migrations — safe to run on an existing schema
+  // Additive migrations — safe to run on an existing schema.
+  // ADD COLUMN supports IF NOT EXISTS; ADD CONSTRAINT does NOT (any PG version),
+  // so the unique constraint is guarded via a catalog check in a DO block.
   await pool.query(`
     ALTER TABLE organizations
       ADD COLUMN IF NOT EXISTS stripe_webhook_id text,
       ADD COLUMN IF NOT EXISTS stripe_webhook_secret_enc text;
-
-    ALTER TABLE survey_responses
-      ADD CONSTRAINT IF NOT EXISTS survey_responses_stripe_subscription_id_key
-      UNIQUE (stripe_subscription_id);
   `);
+
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'survey_responses_stripe_subscription_id_key'
+      ) THEN
+        ALTER TABLE survey_responses
+          ADD CONSTRAINT survey_responses_stripe_subscription_id_key
+          UNIQUE (stripe_subscription_id);
+      END IF;
+    END $$;
+  `);
+
+  // At-most-once-per-week guard for the weekly cron jobs. A successful claim is
+  // an INSERT that wins the ON CONFLICT race; duplicate fires (process restart,
+  // extra instance, manual retry) become no-ops. See src/app/api/{themes,digest}.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS cron_runs (
+      job text NOT NULL,
+      week_of date NOT NULL,
+      ran_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (job, week_of)
+    );
+  `);
+
+  // Exit-survey opt-outs (CAN-SPAM). One row per (org, customer email) suppresses
+  // future survey emails for that customer.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS unsubscribes (
+      org_id uuid NOT NULL REFERENCES organizations ON DELETE CASCADE,
+      customer_email text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (org_id, customer_email)
+    );
+  `);
+
   console.log('Database migration complete');
   await pool.end();
 }

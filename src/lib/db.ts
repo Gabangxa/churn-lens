@@ -7,9 +7,23 @@ if (!process.env.DATABASE_URL) {
 const dbUrl = process.env.DATABASE_URL ?? '';
 const isLocalDb = dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1');
 
+// TLS: verify the server certificate when a CA is provided (DATABASE_CA_CERT).
+// Without it we fall back to an unverified connection — a MITM risk — so we warn
+// loudly rather than doing it silently. Managed Postgres (Supabase/Replit/RDS)
+// publishes a CA bundle; set DATABASE_CA_CERT to its PEM contents in prod.
+function sslConfig(): false | { ca: string; rejectUnauthorized: true } | { rejectUnauthorized: false } {
+  if (isLocalDb) return false;
+  const ca = process.env.DATABASE_CA_CERT;
+  if (ca) return { ca, rejectUnauthorized: true };
+  console.warn(
+    '[db] DATABASE_CA_CERT not set — DB TLS certificate verification is DISABLED (MITM risk). Set DATABASE_CA_CERT to enable it.',
+  );
+  return { rejectUnauthorized: false };
+}
+
 const pool = new Pool({
   connectionString: dbUrl || undefined,
-  ssl: isLocalDb ? false : { rejectUnauthorized: false },
+  ssl: sslConfig(),
 });
 
 pool.on('error', (err) => {
