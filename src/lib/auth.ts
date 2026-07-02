@@ -69,3 +69,19 @@ export function requireOrgId(req: NextRequest): { orgId: string } | { error: Nex
   }
   return { orgId };
 }
+
+/**
+ * Constant-time check of the internal cron bearer token, so the CRON_SECRET
+ * can't be recovered via response-timing. Used by the /api/themes and
+ * /api/digest cron endpoints.
+ */
+export function verifyCronSecret(authHeader: string | null): boolean {
+  const secret = process.env.CRON_SECRET;
+  if (!secret) return false;
+  const expected = `Bearer ${secret}`;
+  const provided = authHeader ?? '';
+  const expectedBuf = Buffer.from(expected);
+  const providedBuf = Buffer.from(provided);
+  if (expectedBuf.length !== providedBuf.length) return false;
+  return timingSafeEqual(expectedBuf, providedBuf);
+}

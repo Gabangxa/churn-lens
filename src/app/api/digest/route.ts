@@ -1,17 +1,28 @@
 import { NextResponse } from 'next/server';
-import { query, queryOne, queryCount } from '@/lib/db';
+import { query, queryOne, queryCount, execute } from '@/lib/db';
 import { resend, FROM_EMAIL } from '@/lib/resend';
+import { verifyCronSecret } from '@/lib/auth';
+import { reportingWeek } from '@/lib/week';
 
 export async function POST(req: Request) {
-  const authHeader = req.headers.get('authorization');
-  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (!verifyCronSecret(req.headers.get('authorization'))) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const weekOf = new Date();
-  weekOf.setDate(weekOf.getDate() - weekOf.getDay() + 1);
-  weekOf.setHours(0, 0, 0, 0);
-  const weekOfStr = weekOf.toISOString().split('T')[0];
+  // Report on the week that just ended: [previous Monday, this Monday).
+  const { weekStart, weekEnd, weekOfStr } = reportingWeek();
+  const startIso = weekStart.toISOString();
+  const endIso = weekEnd.toISOString();
+
+  // At-most-once-per-week guard so a duplicate fire can't double-email founders.
+  const claimed = await execute(
+    `INSERT INTO cron_runs (job, week_of) VALUES ('digest', $1)
+     ON CONFLICT (job, week_of) DO NOTHING`,
+    [weekOfStr],
+  );
+  if (claimed === 0) {
+    return NextResponse.json({ sent: 0, skipped: 'already_ran', weekOf: weekOfStr });
+  }
 
   const themes = await query<{
     org_id: string;
@@ -55,19 +66,21 @@ export async function POST(req: Request) {
     const orgThemes = (byOrg[org.id] ?? []).slice(0, 3);
 
     const totalResponses = await queryCount(
-      `SELECT COUNT(*) FROM survey_responses WHERE org_id = $1 AND surveyed_at >= $2`,
-      [org.id, weekOf.toISOString()],
+      `SELECT COUNT(*) FROM survey_responses WHERE org_id = $1 AND surveyed_at >= $2 AND surveyed_at < $3`,
+      [org.id, startIso, endIso],
     );
 
     const mrrRows = await query<{ mrr_lost: number }>(
-      `SELECT mrr_lost FROM survey_responses WHERE org_id = $1 AND surveyed_at >= $2`,
-      [org.id, weekOf.toISOString()],
+      `SELECT mrr_lost FROM survey_responses WHERE org_id = $1 AND surveyed_at >= $2 AND surveyed_at < $3`,
+      [org.id, startIso, endIso],
     );
 
     const totalMrr = mrrRows.reduce((s, r) => s + (r.mrr_lost ?? 0), 0);
 
     const firstName = founderUser.name?.split(' ')[0] ?? 'there';
-    const dashboardUrl = `${process.env.NEXT_PUBLIC_APP_URL}/dashboard`;
+    const appBase = process.env.NEXT_PUBLIC_APP_URL ?? '';
+    const dashboardUrl = `${appBase}/dashboard`;
+    const settingsUrl = `${appBase}/settings`;
 
     const themeLines = orgThemes
       .map(
@@ -98,7 +111,7 @@ ChurnLens
 
 ---
 You're receiving this because you're on the Starter or Growth plan.
-Manage preferences: ${dashboardUrl}/settings`;
+Manage preferences: ${settingsUrl}`;
 
     await resend.emails.send({
       from: FROM_EMAIL,
@@ -112,3 +125,7 @@ Manage preferences: ${dashboardUrl}/settings`;
 
   return NextResponse.json({ sent });
 }
+
+// Vercel Cron issues GET requests; alias to the same handler. Safe to expose as
+// GET because it is CRON_SECRET-gated and idempotent (cron_runs guard).
+export const GET = POST;

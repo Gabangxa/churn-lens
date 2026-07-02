@@ -4,9 +4,19 @@ import Stripe from 'stripe';
 import { query, queryOne } from '@/lib/db';
 import { encryptApiKey } from '@/lib/crypto';
 import { setOrgCookie, requireOrgId } from '@/lib/auth';
+import { checkRateLimit, clientIp } from '@/lib/ratelimit';
 
 export async function POST(req: NextRequest) {
   try {
+    // Throttle org creation / Stripe webhook registration per IP.
+    const rl = checkRateLimit(`onboard:${clientIp(req)}`, 8, 600_000);
+    if (!rl.allowed) {
+      return NextResponse.json(
+        { error: 'Too many attempts. Please wait a minute and try again.' },
+        { status: 429, headers: { 'retry-after': String(rl.retryAfterSec) } },
+      );
+    }
+
     const body = await req.json();
     const { apiKey, email } = body;
 
