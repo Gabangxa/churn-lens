@@ -86,6 +86,9 @@ export default function LandingPage() {
             <a href="#pricing" className="text-sm text-muted hover:text-zinc-100 transition-colors">
               Pricing
             </a>
+            <Link href="/login" className="text-sm text-muted hover:text-zinc-100 transition-colors">
+              Log in
+            </Link>
             <Link
               href="/onboarding"
               className="rounded-lg bg-brand-500 px-4 py-2 text-sm font-medium text-white hover:bg-brand-600 transition-colors"

@@ -1,4 +1,11 @@
-import { randomBytes, createCipheriv, createDecipheriv, createHmac, timingSafeEqual } from 'crypto';
+import {
+  randomBytes,
+  createCipheriv,
+  createDecipheriv,
+  createHmac,
+  createHash,
+  timingSafeEqual,
+} from 'crypto';
 
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12;
@@ -58,6 +65,22 @@ export function verifySurveyToken(token: string): SurveyTokenPayload | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Generate a magic-link login token. Returns the raw token (goes in the emailed
+ * link) and its SHA-256 hash (the only form stored in the DB, so a database leak
+ * yields no usable links). The raw token is 32 random bytes = 256 bits, so it is
+ * not feasibly guessable and lookup-by-hash needs no constant-time compare.
+ */
+export function generateLoginToken(): { token: string; tokenHash: string } {
+  const token = randomBytes(32).toString('base64url');
+  return { token, tokenHash: hashLoginToken(token) };
+}
+
+/** SHA-256 hex of a login token, for verify-time lookup. */
+export function hashLoginToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
 }
 
 export function decryptApiKey(ciphertext: string): string {
