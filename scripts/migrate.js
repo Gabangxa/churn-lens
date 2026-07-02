@@ -123,6 +123,22 @@ async function migrate() {
     );
   `);
 
+  // Passwordless magic-link login. We store only the SHA-256 hash of the token
+  // (the raw token lives only in the emailed link), single-use via used_at, with
+  // a short expiry. See src/app/api/auth/{request,verify}.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS login_tokens (
+      token_hash text PRIMARY KEY,
+      org_id uuid NOT NULL REFERENCES organizations ON DELETE CASCADE,
+      email text NOT NULL,
+      expires_at timestamptz NOT NULL,
+      used_at timestamptz,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+
+    CREATE INDEX IF NOT EXISTS login_tokens_email ON login_tokens (email);
+  `);
+
   console.log('Database migration complete');
   await pool.end();
 }

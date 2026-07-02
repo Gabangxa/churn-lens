@@ -1,5 +1,12 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { encryptApiKey, decryptApiKey, signSurveyToken, verifySurveyToken } from '../crypto';
+import {
+  encryptApiKey,
+  decryptApiKey,
+  signSurveyToken,
+  verifySurveyToken,
+  generateLoginToken,
+  hashLoginToken,
+} from '../crypto';
 
 // 32-byte key expressed as 64 hex chars — used only in tests.
 const TEST_KEY = 'a'.repeat(64);
@@ -82,5 +89,26 @@ describe('signSurveyToken / verifySurveyToken', () => {
     // verifySurveyToken only checks integrity, not expiry — the route handler checks exp.
     expect(result).not.toBeNull();
     expect(result!.exp).toBeLessThan(Date.now());
+  });
+});
+
+// ─── generateLoginToken / hashLoginToken ─────────────────────────────────────
+
+describe('generateLoginToken / hashLoginToken', () => {
+  it('hash matches the token it was generated from', () => {
+    const { token, tokenHash } = generateLoginToken();
+    expect(hashLoginToken(token)).toBe(tokenHash);
+  });
+
+  it('is a stable 64-char hex sha256', () => {
+    const { tokenHash } = generateLoginToken();
+    expect(tokenHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('produces a unique token on each call', () => {
+    const a = generateLoginToken();
+    const b = generateLoginToken();
+    expect(a.token).not.toBe(b.token);
+    expect(a.tokenHash).not.toBe(b.tokenHash);
   });
 });
