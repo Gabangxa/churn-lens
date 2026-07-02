@@ -151,7 +151,14 @@ export default function OnboardingPage() {
         </div>
       </div>
 
-      <p className="mt-6 text-xs text-muted">
+      <p className="mt-6 text-sm text-muted">
+        Already connected?{' '}
+        <Link href="/login" className="text-brand-400 hover:underline">
+          Log in
+        </Link>
+      </p>
+
+      <p className="mt-3 text-xs text-muted">
         Questions?{' '}
         <a href="mailto:hello@churnlens.com" className="text-brand-400 hover:underline">
           hello@churnlens.com
