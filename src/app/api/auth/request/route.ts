@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryOne, execute } from '@/lib/db';
 import { generateLoginToken } from '@/lib/crypto';
-import { resend, FROM_EMAIL } from '@/lib/resend';
+import { getResend, FROM_EMAIL } from '@/lib/resend';
 import { checkRateLimit, clientIp } from '@/lib/ratelimit';
 
 const TOKEN_TTL_MS = 15 * 60 * 1000;
@@ -62,7 +62,7 @@ export async function POST(req: NextRequest) {
     const loginUrl = `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/verify?token=${token}`;
 
     try {
-      await resend.emails.send({
+      await getResend().emails.send({
         from: FROM_EMAIL,
         to: normEmail,
         subject: 'Your ChurnLens login link',

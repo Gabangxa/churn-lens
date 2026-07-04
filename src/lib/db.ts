@@ -1,17 +1,11 @@
 import { Pool } from 'pg';
 
-if (!process.env.DATABASE_URL) {
-  throw new Error('DATABASE_URL is not set. Add it to Replit Secrets.');
-}
-
-const dbUrl = process.env.DATABASE_URL ?? '';
-const isLocalDb = dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1');
-
 // TLS: verify the server certificate when a CA is provided (DATABASE_CA_CERT).
 // Without it we fall back to an unverified connection — a MITM risk — so we warn
 // loudly rather than doing it silently. Managed Postgres (Supabase/Replit/RDS)
 // publishes a CA bundle; set DATABASE_CA_CERT to its PEM contents in prod.
-function sslConfig(): false | { ca: string; rejectUnauthorized: true } | { rejectUnauthorized: false } {
+function sslConfig(dbUrl: string): false | { ca: string; rejectUnauthorized: true } | { rejectUnauthorized: false } {
+  const isLocalDb = dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1');
   if (isLocalDb) return false;
   if (process.env.DATABASE_SSL === 'disable') return false;
 
@@ -28,22 +22,33 @@ function sslConfig(): false | { ca: string; rejectUnauthorized: true } | { rejec
   return { rejectUnauthorized: false };
 }
 
-const pool = new Pool({
-  connectionString: dbUrl || undefined,
-  ssl: sslConfig(),
-});
+// Lazy singleton. The pool (and the DATABASE_URL requirement) is created on the
+// first query, not at import time. Next.js imports server route modules during
+// the build's "Collecting page data" step, so a module-scope throw or connect
+// here would fail the build before the runtime secret is available.
+let pool: Pool | null = null;
 
-pool.on('error', (err) => {
-  console.error('Unexpected PostgreSQL pool error:', err);
-});
-
-export { pool };
+function getPool(): Pool {
+  if (pool) return pool;
+  const dbUrl = process.env.DATABASE_URL;
+  if (!dbUrl) {
+    throw new Error('DATABASE_URL is not set.');
+  }
+  pool = new Pool({
+    connectionString: dbUrl,
+    ssl: sslConfig(dbUrl),
+  });
+  pool.on('error', (err) => {
+    console.error('Unexpected PostgreSQL pool error:', err);
+  });
+  return pool;
+}
 
 export async function query<T = Record<string, unknown>>(
   text: string,
   params?: unknown[],
 ): Promise<T[]> {
-  const result = await pool.query(text, params);
+  const result = await getPool().query(text, params);
   return result.rows as T[];
 }
 
@@ -51,7 +56,7 @@ export async function execute(
   text: string,
   params?: unknown[],
 ): Promise<number> {
-  const result = await pool.query(text, params);
+  const result = await getPool().query(text, params);
   return result.rowCount ?? 0;
 }
 
@@ -67,7 +72,7 @@ export async function queryCount(
   text: string,
   params?: unknown[],
 ): Promise<number> {
-  const result = await pool.query(text, params);
+  const result = await getPool().query(text, params);
   return parseInt(result.rows[0]?.count ?? '0', 10);
 }
 
