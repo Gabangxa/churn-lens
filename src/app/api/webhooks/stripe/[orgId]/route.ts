@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import Stripe from 'stripe';
 import { queryOne, queryCount, execute } from '@/lib/db';
 import { decryptApiKey, signSurveyToken } from '@/lib/crypto';
-import { resend, FROM_EMAIL } from '@/lib/resend';
+import { getResend, FROM_EMAIL } from '@/lib/resend';
 
 export async function POST(
   req: NextRequest,
@@ -125,7 +125,7 @@ export async function POST(
     return NextResponse.json({ received: true, skipped: 'duplicate_event' });
   }
 
-  await resend.emails.send({
+  await getResend().emails.send({
     from: FROM_EMAIL,
     to: customerEmail,
     subject: 'Quick question before you go',
