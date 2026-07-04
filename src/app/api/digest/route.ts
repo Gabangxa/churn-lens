@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { query, queryOne, queryCount, execute } from '@/lib/db';
-import { resend, FROM_EMAIL } from '@/lib/resend';
+import { getResend, FROM_EMAIL } from '@/lib/resend';
 import { verifyCronSecret } from '@/lib/auth';
 import { reportingWeek } from '@/lib/week';
 
@@ -113,7 +113,7 @@ ChurnLens
 You're receiving this because you're on the Starter or Growth plan.
 Manage preferences: ${settingsUrl}`;
 
-    await resend.emails.send({
+    await getResend().emails.send({
       from: FROM_EMAIL,
       to: founderUser.email,
       subject: `ChurnLens weekly: ${orgThemes[0]?.label ?? 'churn themes'} + ${totalResponses ?? 0} cancellations`,
