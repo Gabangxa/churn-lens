@@ -13,6 +13,13 @@ const isLocalDb = dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1');
 // publishes a CA bundle; set DATABASE_CA_CERT to its PEM contents in prod.
 function sslConfig(): false | { ca: string; rejectUnauthorized: true } | { rejectUnauthorized: false } {
   if (isLocalDb) return false;
+  if (process.env.DATABASE_SSL === 'disable') return false;
+
+  // Railway's private network is isolated and its internal Postgres listener may
+  // not offer TLS, so default to no SSL there. Override with DATABASE_SSL=require.
+  const isRailwayInternal = /\.railway\.internal\b/.test(dbUrl);
+  if (isRailwayInternal && process.env.DATABASE_SSL !== 'require') return false;
+
   const ca = process.env.DATABASE_CA_CERT;
   if (ca) return { ca, rejectUnauthorized: true };
   console.warn(

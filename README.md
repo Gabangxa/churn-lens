@@ -28,11 +28,12 @@ ChurnLens fills the gap: exit interviews + AI theme synthesis at indie-founder p
 |-------|------|
 | Frontend | Next.js 14 (App Router) + Tailwind CSS |
 | Backend / API routes | Next.js Route Handlers |
-| Database | Supabase (Postgres + RLS + Auth) |
+| Database | PostgreSQL (`pg`), schema in `scripts/migrate.js` |
 | Email | Resend |
 | AI | OpenAI GPT-4o-mini |
 | Payments | Stripe Billing |
-| Hosting | Vercel (frontend + cron) |
+| Auth | Passwordless magic-link (email) |
+| Hosting | Railway (persistent Node service + Postgres) |
 
 ---
 
@@ -88,6 +89,37 @@ npx email dev
 ```bash
 stripe listen --forward-to localhost:3000/api/webhooks/stripe
 ```
+
+---
+
+## Deploy to Railway
+
+Config-as-code lives in `railway.json` (Railpack build, DB migration as the pre-deploy
+command, `/api/health` healthcheck). The weekly cron jobs run in-process via
+`src/instrumentation.ts` — no separate scheduler service needed.
+
+1. **New Project → Deploy from GitHub repo** → select this repo.
+2. **Add → Database → PostgreSQL.**
+3. On the web service, set **Variables** (Raw Editor):
+
+   ```bash
+   DATABASE_URL=${{ Postgres.DATABASE_URL }}
+   NEXT_PUBLIC_APP_URL=https://${{ RAILWAY_PUBLIC_DOMAIN }}
+   ENCRYPTION_KEY=<64-hex>   # node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+   CRON_SECRET=<random>
+   STRIPE_SECRET_KEY=sk_live_...
+   STRIPE_WEBHOOK_SECRET=whsec_...
+   RESEND_API_KEY=re_...
+   RESEND_FROM_EMAIL=digest@churnlens.com
+   OPENAI_API_KEY=sk-...
+   ```
+
+   All variables in `src/lib/env.ts` are required — the server refuses to boot without them.
+4. **Settings → Networking → Generate Domain** (populates `RAILWAY_PUBLIC_DOMAIN`), then deploy.
+   The pre-deploy step runs `scripts/migrate.js`; the healthcheck waits on `/api/health`.
+
+DB TLS is handled automatically: no SSL over Railway's `*.railway.internal` private network
+(override with `DATABASE_SSL=require`), verified TLS elsewhere when `DATABASE_CA_CERT` is set.
 
 ---
 
