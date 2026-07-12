@@ -3,6 +3,7 @@ import Stripe from 'stripe';
 import { queryOne, queryCount, execute } from '@/lib/db';
 import { decryptApiKey, signSurveyToken } from '@/lib/crypto';
 import { sendSurveyEmail } from '@/lib/survey-email';
+import { loadSurveyConfig } from '@/lib/survey-config';
 
 // Stripe Customer Portal cancellation reasons → our survey categories.
 // When the portal already asked, we record the answer directly and skip the
@@ -177,11 +178,14 @@ export async function POST(
     return NextResponse.json({ received: true, skipped: 'duplicate_event' });
   }
 
+  const config = await loadSurveyConfig(org.id);
+
   await sendSurveyEmail({
     to: customerEmail,
     customerName: customer.name ?? null,
     surveyUrl,
     optOutUrl,
+    displayName: config.displayName,
   });
 
   return NextResponse.json({ received: true });

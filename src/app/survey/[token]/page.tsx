@@ -3,30 +3,22 @@
  *
  * [token] is an HMAC-signed payload encoding:
  *   { orgId, customerId, subscriptionId, exp }
+ * Config (display name / logo / extra reasons) is never encoded in the
+ * token — it's loaded from the DB by payload.orgId at render time (CL-1).
  *
  * WCAG AA minimum: labels explicitly associated with inputs,
  * sufficient color contrast, focus indicators, no color-only cues.
  */
 
 import { verifySurveyToken } from '@/lib/crypto';
-
-const CANCELLATION_REASONS = [
-  'Too expensive for my budget',
-  'Missing a feature I need',
-  'Switched to a competitor',
-  'Stopped needing this type of tool',
-  'Product was too difficult to use',
-  'Had a bad support experience',
-  'Just trying things out — not ready to commit',
-  'Other',
-];
+import { BUILTIN_CANCELLATION_REASONS, loadSurveyConfig } from '@/lib/survey-config';
 
 export default async function SurveyPage({ params }: { params: { token: string } }) {
   const payload = verifySurveyToken(params.token);
   const expired = !payload || Date.now() > payload.exp;
   const isPreview = payload?.kind === 'preview';
 
-  if (expired) {
+  if (expired || !payload) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center px-6 py-16 text-center">
         <div className="w-full max-w-sm">
@@ -43,6 +35,13 @@ export default async function SurveyPage({ params }: { params: { token: string }
       </div>
     );
   }
+
+  const config = await loadSurveyConfig(payload.orgId);
+  const builtinReasons = BUILTIN_CANCELLATION_REASONS.filter((reason) => reason !== 'Other');
+  // Built-ins → custom reasons → 'Other' last (Resolved decisions #2). Zero-config
+  // orgs have no custom reasons, so this is byte-identical to the original 8.
+  const reasons = [...builtinReasons, ...config.customReasons, 'Other'];
+  const founderCopy = config.displayName ? `the ${config.displayName} team` : 'the founder';
 
   return (
     <div className="flex flex-1 flex-col items-center justify-center px-4 md:px-6 py-12">
@@ -63,6 +62,14 @@ export default async function SurveyPage({ params }: { params: { token: string }
         <div className="bg-white dark:bg-[#121214] rounded-[2.5rem] shadow-2xl shadow-zinc-200/50 dark:shadow-black/50 border border-zinc-100 dark:border-zinc-800 p-8 md:p-14 transition-colors duration-500">
           {/* Header */}
           <div className="mb-10 text-center">
+            {config.logoUrl && (
+              // eslint-disable-next-line @next/next/no-img-element -- external, org-supplied URL; no server-side fetch/reachability check (see spec edge cases).
+              <img
+                src={config.logoUrl}
+                alt={config.displayName ? `${config.displayName} logo` : 'Company logo'}
+                className="mx-auto mb-6 h-12 w-auto max-w-[200px] object-contain"
+              />
+            )}
             <div className="mx-auto mb-8 flex h-20 w-20 items-center justify-center rounded-full bg-pink-500 dark:bg-pink-500/20 text-white dark:text-pink-400 shadow-lg shadow-pink-500/30 dark:shadow-none transform -rotate-12 transition-colors duration-500">
               <svg className="h-10 w-10" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
                 <circle cx="12" cy="12" r="10" />
@@ -75,8 +82,7 @@ export default async function SurveyPage({ params }: { params: { token: string }
               Sorry to see you go
             </h1>
             <p className="mx-auto mt-4 max-w-lg text-base md:text-lg font-medium text-muted leading-relaxed">
-              Two minutes, three questions. Your answer goes straight to the
-              founder — not a support queue. It helps them build a better product.
+              Two minutes, three questions. Your answer goes straight to {founderCopy} — not a support queue. It helps them build a better product.
             </p>
           </div>
 
@@ -90,7 +96,7 @@ export default async function SurveyPage({ params }: { params: { token: string }
                 <span className="text-pink-500 dark:text-pink-400">*</span>
               </legend>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {CANCELLATION_REASONS.map((reason) => (
+                {reasons.map((reason) => (
                   <label
                     key={reason}
                     className="flex cursor-pointer items-center gap-3 rounded-full border-2 border-zinc-200 dark:border-zinc-700 px-5 py-3.5 text-sm font-bold tracking-wide text-zinc-600 dark:text-zinc-300 transition-all duration-200 hover:border-zinc-300 dark:hover:border-zinc-500 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 has-[:checked]:border-blue-500 has-[:checked]:bg-blue-500 has-[:checked]:text-white has-[:checked]:shadow-[4px_4px_0px_0px_rgba(29,78,216,1)] has-[:checked]:translate-x-[-2px] has-[:checked]:translate-y-[-2px]"

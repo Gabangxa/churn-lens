@@ -10,8 +10,17 @@ export async function sendSurveyEmail(opts: {
   surveyUrl: string;
   optOutUrl: string;
   isTest?: boolean;
+  /**
+   * Org's configured product/company display name (CL-1). When set, replaces
+   * the generic "the founder" / "The team" copy. When unset (undefined or
+   * null — the zero-config default), the email is byte-identical to before
+   * this feature existed.
+   */
+  displayName?: string | null;
 }): Promise<void> {
-  const { to, customerName, surveyUrl, optOutUrl, isTest } = opts;
+  const { to, customerName, surveyUrl, optOutUrl, isTest, displayName } = opts;
+  const founderCopy = displayName ? `the ${displayName} team` : 'the founder';
+  const signOff = displayName ? `The ${displayName} team` : 'The team';
 
   await getResend().emails.send({
     from: FROM_EMAIL,
@@ -25,10 +34,10 @@ One quick question: what was the main reason?
 
 → ${surveyUrl}
 
-It takes two minutes and goes directly to the founder (not a support queue). Your answer genuinely shapes what gets built next.
+It takes two minutes and goes directly to ${founderCopy} (not a support queue). Your answer genuinely shapes what gets built next.
 
 Thanks,
-The team
+${signOff}
 
 ---
 You received this because you had an active subscription. Unsubscribe from exit surveys: ${optOutUrl}
