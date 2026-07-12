@@ -37,7 +37,7 @@ export async function POST(req: Request) {
   for (const org of orgs) {
     const responses = await query<{ reason_category: string; open_text: string | null }>(
       `SELECT reason_category, open_text FROM survey_responses
-       WHERE org_id = $1 AND surveyed_at >= $2 AND surveyed_at < $3`,
+       WHERE org_id = $1 AND surveyed_at >= $2 AND surveyed_at < $3 AND NOT is_test`,
       [org.id, startIso, endIso],
     );
 
@@ -59,7 +59,7 @@ export async function POST(req: Request) {
 
     const mrrRows = await query<{ mrr_lost: number }>(
       `SELECT mrr_lost FROM survey_responses
-       WHERE org_id = $1 AND surveyed_at >= $2 AND surveyed_at < $3`,
+       WHERE org_id = $1 AND surveyed_at >= $2 AND surveyed_at < $3 AND NOT is_test`,
       [org.id, startIso, endIso],
     );
 
@@ -81,7 +81,7 @@ export async function POST(req: Request) {
     // Match on a normalized form since GPT frequently trims/pads verbatim quotes.
     const responseRows = await query<{ id: string; open_text: string | null }>(
       `SELECT id, open_text FROM survey_responses
-       WHERE org_id = $1 AND surveyed_at >= $2 AND surveyed_at < $3 AND open_text IS NOT NULL`,
+       WHERE org_id = $1 AND surveyed_at >= $2 AND surveyed_at < $3 AND NOT is_test AND open_text IS NOT NULL`,
       [org.id, startIso, endIso],
     );
 

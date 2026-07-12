@@ -9,6 +9,8 @@ export default function SettingsPage() {
   const [connected, setConnected] = useState<boolean | null>(null);
   const [disconnecting, setDisconnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sendingTest, setSendingTest] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   useEffect(() => {
     async function fetchStatus() {
@@ -58,6 +60,28 @@ export default function SettingsPage() {
       setError('Network error. Please try again.');
     } finally {
       setDisconnecting(false);
+    }
+  }
+
+  async function handleSendTest() {
+    setTestResult(null);
+    setSendingTest(true);
+    try {
+      const res = await fetch('/api/survey/test', { method: 'POST' });
+      if (res.status === 401) {
+        router.push('/onboarding');
+        return;
+      }
+      const data = await res.json();
+      if (!res.ok) {
+        setTestResult({ ok: false, message: data.error || 'Failed to send test survey.' });
+        return;
+      }
+      setTestResult({ ok: true, message: `Test survey sent to ${data.sentTo}. Check your inbox.` });
+    } catch {
+      setTestResult({ ok: false, message: 'Network error. Please try again.' });
+    } finally {
+      setSendingTest(false);
     }
   }
 
@@ -132,6 +156,44 @@ export default function SettingsPage() {
                 Connect Stripe
               </Link>
             </div>
+          )}
+        </div>
+
+        <div className="card mt-6">
+          <h2 className="mb-1 text-lg font-semibold text-zinc-100">Exit Survey</h2>
+          <p className="mb-6 text-sm text-muted">
+            The survey your churned customers receive. Preview it, or send yourself a test to see
+            the full email-to-dashboard loop.
+          </p>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <a
+              href="/api/survey/preview"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="rounded-lg border border-surface-600 px-5 py-2.5 text-sm font-semibold text-zinc-200 hover:bg-surface-700 transition-colors"
+            >
+              Preview survey
+            </a>
+            <button
+              onClick={handleSendTest}
+              disabled={sendingTest}
+              className="rounded-lg bg-brand-500 px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {sendingTest ? 'Sending…' : 'Send me a test survey'}
+            </button>
+          </div>
+
+          {testResult && (
+            <p
+              className={`mt-4 rounded-lg border px-4 py-2.5 text-sm ${
+                testResult.ok
+                  ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
+                  : 'bg-red-500/10 border-red-500/20 text-red-400'
+              }`}
+            >
+              {testResult.message}
+            </p>
           )}
         </div>
       </main>

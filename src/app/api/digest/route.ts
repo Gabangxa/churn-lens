@@ -66,12 +66,12 @@ export async function POST(req: Request) {
     const orgThemes = (byOrg[org.id] ?? []).slice(0, 3);
 
     const totalResponses = await queryCount(
-      `SELECT COUNT(*) FROM survey_responses WHERE org_id = $1 AND surveyed_at >= $2 AND surveyed_at < $3`,
+      `SELECT COUNT(*) FROM survey_responses WHERE org_id = $1 AND surveyed_at >= $2 AND surveyed_at < $3 AND NOT is_test`,
       [org.id, startIso, endIso],
     );
 
     const mrrRows = await query<{ mrr_lost: number }>(
-      `SELECT mrr_lost FROM survey_responses WHERE org_id = $1 AND surveyed_at >= $2 AND surveyed_at < $3`,
+      `SELECT mrr_lost FROM survey_responses WHERE org_id = $1 AND surveyed_at >= $2 AND surveyed_at < $3 AND NOT is_test`,
       [org.id, startIso, endIso],
     );
 

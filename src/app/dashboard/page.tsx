@@ -51,14 +51,14 @@ async function getDashboardData(orgId: string) {
     [orgId],
   );
 
-  // Stats
+  // Stats — test surveys are shown in the table but never counted here.
   const stats = await queryOne<{ total_sent: string; responded: string; mrr_lost: string }>(
     `SELECT
        COUNT(*) AS total_sent,
        COUNT(*) FILTER (WHERE surveyed_at IS NOT NULL) AS responded,
        COALESCE(SUM(mrr_lost) FILTER (WHERE surveyed_at IS NOT NULL), 0) AS mrr_lost
      FROM survey_responses
-     WHERE org_id = $1`,
+     WHERE org_id = $1 AND NOT is_test`,
     [orgId],
   );
 
@@ -83,7 +83,9 @@ export default async function DashboardPage() {
   const { themes, responses, latestWeek, totalSent, responded, mrrLost, responseRate, weekMrr, pending } =
     await getDashboardData(orgId);
 
-  const hasAnyData = totalSent > 0;
+  // Test responses don't count toward stats but must still surface the table,
+  // otherwise a founder's test survey would land in an invisible dashboard.
+  const hasAnyData = totalSent > 0 || responses.length > 0;
   const hasThemes = themes.length > 0;
 
   // Build a label → colour map from the current week's themes
@@ -233,6 +235,11 @@ export default async function DashboardPage() {
                         <tr key={r.id} className="hover:bg-surface-700/40 transition-colors">
                           <td className="px-6 py-4 text-zinc-300">
                             {r.customer_name ?? 'Anonymous'}
+                            {r.is_test && (
+                              <span className="ml-2 rounded-full border border-amber-500/30 bg-amber-500/15 px-2 py-0.5 text-xs text-amber-300">
+                                Test
+                              </span>
+                            )}
                             <br />
                             <span className="text-xs text-muted">{maskEmail(r.customer_email)}</span>
                           </td>
