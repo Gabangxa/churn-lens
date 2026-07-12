@@ -3,6 +3,8 @@
 import Link from 'next/link';
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import Wordmark from '@/components/Wordmark';
+import ThemeToggle from '@/components/ThemeToggle';
 
 export default function SettingsPage() {
   const router = useRouter();
@@ -86,48 +88,56 @@ export default function SettingsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-surface-900">
-      <nav className="sticky top-0 z-40 border-b border-surface-700 bg-surface-900/90 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
-          <Link href="/dashboard" className="text-lg font-semibold tracking-tight">
-            Churn<span className="text-brand-400">Lens</span>
+    <div className="flex flex-col min-h-full">
+      {/* Nav */}
+      <header className="sticky top-0 z-40 bg-white/90 dark:bg-[#09090b]/90 backdrop-blur transition-colors duration-500">
+        <div className="flex items-center justify-between px-8 md:px-12 py-6">
+          <Link href="/dashboard">
+            <Wordmark />
           </Link>
-          <div className="flex items-center gap-4 text-sm text-muted">
-            <Link href="/dashboard" className="hover:text-zinc-100 transition-colors">
+          <nav className="hidden md:flex items-center space-x-10">
+            <Link
+              href="/dashboard"
+              className="font-bold text-sm tracking-wide text-zinc-400 dark:text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-300 transition-colors"
+            >
               Dashboard
             </Link>
-            <span className="h-4 w-px bg-surface-600" />
-            <span className="text-zinc-100 font-medium">Settings</span>
-          </div>
+            <span className="font-bold text-sm tracking-wide text-zinc-900 dark:text-white">Settings</span>
+          </nav>
+          <ThemeToggle />
         </div>
-      </nav>
+      </header>
 
-      <main className="mx-auto max-w-2xl px-6 py-12">
-        <h1 className="mb-8 text-2xl font-bold text-zinc-50">Settings</h1>
+      <main className="mx-auto w-full max-w-2xl px-8 py-8 pb-16">
+        <h1 className="mb-10 text-5xl font-extrabold font-display tracking-tight text-zinc-900 dark:text-white transition-colors duration-500">
+          Settings
+        </h1>
 
         <div className="card">
-          <h2 className="mb-1 text-lg font-semibold text-zinc-100">Stripe Connection</h2>
-          <p className="mb-6 text-sm text-muted">
+          <h2 className="mb-1 text-2xl font-bold font-display text-zinc-900 dark:text-white transition-colors duration-500">
+            Stripe Connection
+          </h2>
+          <p className="mb-6 text-sm font-medium text-muted">
             Manage your Stripe integration. ChurnLens uses your restricted API key to listen for cancellation events.
           </p>
 
           {connected === null ? (
-            <div className="flex items-center gap-2 text-sm text-muted">
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-surface-600 border-t-brand-400" />
+            <div className="flex items-center gap-2 text-sm font-medium text-muted">
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-200 dark:border-zinc-700 border-t-pink-500" />
               Loading…
             </div>
           ) : connected ? (
             <div className="space-y-4">
               <div className="flex items-center gap-2">
-                <span className="h-2.5 w-2.5 rounded-full bg-emerald-500" />
-                <span className="text-sm font-medium text-emerald-400">Connected</span>
+                <span className="h-2.5 w-2.5 rounded-full bg-teal-400" />
+                <span className="text-sm font-bold text-teal-600 dark:text-teal-300">Connected</span>
               </div>
-              <p className="text-sm text-muted">
+              <p className="text-sm font-medium text-muted">
                 Your Stripe restricted API key is stored and encrypted with AES-256-GCM.
               </p>
 
               {error && (
-                <p className="rounded-lg bg-red-500/10 border border-red-500/20 px-4 py-2.5 text-sm text-red-400">
+                <p className="rounded-2xl border-2 border-pink-500/40 bg-pink-500/10 px-4 py-2.5 text-sm font-bold text-pink-600 dark:text-pink-400">
                   {error}
                 </p>
               )}
@@ -135,7 +145,7 @@ export default function SettingsPage() {
               <button
                 onClick={handleDisconnect}
                 disabled={disconnecting}
-                className="rounded-lg border border-red-500/30 bg-red-500/10 px-5 py-2.5 text-sm font-semibold text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="rounded-full border-2 border-pink-500 px-6 py-2.5 text-xs font-extrabold uppercase tracking-widest text-pink-500 dark:text-pink-400 hover:bg-pink-500 hover:text-white dark:hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {disconnecting ? 'Disconnecting…' : 'Disconnect Stripe'}
               </button>
@@ -143,15 +153,15 @@ export default function SettingsPage() {
           ) : (
             <div className="space-y-4">
               <div className="flex items-center gap-2">
-                <span className="h-2.5 w-2.5 rounded-full bg-zinc-500" />
-                <span className="text-sm font-medium text-zinc-400">Not connected</span>
+                <span className="h-2.5 w-2.5 rounded-full bg-zinc-400 dark:bg-zinc-500" />
+                <span className="text-sm font-bold text-zinc-500 dark:text-zinc-400">Not connected</span>
               </div>
-              <p className="text-sm text-muted">
+              <p className="text-sm font-medium text-muted">
                 Connect your Stripe account to start receiving churn insights.
               </p>
               <Link
                 href="/onboarding"
-                className="inline-block rounded-lg bg-brand-500 px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-600 transition-colors"
+                className="inline-block rounded-full bg-teal-400 px-6 py-3 text-xs font-extrabold uppercase tracking-widest text-white dark:text-zinc-950 shadow-[4px_4px_0px_0px_rgba(15,118,110,1)] dark:shadow-[4px_4px_0px_0px_#5eead4] hover:shadow-none hover:translate-x-[4px] hover:translate-y-[4px] hover:bg-teal-500 dark:hover:bg-teal-400/80 transition-all"
               >
                 Connect Stripe
               </Link>
@@ -160,8 +170,10 @@ export default function SettingsPage() {
         </div>
 
         <div className="card mt-6">
-          <h2 className="mb-1 text-lg font-semibold text-zinc-100">Exit Survey</h2>
-          <p className="mb-6 text-sm text-muted">
+          <h2 className="mb-1 text-2xl font-bold font-display text-zinc-900 dark:text-white transition-colors duration-500">
+            Exit Survey
+          </h2>
+          <p className="mb-6 text-sm font-medium text-muted">
             The survey your churned customers receive. Preview it, or send yourself a test to see
             the full email-to-dashboard loop.
           </p>
@@ -171,14 +183,14 @@ export default function SettingsPage() {
               href="/api/survey/preview"
               target="_blank"
               rel="noopener noreferrer"
-              className="rounded-lg border border-surface-600 px-5 py-2.5 text-sm font-semibold text-zinc-200 hover:bg-surface-700 transition-colors"
+              className="rounded-full border-2 border-zinc-200 dark:border-zinc-700 px-6 py-3 text-xs font-extrabold uppercase tracking-widest text-zinc-600 dark:text-zinc-300 hover:border-zinc-900 dark:hover:border-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
             >
               Preview survey
             </a>
             <button
               onClick={handleSendTest}
               disabled={sendingTest}
-              className="rounded-lg bg-brand-500 px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="rounded-full bg-pink-500 px-6 py-3 text-xs font-extrabold uppercase tracking-widest text-white shadow-[4px_4px_0px_0px_rgba(159,18,57,1)] dark:shadow-[4px_4px_0px_0px_#f472b6] hover:shadow-none hover:translate-x-[4px] hover:translate-y-[4px] hover:bg-pink-600 dark:hover:bg-pink-500/80 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none disabled:translate-x-0 disabled:translate-y-0"
             >
               {sendingTest ? 'Sending…' : 'Send me a test survey'}
             </button>
@@ -186,10 +198,10 @@ export default function SettingsPage() {
 
           {testResult && (
             <p
-              className={`mt-4 rounded-lg border px-4 py-2.5 text-sm ${
+              className={`mt-4 rounded-2xl border-2 px-4 py-2.5 text-sm font-bold ${
                 testResult.ok
-                  ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
-                  : 'bg-red-500/10 border-red-500/20 text-red-400'
+                  ? 'border-teal-400/60 bg-teal-400/10 text-teal-600 dark:text-teal-300'
+                  : 'border-pink-500/40 bg-pink-500/10 text-pink-600 dark:text-pink-400'
               }`}
             >
               {testResult.message}
