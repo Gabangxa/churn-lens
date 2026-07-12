@@ -60,11 +60,15 @@ export async function POST(req: NextRequest) {
     }
 
     // Register ChurnLens webhook on the customer's Stripe account (only if not already done).
+    // Stripe rejects webhook URLs without an explicit https scheme, so fail fast here
+    // instead of surfacing a confusing Stripe error to the user.
     const appUrl = process.env.NEXT_PUBLIC_APP_URL;
-    if (!appUrl) {
-      console.error('NEXT_PUBLIC_APP_URL is not set — cannot register Stripe webhook.');
+    if (!appUrl || !appUrl.startsWith('https://')) {
+      console.error(
+        `NEXT_PUBLIC_APP_URL is ${appUrl ? `"${appUrl}" (must start with https://)` : 'not set'} — cannot register Stripe webhook.`,
+      );
       return NextResponse.json(
-        { error: 'Server misconfiguration: app URL is not set. Contact support.' },
+        { error: 'Server misconfiguration: app URL is missing or not https. Contact support.' },
         { status: 500 },
       );
     }
@@ -81,8 +85,16 @@ export async function POST(req: NextRequest) {
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Unknown error';
         console.error('Stripe webhook registration failed:', err);
+        // Only blame the key when Stripe actually reported an auth/permission
+        // problem — other failures (bad URL, network) are not the user's fault.
+        const isKeyProblem =
+          err instanceof Stripe.errors.StripeAuthenticationError ||
+          err instanceof Stripe.errors.StripePermissionError;
+        const hint = isKeyProblem
+          ? ' Check that your key is valid and has Webhook Endpoints write permission.'
+          : '';
         return NextResponse.json(
-          { error: `Failed to register Stripe webhook: ${message}. Check that your key has webhooks:write permission.` },
+          { error: `Failed to register Stripe webhook: ${message}.${hint}` },
           { status: 422 },
         );
       }
