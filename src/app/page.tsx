@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import Wordmark from '@/components/Wordmark';
-import ThemeToggle from '@/components/ThemeToggle';
+import SiteHeader from '@/components/SiteHeader';
 
 const FEATURES = [
   {
@@ -76,31 +76,7 @@ export default function LandingPage() {
   return (
     <div className="flex flex-col min-h-full">
       {/* Nav */}
-      <header className="sticky top-0 z-40 bg-white/90 dark:bg-[#09090b]/90 backdrop-blur transition-colors duration-500">
-        <div className="flex items-center justify-between px-8 md:px-12 py-6">
-          <Wordmark />
-          <nav className="hidden md:flex items-center space-x-10">
-            <a href="#features" className="font-bold text-sm tracking-wide text-zinc-400 dark:text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-300 transition-colors">
-              Features
-            </a>
-            <a href="#pricing" className="font-bold text-sm tracking-wide text-zinc-400 dark:text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-300 transition-colors">
-              Pricing
-            </a>
-            <Link href="/login" className="font-bold text-sm tracking-wide text-zinc-400 dark:text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-300 transition-colors">
-              Log in
-            </Link>
-          </nav>
-          <div className="flex items-center space-x-4">
-            <ThemeToggle />
-            <Link
-              href="/onboarding"
-              className="px-6 py-2.5 rounded-full border-2 border-zinc-900 dark:border-zinc-100 text-zinc-900 dark:text-zinc-100 text-xs font-bold uppercase tracking-widest shadow-[4px_4px_0px_0px_#18181b] dark:shadow-[4px_4px_0px_0px_#f4f4f5] hover:shadow-none hover:translate-x-[4px] hover:translate-y-[4px] hover:bg-zinc-900 hover:text-white dark:hover:bg-zinc-100 dark:hover:text-black transition-all active:scale-95"
-            >
-              Get started
-            </Link>
-          </div>
-        </div>
-      </header>
+      <SiteHeader />
 
       {/* Hero */}
       <section className="px-8 md:px-12 py-16 md:py-24">

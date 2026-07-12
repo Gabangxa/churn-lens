@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useState, useEffect, FormEvent } from 'react';
-import Wordmark from '@/components/Wordmark';
+import SiteHeader from '@/components/SiteHeader';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
@@ -47,11 +47,10 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="flex flex-1 flex-col items-center justify-center px-6 py-16">
-      <Link href="/" className="mb-10">
-        <Wordmark />
-      </Link>
+    <div className="flex flex-col min-h-full">
+      <SiteHeader active="login" />
 
+      <div className="flex flex-1 flex-col items-center justify-center px-6 py-16">
       <div className="w-full max-w-md bg-white dark:bg-[#121214] rounded-[2.5rem] shadow-2xl shadow-zinc-200/50 dark:shadow-black/50 border border-zinc-100 dark:border-zinc-800 p-10 transition-colors duration-500">
         {sent ? (
           <div className="text-center">
@@ -123,6 +122,7 @@ export default function LoginPage() {
             </p>
           </>
         )}
+      </div>
       </div>
     </div>
   );
