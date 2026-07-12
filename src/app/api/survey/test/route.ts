@@ -5,6 +5,7 @@ import { signSurveyToken } from '@/lib/crypto';
 import { requireOrgId } from '@/lib/auth';
 import { checkRateLimit } from '@/lib/ratelimit';
 import { sendSurveyEmail } from '@/lib/survey-email';
+import { loadSurveyConfig } from '@/lib/survey-config';
 
 /**
  * Send the founder a test exit survey at their own email — exercises the
@@ -62,12 +63,15 @@ export async function POST(req: NextRequest) {
       [orgId, owner.email, owner.name ?? 'Test customer', testSubscriptionId, token],
     );
 
+    const config = await loadSurveyConfig(orgId);
+
     await sendSurveyEmail({
       to: owner.email,
       customerName: owner.name,
       surveyUrl: `${appUrl}/survey/${token}`,
       optOutUrl: `${appUrl}/api/survey/opt-out?token=${token}`,
       isTest: true,
+      displayName: config.displayName,
     });
   } catch (err) {
     console.error('Test survey send failed:', err);

@@ -93,6 +93,14 @@ async function migrate() {
       ADD COLUMN IF NOT EXISTS stripe_webhook_secret_enc text;
   `);
 
+  // Light survey customization (CL-1): per-org display name / logo URL /
+  // extra cancellation reasons. Nullable, no default — NULL means zero-config
+  // (today's behavior). See src/lib/survey-config.ts for shape + validation.
+  await pool.query(`
+    ALTER TABLE organizations
+      ADD COLUMN IF NOT EXISTS survey_config jsonb;
+  `);
+
   // Test surveys (sent from Settings) are flagged so they never pollute stats,
   // themes, digests, or the free-tier cap.
   await pool.query(`
