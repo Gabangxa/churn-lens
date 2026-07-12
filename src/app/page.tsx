@@ -103,24 +103,24 @@ export default function LandingPage() {
       </header>
 
       {/* Hero */}
-      <section className="mx-auto max-w-4xl px-8 py-20 md:py-28 text-center">
+      <section className="px-8 md:px-12 py-16 md:py-24">
         <div className="inline-flex items-center gap-2 rounded-full border-2 border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#121214] px-5 py-2 text-sm font-bold text-zinc-600 dark:text-zinc-300 transition-colors duration-500">
           <span className="h-2 w-2 rounded-full bg-pink-500 animate-pulse" />
           Built for founders at $500–$10K MRR
         </div>
 
-        <h1 className="mt-8 text-5xl sm:text-6xl md:text-7xl font-extrabold font-display leading-[1.05] tracking-tight text-zinc-900 dark:text-white transition-colors duration-500">
+        <h1 className="mt-8 max-w-5xl text-5xl sm:text-6xl md:text-7xl lg:text-8xl font-extrabold font-display leading-[1.02] tracking-tight text-zinc-900 dark:text-white transition-colors duration-500">
           Find out why customers{' '}
           <span className="text-pink-500 dark:text-pink-400">really</span> cancel
         </h1>
 
-        <p className="mx-auto mt-8 max-w-2xl text-lg md:text-xl text-zinc-500 dark:text-zinc-400 font-medium leading-relaxed transition-colors duration-500">
+        <p className="mt-8 max-w-2xl text-lg md:text-xl text-zinc-500 dark:text-zinc-400 font-medium leading-relaxed transition-colors duration-500">
           ChurnLens sends an exit survey the moment a Stripe subscription
           cancels, then uses AI to surface patterns in plain English — weekly,
           straight to your inbox.
         </p>
 
-        <div className="mt-12 flex flex-col items-center gap-5 sm:flex-row sm:justify-center">
+        <div className="mt-12 flex flex-col items-start gap-5 sm:flex-row sm:items-center">
           <Link
             href="/onboarding"
             className="px-10 py-4 rounded-full bg-teal-400 text-white dark:text-zinc-950 font-extrabold uppercase tracking-widest text-sm shadow-[6px_6px_0px_0px_rgba(15,118,110,1)] dark:shadow-[6px_6px_0px_0px_#5eead4] hover:shadow-none hover:translate-x-[6px] hover:translate-y-[6px] hover:bg-teal-500 dark:hover:bg-teal-400/80 transition-all"
@@ -135,7 +135,7 @@ export default function LandingPage() {
           </a>
         </div>
 
-        <p className="mt-6 text-sm font-medium text-muted">
+        <p className="mt-6 max-w-2xl text-sm font-medium text-muted">
           No credit card required. First survey fires on next cancellation.
         </p>
       </section>
@@ -152,11 +152,11 @@ export default function LandingPage() {
       </div>
 
       {/* Features */}
-      <section id="features" className="mx-auto max-w-6xl w-full px-8 md:px-12 py-24">
-        <h2 className="text-center text-4xl font-bold font-display tracking-tight text-zinc-900 dark:text-white transition-colors duration-500">
+      <section id="features" className="w-full px-8 md:px-12 py-24">
+        <h2 className="text-4xl md:text-5xl font-bold font-display tracking-tight text-zinc-900 dark:text-white transition-colors duration-500">
           Everything you need. Nothing you don&apos;t.
         </h2>
-        <p className="mx-auto mt-4 max-w-xl text-center font-medium text-muted">
+        <p className="mt-4 max-w-xl font-medium text-muted">
           Raaft costs $79/mo. Churnkey starts at $250. We cost $29 and do
           everything a solo founder actually needs.
         </p>
@@ -185,7 +185,7 @@ export default function LandingPage() {
 
         {/* How it works */}
         <div className="mt-24">
-          <h2 className="text-center text-4xl font-bold font-display tracking-tight text-zinc-900 dark:text-white transition-colors duration-500">
+          <h2 className="text-4xl md:text-5xl font-bold font-display tracking-tight text-zinc-900 dark:text-white transition-colors duration-500">
             How it works
           </h2>
           <div className="mt-14 grid gap-8 sm:grid-cols-3">
@@ -225,16 +225,16 @@ export default function LandingPage() {
 
       {/* Pricing */}
       <section id="pricing" className="bg-[#f8f9fa] dark:bg-[#121214] py-24 transition-colors duration-500">
-        <div className="mx-auto max-w-6xl px-8 md:px-12">
-          <h2 className="text-center text-4xl font-bold font-display tracking-tight text-zinc-900 dark:text-white transition-colors duration-500">
+        <div className="w-full px-8 md:px-12">
+          <h2 className="text-4xl md:text-5xl font-bold font-display tracking-tight text-zinc-900 dark:text-white transition-colors duration-500">
             Indie-founder pricing
           </h2>
-          <p className="mx-auto mt-4 max-w-md text-center font-medium text-muted">
+          <p className="mt-4 max-w-md font-medium text-muted">
             No per-seat fees. No enterprise add-ons. Cancel anytime.
           </p>
 
           {/* Lifetime deal banner */}
-          <div className="mx-auto mt-10 max-w-xl rounded-3xl border-2 border-yellow-300 bg-yellow-300/20 dark:bg-yellow-300/10 p-5 text-center text-sm font-bold text-yellow-800 dark:text-yellow-300 transition-colors duration-500">
+          <div className="mt-10 rounded-3xl border-2 border-yellow-300 bg-yellow-300/20 dark:bg-yellow-300/10 p-5 text-sm font-bold text-yellow-800 dark:text-yellow-300 transition-colors duration-500">
             Launch offer: $299 lifetime deal (Starter tier) — available during
             Product Hunt launch window.
           </div>
@@ -292,11 +292,11 @@ export default function LandingPage() {
       </section>
 
       {/* CTA footer */}
-      <section className="mx-auto max-w-2xl px-8 py-24 text-center">
-        <h2 className="text-4xl font-bold font-display tracking-tight text-zinc-900 dark:text-white transition-colors duration-500">
+      <section className="px-8 md:px-12 py-24">
+        <h2 className="text-4xl md:text-5xl font-bold font-display tracking-tight text-zinc-900 dark:text-white transition-colors duration-500">
           Stop guessing. Start listening.
         </h2>
-        <p className="mt-4 font-medium text-muted">
+        <p className="mt-4 max-w-2xl font-medium text-muted">
           Your next cancellation will tell you something. ChurnLens makes sure
           you actually hear it.
         </p>
@@ -310,7 +310,7 @@ export default function LandingPage() {
 
       {/* Footer */}
       <footer className="border-t border-zinc-100 dark:border-zinc-800 py-8 transition-colors duration-500">
-        <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-4 px-8 text-sm font-medium text-muted sm:flex-row">
+        <div className="flex flex-col items-center justify-between gap-4 px-8 md:px-12 text-sm font-medium text-muted sm:flex-row">
           <span className="inline-flex items-center gap-2">
             <Wordmark size="sm" /> — built by a founder, for founders.
           </span>
