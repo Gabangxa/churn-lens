@@ -2,7 +2,21 @@ import { NextRequest, NextResponse } from 'next/server';
 import Stripe from 'stripe';
 import { queryOne, queryCount, execute } from '@/lib/db';
 import { decryptApiKey, signSurveyToken } from '@/lib/crypto';
-import { getResend, FROM_EMAIL } from '@/lib/resend';
+import { sendSurveyEmail } from '@/lib/survey-email';
+
+// Stripe Customer Portal cancellation reasons → our survey categories.
+// When the portal already asked, we record the answer directly and skip the
+// email — asking the same question twice burns customer goodwill.
+const PORTAL_FEEDBACK_TO_REASON: Record<string, string> = {
+  too_expensive: 'Too expensive for my budget',
+  missing_features: 'Missing a feature I need',
+  switched_service: 'Switched to a competitor',
+  unused: 'Stopped needing this type of tool',
+  too_complex: 'Product was too difficult to use',
+  customer_service: 'Had a bad support experience',
+  low_quality: 'Quality was less than expected',
+  other: 'Other',
+};
 
 export async function POST(
   req: NextRequest,
@@ -52,6 +66,11 @@ export async function POST(
     id: string;
     customer: string;
     items: { data: Array<{ price: { unit_amount: number | null } }> };
+    cancellation_details?: {
+      comment: string | null;
+      feedback: string | null;
+      reason: string | null;
+    } | null;
   };
 
   if (org.plan === 'free') {
@@ -63,7 +82,7 @@ export async function POST(
     // by surveyed_at (responses) let free orgs send unlimited surveys since most
     // customers never respond.
     const count = await queryCount(
-      'SELECT COUNT(*) FROM survey_responses WHERE org_id = $1 AND created_at >= $2',
+      'SELECT COUNT(*) FROM survey_responses WHERE org_id = $1 AND created_at >= $2 AND NOT is_test',
       [org.id, startOfMonth.toISOString()],
     );
 
@@ -113,6 +132,39 @@ export async function POST(
     (subscription.items.data[0]?.price.unit_amount ?? 0) / 100,
   );
 
+  // If the customer already answered Stripe's Customer Portal cancellation
+  // survey, record that answer as a completed response and skip the email.
+  const portalFeedback = subscription.cancellation_details?.feedback ?? null;
+  const portalReason = portalFeedback
+    ? PORTAL_FEEDBACK_TO_REASON[portalFeedback] ?? 'Other'
+    : null;
+
+  if (portalReason) {
+    const inserted = await execute(
+      `INSERT INTO survey_responses
+         (org_id, customer_email, customer_name, stripe_subscription_id, mrr_lost, token, reason_category, open_text, surveyed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT (stripe_subscription_id) DO NOTHING`,
+      [
+        org.id,
+        customerEmail,
+        customer.name ?? null,
+        subscription.id,
+        mrrLost,
+        token,
+        portalReason,
+        subscription.cancellation_details?.comment ?? null,
+        new Date().toISOString(),
+      ],
+    );
+
+    if (inserted === 0) {
+      return NextResponse.json({ received: true, skipped: 'duplicate_event' });
+    }
+
+    return NextResponse.json({ received: true, prefilled: 'portal_feedback' });
+  }
+
   // Idempotency guard: skip if this subscription has already been processed.
   const inserted = await execute(
     `INSERT INTO survey_responses (org_id, customer_email, customer_name, stripe_subscription_id, mrr_lost, token)
@@ -125,26 +177,11 @@ export async function POST(
     return NextResponse.json({ received: true, skipped: 'duplicate_event' });
   }
 
-  await getResend().emails.send({
-    from: FROM_EMAIL,
+  await sendSurveyEmail({
     to: customerEmail,
-    subject: 'Quick question before you go',
-    text: `Hi${customer.name ? ` ${customer.name}` : ''},
-
-We noticed you cancelled your subscription. We completely understand — no hard feelings.
-
-One quick question: what was the main reason?
-
-→ ${surveyUrl}
-
-It takes two minutes and goes directly to the founder (not a support queue). Your answer genuinely shapes what gets built next.
-
-Thanks,
-The team
-
----
-You received this because you had an active subscription. Unsubscribe from exit surveys: ${optOutUrl}
-`,
+    customerName: customer.name ?? null,
+    surveyUrl,
+    optOutUrl,
   });
 
   return NextResponse.json({ received: true });

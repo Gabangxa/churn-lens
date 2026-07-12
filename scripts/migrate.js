@@ -93,6 +93,13 @@ async function migrate() {
       ADD COLUMN IF NOT EXISTS stripe_webhook_secret_enc text;
   `);
 
+  // Test surveys (sent from Settings) are flagged so they never pollute stats,
+  // themes, digests, or the free-tier cap.
+  await pool.query(`
+    ALTER TABLE survey_responses
+      ADD COLUMN IF NOT EXISTS is_test boolean NOT NULL DEFAULT false;
+  `);
+
   await pool.query(`
     DO $$
     BEGIN

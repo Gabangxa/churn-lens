@@ -24,6 +24,7 @@ const CANCELLATION_REASONS = [
 export default async function SurveyPage({ params }: { params: { token: string } }) {
   const payload = verifySurveyToken(params.token);
   const expired = !payload || Date.now() > payload.exp;
+  const isPreview = payload?.kind === 'preview';
 
   if (expired) {
     return (
@@ -44,6 +45,11 @@ export default async function SurveyPage({ params }: { params: { token: string }
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-zinc-950 px-6 py-16">
       <div className="w-full max-w-lg">
+        {isPreview && (
+          <div className="mb-6 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-center text-sm text-amber-300">
+            Preview mode — this is what your churned customers see. Submissions are not saved.
+          </div>
+        )}
         {/* Brand mark — subtle */}
         <div className="mb-8 text-center">
           <span className="text-sm text-zinc-500">

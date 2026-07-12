@@ -100,6 +100,7 @@ export interface SurveyResponse {
   comeback_text: string | null;
   theme_tags: string[];
   surveyed_at: string | null;
+  is_test: boolean;
 }
 
 export interface Theme {
