@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -6,29 +6,54 @@
 
 @layer base {
   :root {
+    color-scheme: light;
+  }
+
+  .dark {
     color-scheme: dark;
   }
 
   body {
-    @apply bg-surface-900 text-zinc-100 font-sans antialiased;
+    @apply bg-[#f8f9fa] text-zinc-900 font-sans antialiased;
+  }
+
+  .dark body {
+    @apply bg-black text-zinc-50;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    @apply font-display;
   }
 
   ::selection {
-    @apply bg-brand-400/30 text-brand-200;
+    @apply bg-pink-500/30;
   }
 
-  /* Focus ring — accessible, amber-flavoured */
+  .dark ::selection {
+    @apply bg-indigo-500/30;
+  }
+
   :focus-visible {
-    @apply outline-none ring-2 ring-brand-400 ring-offset-2 ring-offset-surface-900;
+    @apply outline-none ring-2 ring-blue-500 ring-offset-2 ring-offset-white;
+  }
+
+  .dark :focus-visible {
+    @apply ring-blue-400 ring-offset-[#09090b];
   }
 }
 
 @layer utilities {
   .text-muted {
-    @apply text-zinc-400;
+    @apply text-zinc-500 dark:text-zinc-400;
   }
 
+  /* Soft panel on the white/near-black canvas */
   .card {
-    @apply bg-surface-800 border border-surface-700 rounded-xl p-6;
+    @apply bg-[#f8f9fa] dark:bg-[#121214] border border-zinc-100 dark:border-zinc-800 rounded-3xl p-8 transition-colors duration-500;
   }
 }
