@@ -33,6 +33,12 @@ export interface SurveyTokenPayload {
   customerId: string;
   subscriptionId: string;
   exp: number;
+  /**
+   * Distinguishes non-production tokens: 'preview' renders the survey without
+   * persisting anything; 'test' behaves like a real survey but the response
+   * row is flagged is_test. Absent for real customer surveys.
+   */
+  kind?: 'preview' | 'test';
 }
 
 /**

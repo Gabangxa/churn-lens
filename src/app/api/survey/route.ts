@@ -23,6 +23,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Survey link expired' }, { status: 410 });
   }
 
+  // Preview submissions exercise the form without touching the database.
+  if (payload.kind === 'preview') {
+    return NextResponse.redirect(new URL('/survey/thanks', req.url), { status: 303 });
+  }
+
   try {
     const updated = await execute(
       `UPDATE survey_responses
