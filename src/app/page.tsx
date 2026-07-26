@@ -291,8 +291,9 @@ export default function LandingPage() {
             <Wordmark size="sm" /> — built by a founder, for founders.
           </span>
           <div className="flex gap-6">
-            <a href="#" className="hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors">Privacy</a>
-            <a href="#" className="hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors">Terms</a>
+            <Link href="/legal/privacy" className="hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors">Privacy</Link>
+            <Link href="/legal/terms" className="hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors">Terms</Link>
+            <Link href="/legal/dpa" className="hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors">DPA</Link>
             <a href="mailto:hello@churnlens.com" className="hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors">
               Contact
             </a>
