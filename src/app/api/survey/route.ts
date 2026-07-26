@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { execute } from '@/lib/db';
 import { verifySurveyToken } from '@/lib/crypto';
+import { redirectUrl } from '@/lib/app-url';
 
 export async function POST(req: NextRequest) {
   const body = await req.formData();
@@ -25,7 +26,7 @@ export async function POST(req: NextRequest) {
 
   // Preview submissions exercise the form without touching the database.
   if (payload.kind === 'preview') {
-    return NextResponse.redirect(new URL('/survey/thanks', req.url), { status: 303 });
+    return NextResponse.redirect(redirectUrl('/survey/thanks', req), { status: 303 });
   }
 
   try {
@@ -45,7 +46,7 @@ export async function POST(req: NextRequest) {
   }
 
   return NextResponse.redirect(
-    new URL('/survey/thanks', req.url),
+    redirectUrl('/survey/thanks', req),
     { status: 303 },
   );
 }

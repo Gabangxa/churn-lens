@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { queryOne } from '@/lib/db';
 import { hashLoginToken } from '@/lib/crypto';
 import { setOrgCookie } from '@/lib/auth';
+import { redirectUrl } from '@/lib/app-url';
 
 /**
  * Consume a magic-link token and establish the session.
@@ -13,7 +14,7 @@ import { setOrgCookie } from '@/lib/auth';
  */
 export async function GET(req: NextRequest) {
   const fail = () =>
-    NextResponse.redirect(new URL('/login?error=expired', req.url), { status: 303 });
+    NextResponse.redirect(redirectUrl('/login?error=expired', req), { status: 303 });
 
   const token = req.nextUrl.searchParams.get('token');
   if (!token) return fail();
@@ -27,6 +28,6 @@ export async function GET(req: NextRequest) {
 
   if (!row) return fail();
 
-  const response = NextResponse.redirect(new URL('/dashboard', req.url), { status: 303 });
+  const response = NextResponse.redirect(redirectUrl('/dashboard', req), { status: 303 });
   return setOrgCookie(response, row.org_id);
 }

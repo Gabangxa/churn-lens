@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { verifySurveyToken } from '@/lib/crypto';
 import { queryOne, execute } from '@/lib/db';
 import { checkRateLimit, clientIp } from '@/lib/ratelimit';
+import { redirectUrl } from '@/lib/app-url';
 
 /**
  * One-click unsubscribe from exit surveys (CAN-SPAM).
@@ -28,7 +29,7 @@ export async function GET(req: NextRequest) {
   const payload = token ? verifySurveyToken(token) : null;
 
   // Always land on the same confirmation page — don't leak whether a token was valid.
-  const done = NextResponse.redirect(new URL('/survey/unsubscribed', req.url));
+  const done = NextResponse.redirect(redirectUrl('/survey/unsubscribed', req));
 
   if (!token || !payload) return done;
 

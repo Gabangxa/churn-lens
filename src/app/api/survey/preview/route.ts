@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { signSurveyToken } from '@/lib/crypto';
 import { requireOrgId } from '@/lib/auth';
+import { publicAppUrl, redirectUrl } from '@/lib/app-url';
 
 /**
  * Redirect the logged-in founder to a live preview of their exit survey.
@@ -8,19 +9,17 @@ import { requireOrgId } from '@/lib/auth';
  * submitting it never writes to the database.
  */
 export async function GET(req: NextRequest) {
-  // Build redirects from the public app URL, not req.url — behind the Railway
-  // proxy, req.url's host is the internal address (localhost:$PORT), not the
-  // public one. Mirrors the same guard in api/survey/test/route.ts. Falls back
-  // to req.url for the auth redirect so a misconfigured env still lands
-  // somewhere sane locally.
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL;
+  // Redirects resolve against the public app URL, never req.url — see
+  // lib/app-url.ts for why. Unlike the other routes we hard-fail rather than
+  // fall back below, because a preview link on the wrong host is useless.
+  const appUrl = publicAppUrl();
 
   const authResult = requireOrgId(req);
   if ('error' in authResult) {
-    return NextResponse.redirect(new URL('/onboarding', appUrl?.startsWith('https://') ? appUrl : req.url));
+    return NextResponse.redirect(redirectUrl('/onboarding', req));
   }
 
-  if (!appUrl || !appUrl.startsWith('https://')) {
+  if (!appUrl) {
     return NextResponse.json(
       { error: 'Server misconfiguration: app URL is missing or not https. Contact support.' },
       { status: 500 },
