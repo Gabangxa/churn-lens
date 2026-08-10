@@ -7,17 +7,24 @@ import type { Theme, SurveyResponse } from '@/lib/db';
 import Wordmark from '@/components/Wordmark';
 import ThemeToggle from '@/components/ThemeToggle';
 
-// Colour palette for theme badges — assigned by position, not by label.
+// Audit fixes: stat cards labelled by timeframe (this week vs all time);
+// theme badge colours hashed from the label (stable week over week) instead
+// of positional; marketing subhead replaced with a status line; log out link.
+
 const PALETTE = [
-  'bg-pink-500/10 text-pink-600 dark:text-pink-400 border-pink-500/30',
-  'bg-teal-400/10 text-teal-600 dark:text-teal-300 border-teal-400/30',
-  'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/30',
-  'bg-yellow-300/20 text-yellow-700 dark:text-yellow-300 border-yellow-400/40',
-  'bg-emerald-400/10 text-emerald-600 dark:text-emerald-400 border-emerald-400/30',
+  'bg-teal-400/10 text-teal-700 dark:text-teal-300 border-teal-400/30',
+  'bg-emerald-400/10 text-emerald-700 dark:text-emerald-400 border-emerald-400/30',
+  'bg-cyan-500/10 text-cyan-700 dark:text-cyan-400 border-cyan-500/30',
+  'bg-indigo-500/10 text-indigo-700 dark:text-indigo-400 border-indigo-500/30',
+  'bg-sky-500/10 text-sky-700 dark:text-sky-400 border-sky-500/30',
 ];
 
-// Corner-blob accents for the stat cards, cycled by position.
-const STAT_ACCENTS = ['bg-pink-500', 'bg-teal-400', 'bg-blue-500'];
+// Stable colour per label: same theme keeps its colour across weeks.
+function themeColor(label: string): string {
+  let h = 0;
+  for (let i = 0; i < label.length; i++) h = (h * 31 + label.charCodeAt(i)) >>> 0;
+  return PALETTE[h % PALETTE.length];
+}
 
 function maskEmail(email: string): string {
   return email.replace(/^(.{1,2})[^@]*@/, '$1***@');
@@ -32,10 +39,7 @@ function fmtWeek(dateStr: string): string {
   return new Date(dateStr).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
-// ─── Data fetching ────────────────────────────────────────────────────────────
-
 async function getDashboardData(orgId: string) {
-  // Most recent week that has themes
   const latestWeek = await queryOne<{ week_of: string }>(
     'SELECT week_of FROM themes WHERE org_id = $1 ORDER BY week_of DESC LIMIT 1',
     [orgId],
@@ -48,7 +52,6 @@ async function getDashboardData(orgId: string) {
       )
     : [];
 
-  // All completed responses, most recent first
   const responses = await query<SurveyResponse>(
     `SELECT * FROM survey_responses
      WHERE org_id = $1 AND surveyed_at IS NOT NULL
@@ -57,7 +60,6 @@ async function getDashboardData(orgId: string) {
     [orgId],
   );
 
-  // Stats — test surveys are shown in the table but never counted here.
   const stats = await queryOne<{ total_sent: string; responded: string; mrr_lost: string }>(
     `SELECT
        COUNT(*) AS total_sent,
@@ -73,32 +75,30 @@ async function getDashboardData(orgId: string) {
   const mrrLost = parseInt(stats?.mrr_lost ?? '0', 10);
   const responseRate = totalSent > 0 ? Math.round((responded / totalSent) * 100) : 0;
   const weekMrr = themes.reduce((acc, t) => acc + t.mrr_impact, 0);
-
-  // Pending: surveys sent but not yet completed
+  const weekResponses = themes.reduce((acc, t) => acc + t.response_count, 0);
   const pending = totalSent - responded;
 
-  return { themes, responses, latestWeek: latestWeek?.week_of ?? null, totalSent, responded, mrrLost, responseRate, weekMrr, pending };
+  return { themes, responses, latestWeek: latestWeek?.week_of ?? null, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending };
 }
-
-// ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default async function DashboardPage() {
   const orgId = getOrgIdFromCookieStore(cookies());
   if (!orgId) redirect('/onboarding');
 
-  const { themes, responses, latestWeek, totalSent, responded, mrrLost, responseRate, weekMrr, pending } =
+  const { themes, responses, latestWeek, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending } =
     await getDashboardData(orgId);
 
-  // Test responses don't count toward stats but must still surface in the table,
-  // otherwise a founder's test survey would land in an invisible dashboard.
   const hasAnyData = totalSent > 0 || responses.length > 0;
   const hasThemes = themes.length > 0;
 
-  // Build a label → colour map from the current week's themes
-  const themeColorMap: Record<string, string> = {};
-  themes.forEach((t, i) => {
-    themeColorMap[t.label] = PALETTE[i % PALETTE.length];
-  });
+  // Timeframe-labelled stat cards. "This week" figures come from the latest
+  // themes week; all-time figures from the responses table.
+  const statCards = [
+    { period: 'This week', highlight: hasThemes, value: hasThemes ? weekResponses.toString() : '—', label: 'responses themed' },
+    { period: 'This week', highlight: hasThemes, value: hasThemes ? `$${weekMrr}` : '—', label: 'MRR lost' },
+    { period: 'All time', highlight: false, value: `${responseRate}%`, label: `response rate · ${responded} of ${totalSent}` },
+    { period: 'All time', highlight: false, value: totalSent.toString(), label: 'surveys sent' },
+  ];
 
   return (
     <div className="flex flex-col min-h-full">
@@ -110,7 +110,7 @@ export default async function DashboardPage() {
             <span className="font-bold text-sm tracking-wide text-zinc-900 dark:text-white">Dashboard</span>
             <Link
               href="/settings"
-              className="font-bold text-sm tracking-wide text-zinc-400 dark:text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-300 transition-colors"
+              className="font-bold text-sm tracking-wide text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-200 transition-colors"
             >
               Settings
             </Link>
@@ -122,28 +122,33 @@ export default async function DashboardPage() {
               </span>
             )}
             <ThemeToggle />
+            {/* TODO(backend): /api/auth/logout — clear org cookie, redirect to / */}
+            <a
+              href="/api/auth/logout"
+              className="text-sm font-semibold text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-200 transition-colors"
+            >
+              Log out
+            </a>
           </div>
         </div>
       </header>
 
       <main className="flex-1 px-8 md:px-12 pb-12 space-y-10 max-w-6xl w-full mx-auto">
-        {/* Header */}
+        {/* Header — status line instead of marketing prose */}
         <div className="pt-4 pb-2">
-          <h1 className="text-5xl font-extrabold font-display tracking-tight text-zinc-900 dark:text-white mb-4 transition-colors duration-500">
+          <h1 className="text-4xl font-extrabold font-display tracking-tight text-zinc-900 dark:text-white mb-3 transition-colors duration-500">
             Dashboard
           </h1>
-          <p className="text-lg text-zinc-500 dark:text-zinc-400 max-w-2xl font-medium leading-relaxed transition-colors duration-500">
-            Deconstruct why users leave. AI analyzes exit surveys to help you
-            piece together the perfect retention strategy.
+          <p className="text-sm font-medium text-muted">
+            <span className="font-bold text-emerald-600 dark:text-emerald-400">●</span>{' '}
+            Stripe connected · surveys firing automatically
           </p>
         </div>
 
-        {/* ── Empty state: no activity yet ── */}
+        {/* ── Empty state ── */}
         {!hasAnyData && (
           <div className="card flex flex-col items-center py-16 text-center">
-            <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-full bg-yellow-300 dark:bg-yellow-300/20 shadow-xl shadow-yellow-300/30 dark:shadow-none transform -rotate-6 transition-colors duration-500">
-              <span className="text-3xl">⏳</span>
-            </div>
+            <div className="mb-6 h-16 w-16 rounded-full border-4 border-dashed border-teal-400/60 transition-colors duration-500" />
             <h2 className="text-2xl font-bold font-display text-zinc-900 dark:text-zinc-100">
               Waiting for your first cancellation
             </h2>
@@ -157,31 +162,22 @@ export default async function DashboardPage() {
         {/* ── Has activity ── */}
         {hasAnyData && (
           <>
-            {/* Stat cards */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              {[
-                { label: 'Surveys sent (all time)', value: totalSent.toString() },
-                { label: 'All-time MRR lost surveyed', value: `$${mrrLost}` },
-                { label: 'Survey response rate', value: `${responseRate}%` },
-              ].map((stat, i) => (
-                <div
-                  key={stat.label}
-                  className="card group relative overflow-hidden hover:-translate-y-1 transition-all duration-300"
-                >
-                  <div
-                    className={`absolute -right-6 -top-6 w-24 h-24 rounded-full opacity-20 dark:opacity-10 group-hover:scale-150 transition-transform duration-500 ${STAT_ACCENTS[i % STAT_ACCENTS.length]}`}
-                  />
-                  <p className="relative z-10 mb-3 text-sm font-bold uppercase tracking-wider text-muted">
-                    {stat.label}
+            {/* Stat cards — labelled by timeframe */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 md:gap-6">
+              {statCards.map((stat) => (
+                <div key={stat.period + stat.label} className="card">
+                  <p className={`mb-3 text-[10px] font-bold uppercase tracking-wider ${stat.highlight ? 'text-teal-700 dark:text-teal-300' : 'text-muted'}`}>
+                    {stat.period}
                   </p>
-                  <p className="relative z-10 text-4xl font-extrabold font-display tracking-tight text-zinc-900 dark:text-white transition-colors duration-500">
+                  <p className="text-3xl md:text-4xl font-extrabold font-display tracking-tight text-zinc-900 dark:text-white transition-colors duration-500">
                     {stat.value}
                   </p>
+                  <p className="mt-1 text-xs font-medium text-muted">{stat.label}</p>
                 </div>
               ))}
             </div>
 
-            {/* ── Themes section ── */}
+            {/* ── Themes ── */}
             <div className="card">
               <div className="mb-6 flex items-center justify-between">
                 <div>
@@ -190,14 +186,14 @@ export default async function DashboardPage() {
                   </h2>
                   <p className="mt-1 text-sm font-medium text-muted">
                     {hasThemes
-                      ? `AI-synthesised from ${themes.reduce((a, t) => a + t.response_count, 0)} responses — week of ${fmtWeek(latestWeek!)}`
+                      ? `AI-synthesised from ${weekResponses} responses — week of ${fmtWeek(latestWeek!)}`
                       : pending > 0
                         ? `${pending} response${pending !== 1 ? 's' : ''} pending — themes generate Monday 06:00 UTC`
                         : 'Themes will appear here after the first Monday digest run'}
                   </p>
                 </div>
                 {hasThemes && (
-                  <span className="rounded-full bg-pink-500 px-4 py-1.5 text-xs font-bold uppercase tracking-widest text-white">
+                  <span className="rounded-full bg-teal-700 px-4 py-1.5 text-xs font-bold uppercase tracking-widest text-white">
                     AI summary
                   </span>
                 )}
@@ -215,7 +211,7 @@ export default async function DashboardPage() {
                           <div className="mb-2 flex items-center gap-2">
                             <span className="font-mono text-xs font-bold text-muted">#{i + 1}</span>
                             <span className="font-bold text-zinc-900 dark:text-zinc-100">{theme.label}</span>
-                            <span className={`rounded-full border px-2.5 py-0.5 text-xs font-bold ${PALETTE[i % PALETTE.length]}`}>
+                            <span className={`rounded-full border px-2.5 py-0.5 text-xs font-bold ${themeColor(theme.label)}`}>
                               {theme.response_count} response{theme.response_count !== 1 ? 's' : ''}
                             </span>
                           </div>
@@ -231,7 +227,7 @@ export default async function DashboardPage() {
                           </div>
                         </div>
                         <div className="shrink-0 text-right">
-                          <p className="text-lg font-extrabold text-pink-500 dark:text-pink-400">${theme.mrr_impact}</p>
+                          <p className="text-lg font-extrabold font-display text-zinc-900 dark:text-white">${theme.mrr_impact}</p>
                           <p className="text-xs font-bold uppercase tracking-wider text-muted">MRR impact</p>
                         </div>
                       </div>
@@ -255,6 +251,9 @@ export default async function DashboardPage() {
                     All responses
                     <span className="ml-3 text-sm font-medium font-sans text-muted">({responded} total)</span>
                   </h2>
+                  {responses.length === 50 && (
+                    <span className="text-xs font-medium text-muted">Showing latest 50</span>
+                  )}
                 </div>
 
                 <div className="overflow-x-auto">
@@ -275,7 +274,7 @@ export default async function DashboardPage() {
                           <td className="px-8 py-4 font-medium text-zinc-700 dark:text-zinc-300">
                             {r.customer_name ?? 'Anonymous'}
                             {r.is_test && (
-                              <span className="ml-2 rounded-full border border-yellow-400/40 bg-yellow-300/20 px-2 py-0.5 text-xs font-bold text-yellow-700 dark:text-yellow-300">
+                              <span className="ml-2 rounded-full border border-indigo-400/40 bg-indigo-400/10 px-2 py-0.5 text-xs font-bold text-indigo-700 dark:text-indigo-300">
                                 Test
                               </span>
                             )}
@@ -294,7 +293,7 @@ export default async function DashboardPage() {
                                 ? r.theme_tags.map((tag) => (
                                     <span
                                       key={tag}
-                                      className={`rounded-full border px-2 py-0.5 text-xs font-bold ${themeColorMap[tag] ?? 'bg-zinc-500/10 text-zinc-600 dark:text-zinc-300 border-zinc-500/30'}`}
+                                      className={`rounded-full border px-2 py-0.5 text-xs font-bold ${themeColor(tag)}`}
                                     >
                                       {tag}
                                     </span>
