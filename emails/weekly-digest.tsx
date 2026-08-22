@@ -5,6 +5,9 @@
  * Plain-text is preferred; this HTML version is a visual fallback
  * for email clients that render it (most do).
  *
+ * Audit change: amber (#f59e0b) accents → mint (#34d399) to match the
+ * Deep Sea brand palette (wordmark, quote bars, links).
+ *
  * Preview: npx email dev
  */
 
@@ -75,7 +78,7 @@ export default function WeeklyDigest({
         <Container style={containerStyle}>
           {/* Wordmark */}
           <Text style={wordmarkStyle}>
-            Churn<span style={{ color: '#f59e0b' }}>Lens</span>
+            Churn<span style={{ color: '#34d399' }}>Lens</span>
           </Text>
 
           <Heading style={h1Style}>Your weekly digest</Heading>
@@ -226,7 +229,7 @@ const themeHeaderStyle: React.CSSProperties = {
 };
 
 const quoteStyle: React.CSSProperties = {
-  borderLeft: '3px solid #f59e0b',
+  borderLeft: '3px solid #34d399',
   color: '#a1a1aa',
   fontStyle: 'italic',
   fontSize: '13px',
@@ -241,7 +244,7 @@ const bodyTextStyle: React.CSSProperties = {
 };
 
 const linkStyle: React.CSSProperties = {
-  color: '#f59e0b',
+  color: '#34d399',
   textDecoration: 'none',
 };
 

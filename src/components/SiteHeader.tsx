@@ -3,8 +3,8 @@ import Wordmark from './Wordmark';
 import ThemeToggle from './ThemeToggle';
 
 /**
- * Marketing header shared by the landing and login pages. Anchor links are
- * root-relative so they work from any route, not just the landing page.
+ * Marketing header shared by the landing and login pages.
+ * Audit fix: nav links were zinc-400 on white (~2.6:1) — now zinc-600 for AA.
  */
 export default function SiteHeader({ active }: { active?: 'login' }) {
   return (
@@ -16,13 +16,13 @@ export default function SiteHeader({ active }: { active?: 'login' }) {
         <nav className="hidden md:flex items-center space-x-10">
           <Link
             href="/#features"
-            className="font-bold text-sm tracking-wide text-zinc-400 dark:text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-300 transition-colors"
+            className="font-bold text-sm tracking-wide text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-200 transition-colors"
           >
             Features
           </Link>
           <Link
             href="/#pricing"
-            className="font-bold text-sm tracking-wide text-zinc-400 dark:text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-300 transition-colors"
+            className="font-bold text-sm tracking-wide text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-200 transition-colors"
           >
             Pricing
           </Link>
@@ -31,7 +31,7 @@ export default function SiteHeader({ active }: { active?: 'login' }) {
             className={`font-bold text-sm tracking-wide transition-colors ${
               active === 'login'
                 ? 'text-zinc-900 dark:text-white'
-                : 'text-zinc-400 dark:text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-300'
+                : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-200'
             }`}
           >
             Log in
@@ -41,7 +41,7 @@ export default function SiteHeader({ active }: { active?: 'login' }) {
           <ThemeToggle />
           <Link
             href="/onboarding"
-            className="px-6 py-2.5 rounded-full border-2 border-zinc-900 dark:border-zinc-100 text-zinc-900 dark:text-zinc-100 text-xs font-bold uppercase tracking-widest shadow-[4px_4px_0px_0px_#18181b] dark:shadow-[4px_4px_0px_0px_#f4f4f5] hover:shadow-none hover:translate-x-[4px] hover:translate-y-[4px] hover:bg-zinc-900 hover:text-white dark:hover:bg-zinc-100 dark:hover:text-black transition-all active:scale-95"
+            className="px-6 py-2.5 rounded-full border-2 border-teal-900 dark:border-teal-100 text-teal-900 dark:text-teal-100 text-xs font-bold uppercase tracking-widest shadow-[4px_4px_0px_0px_#134e4a] dark:shadow-[4px_4px_0px_0px_#ccfbf1] hover:shadow-none hover:translate-x-[4px] hover:translate-y-[4px] hover:bg-teal-900 hover:text-white dark:hover:bg-teal-100 dark:hover:text-teal-950 transition-all active:scale-95"
           >
             Get started
           </Link>
