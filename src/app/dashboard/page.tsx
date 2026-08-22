@@ -130,7 +130,6 @@ export default async function DashboardPage() {
               </span>
             )}
             <ThemeToggle />
-            {/* TODO(backend): /api/auth/logout — clear org cookie, redirect to / */}
             <a
               href="/api/auth/logout"
               className="text-sm font-semibold text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-200 transition-colors"
