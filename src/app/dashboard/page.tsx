@@ -40,6 +40,14 @@ function fmtWeek(dateStr: string): string {
 }
 
 async function getDashboardData(orgId: string) {
+  // Same test /api/settings/status uses, so the dashboard status line and the
+  // settings page can never disagree about whether Stripe is connected.
+  const org = await queryOne<{ stripe_api_key_enc: string | null; stripe_account_id: string | null }>(
+    'SELECT stripe_api_key_enc, stripe_account_id FROM organizations WHERE id = $1',
+    [orgId],
+  );
+  const stripeConnected = !!(org?.stripe_api_key_enc || org?.stripe_account_id);
+
   const latestWeek = await queryOne<{ week_of: string }>(
     'SELECT week_of FROM themes WHERE org_id = $1 ORDER BY week_of DESC LIMIT 1',
     [orgId],
@@ -78,14 +86,14 @@ async function getDashboardData(orgId: string) {
   const weekResponses = themes.reduce((acc, t) => acc + t.response_count, 0);
   const pending = totalSent - responded;
 
-  return { themes, responses, latestWeek: latestWeek?.week_of ?? null, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending };
+  return { themes, responses, latestWeek: latestWeek?.week_of ?? null, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending, stripeConnected };
 }
 
 export default async function DashboardPage() {
   const orgId = getOrgIdFromCookieStore(cookies());
   if (!orgId) redirect('/onboarding');
 
-  const { themes, responses, latestWeek, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending } =
+  const { themes, responses, latestWeek, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending, stripeConnected } =
     await getDashboardData(orgId);
 
   const hasAnyData = totalSent > 0 || responses.length > 0;
@@ -139,10 +147,20 @@ export default async function DashboardPage() {
           <h1 className="text-4xl font-extrabold font-display tracking-tight text-zinc-900 dark:text-white mb-3 transition-colors duration-500">
             Dashboard
           </h1>
-          <p className="text-sm font-medium text-muted">
-            <span className="font-bold text-emerald-600 dark:text-emerald-400">●</span>{' '}
-            Stripe connected · surveys firing automatically
-          </p>
+          {stripeConnected ? (
+            <p className="text-sm font-medium text-muted">
+              <span className="font-bold text-emerald-600 dark:text-emerald-400">●</span>{' '}
+              Stripe connected · surveys firing automatically
+            </p>
+          ) : (
+            <p className="text-sm font-medium text-muted">
+              <span className="font-bold text-amber-600 dark:text-amber-400">●</span>{' '}
+              Stripe not connected — no surveys will send.{' '}
+              <Link href="/settings" className="underline underline-offset-2 hover:text-zinc-900 dark:hover:text-white">
+                Connect it in settings
+              </Link>
+            </p>
+          )}
         </div>
 
         {/* ── Empty state ── */}
