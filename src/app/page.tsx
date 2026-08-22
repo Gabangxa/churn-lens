@@ -255,18 +255,14 @@ export default function LandingPage() {
             No per-seat fees. No enterprise add-ons. Cancel anytime. Trials don&apos;t need a card.
           </p>
 
-          {/* Lifetime deal banner — now with a CTA */}
-          <div className="mt-10 flex flex-col items-start gap-4 rounded-3xl border-2 border-emerald-400 bg-emerald-400/15 dark:bg-emerald-400/10 p-5 sm:flex-row sm:items-center sm:justify-between transition-colors duration-500">
+          {/* Lifetime deal — announcement only. No claim CTA until billing is
+              wired (Polar.sh): the onboarding route has nowhere to record a
+              lifetime claim, so a claim button would take the click and drop it. */}
+          <div className="mt-10 rounded-3xl border-2 border-emerald-400 bg-emerald-400/15 dark:bg-emerald-400/10 p-5 transition-colors duration-500">
             <p className="m-0 text-sm font-bold text-emerald-900 dark:text-emerald-300">
               <span className="mr-2 rounded-full bg-emerald-400 px-2.5 py-0.5 font-mono text-[10px] font-bold text-teal-950">LAUNCH</span>
               Lifetime deal — Starter tier forever for a one-time $299. Product Hunt launch window only.
             </p>
-            <Link
-              href="/onboarding?plan=lifetime"
-              className="shrink-0 rounded-full bg-emerald-400 px-6 py-3 text-xs font-extrabold uppercase tracking-widest text-teal-950 shadow-[4px_4px_0px_0px_#065f46] hover:shadow-none hover:translate-x-[4px] hover:translate-y-[4px] transition-all"
-            >
-              Claim it — $299
-            </Link>
           </div>
 
           <div className="mt-14 grid gap-6 sm:grid-cols-3">

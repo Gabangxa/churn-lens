@@ -12,7 +12,6 @@ import Wordmark from '@/components/Wordmark';
 const PLAN_COPY: Record<string, string> = {
   starter: 'Starter · 14-day free trial · $29/mo after · no card',
   growth: 'Growth · 14-day free trial · $79/mo after · no card',
-  lifetime: 'Lifetime deal · one-time $299 · Starter tier forever',
 };
 
 const STRIPE_KEY_URL = 'https://dashboard.stripe.com/apikeys/create?name=ChurnLens';
@@ -23,6 +22,8 @@ const STRIPE_OAUTH_ENABLED = false;
 function OnboardingForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  // Display only. /api/onboarding/connect does not accept or store a plan, so
+  // this is never sent — surfacing it as a chip just confirms the click.
   const plan = searchParams.get('plan');
   const planCopy = plan ? PLAN_COPY[plan] : null;
 
@@ -40,7 +41,7 @@ function OnboardingForm() {
       const res = await fetch('/api/onboarding/connect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, apiKey, plan }),
+        body: JSON.stringify({ email, apiKey }),
       });
       const data = await res.json();
       if (!res.ok) {
