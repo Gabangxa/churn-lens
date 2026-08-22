@@ -143,7 +143,7 @@ function OnboardingForm() {
                 type="button"
                 onClick={() => setShowKey((v) => !v)}
                 aria-label={showKey ? 'Hide API key' : 'Show API key'}
-                className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-bold text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-200 transition-colors"
+                className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-bold text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-200 transition-colors"
               >
                 {showKey ? 'Hide' : 'Show'}
               </button>
@@ -164,7 +164,7 @@ function OnboardingForm() {
           </div>
 
           {error && (
-            <p className="rounded-2xl border-2 border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-sm font-bold text-rose-600 dark:text-rose-400">
+            <p className="rounded-2xl border-2 border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-sm font-bold text-rose-700 dark:text-rose-400">
               {error}
             </p>
           )}

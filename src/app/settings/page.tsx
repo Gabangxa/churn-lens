@@ -238,12 +238,16 @@ export default function SettingsPage() {
           </nav>
           <div className="flex items-center space-x-4">
             <ThemeToggle />
-            <a
-              href="/api/auth/logout"
-              className="text-sm font-semibold text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-200 transition-colors"
-            >
-              Log out
-            </a>
+            {/* A form, not a link: /api/auth/logout is POST-only so a
+                third-party page cannot force a logout with a GET. */}
+            <form action="/api/auth/logout" method="POST" className="contents">
+              <button
+                type="submit"
+                className="text-sm font-semibold text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-200 transition-colors"
+              >
+                Log out
+              </button>
+            </form>
           </div>
         </div>
       </header>
@@ -269,7 +273,7 @@ export default function SettingsPage() {
               Loading survey settings…
             </div>
           ) : configLoadError ? (
-            <p className="rounded-2xl border-2 border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-sm font-bold text-rose-600 dark:text-rose-400">
+            <p className="rounded-2xl border-2 border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-sm font-bold text-rose-700 dark:text-rose-400">
               {configLoadError}
             </p>
           ) : (
@@ -404,7 +408,7 @@ export default function SettingsPage() {
               ) : null}
 
               {saveResult && !saveResult.ok && (
-                <p className="rounded-2xl border-2 border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-sm font-bold text-rose-600 dark:text-rose-400">
+                <p className="rounded-2xl border-2 border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-sm font-bold text-rose-700 dark:text-rose-400">
                   {saveResult.message}
                 </p>
               )}
@@ -437,7 +441,7 @@ export default function SettingsPage() {
                     className={`mt-4 rounded-2xl border-2 px-4 py-2.5 text-sm font-bold ${
                       testResult.ok
                         ? 'border-teal-400/60 bg-teal-400/10 text-teal-700 dark:text-teal-300'
-                        : 'border-rose-500/40 bg-rose-500/10 text-rose-600 dark:text-rose-400'
+                        : 'border-rose-500/40 bg-rose-500/10 text-rose-700 dark:text-rose-400'
                     }`}
                   >
                     {testResult.message}
@@ -473,7 +477,7 @@ export default function SettingsPage() {
               </p>
 
               {error && (
-                <p className="rounded-2xl border-2 border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-sm font-bold text-rose-600 dark:text-rose-400">
+                <p className="rounded-2xl border-2 border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-sm font-bold text-rose-700 dark:text-rose-400">
                   {error}
                 </p>
               )}
@@ -487,7 +491,7 @@ export default function SettingsPage() {
                     </p>
                     <button
                       onClick={() => setConfirmDisconnect(true)}
-                      className="rounded-full border-2 border-rose-500 px-5 py-2 text-xs font-extrabold uppercase tracking-widest text-rose-600 dark:text-rose-400 hover:bg-rose-500 hover:text-white dark:hover:text-white transition-colors"
+                      className="rounded-full border-2 border-rose-500 px-5 py-2 text-xs font-extrabold uppercase tracking-widest text-rose-700 dark:text-rose-400 hover:bg-rose-500 hover:text-white dark:hover:text-white transition-colors"
                     >
                       Disconnect…
                     </button>

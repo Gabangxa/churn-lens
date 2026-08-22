@@ -85,12 +85,12 @@ function DigestPreview() {
             Churn<span className="text-emerald-400">Lens</span>
           </p>
           <p className="mb-0 mt-4 text-lg font-bold text-zinc-50">Your weekly digest</p>
-          <p className="m-0 text-xs text-zinc-500">Week of 2026-03-09</p>
+          <p className="m-0 text-xs text-zinc-400">Week of 2026-03-09</p>
           <div className="mt-4 rounded-lg bg-zinc-800 px-3.5 py-2.5 text-[13px] text-zinc-400">
             <strong className="text-zinc-100">12</strong> cancellations this week &nbsp;·&nbsp;{' '}
             <strong className="text-zinc-100">$348</strong> MRR lost
           </div>
-          <p className="mb-0 mt-5 text-[10px] font-semibold tracking-wider text-zinc-600">
+          <p className="mb-0 mt-5 text-[10px] font-semibold tracking-wider text-zinc-400">
             TOP REASONS CUSTOMERS LEFT
           </p>
           <div className="mt-1.5 space-y-3.5 border-t border-zinc-800 pt-3.5">
@@ -101,9 +101,9 @@ function DigestPreview() {
             ].map((t) => (
               <div key={t.rank}>
                 <p className="m-0 text-[13px] text-zinc-300">
-                  <span className="text-zinc-500">{t.rank}</span>{' '}
+                  <span className="text-zinc-400">{t.rank}</span>{' '}
                   <strong className="text-zinc-100">{t.label}</strong>{' '}
-                  <span className="text-zinc-500">{t.meta}</span>
+                  <span className="text-zinc-400">{t.meta}</span>
                 </p>
                 {t.quote && (
                   <p className="mb-0 mt-1 border-l-[3px] border-emerald-400 pl-2.5 text-xs italic text-zinc-400">

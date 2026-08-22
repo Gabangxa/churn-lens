@@ -130,12 +130,16 @@ export default async function DashboardPage() {
               </span>
             )}
             <ThemeToggle />
-            <a
-              href="/api/auth/logout"
-              className="text-sm font-semibold text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-200 transition-colors"
-            >
-              Log out
-            </a>
+            {/* A form, not a link: /api/auth/logout is POST-only so a
+                third-party page cannot force a logout with a GET. */}
+            <form action="/api/auth/logout" method="POST" className="contents">
+              <button
+                type="submit"
+                className="text-sm font-semibold text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-200 transition-colors"
+              >
+                Log out
+              </button>
+            </form>
           </div>
         </div>
       </header>
