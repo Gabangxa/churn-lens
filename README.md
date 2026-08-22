@@ -31,7 +31,7 @@ ChurnLens fills the gap: exit interviews + AI theme synthesis at indie-founder p
 | Database | PostgreSQL (`pg`), schema in `scripts/migrate.js` |
 | Email | Resend |
 | AI | OpenAI GPT-4o-mini |
-| Payments | Stripe Billing |
+| Billing integration | Stripe — each org's own account, via a per-org restricted key |
 | Auth | Passwordless magic-link (email) |
 | Hosting | Railway (persistent Node service + Postgres) |
 
@@ -42,24 +42,34 @@ ChurnLens fills the gap: exit interviews + AI theme synthesis at indie-founder p
 ```
 src/
 ├── app/
-│   ├── page.tsx              # Landing page
-│   ├── onboarding/           # Stripe connect flow
-│   ├── survey/[token]/       # Exit survey (WCAG AA)
-│   ├── dashboard/            # Founder response dashboard
+│   ├── page.tsx                   # Landing page
+│   ├── onboarding/                # Connect a Stripe restricted key
+│   ├── login/                     # Passwordless magic-link login
+│   ├── survey/[token]/            # Exit survey (WCAG AA)
+│   ├── dashboard/                 # Founder response dashboard
+│   ├── settings/                  # Survey config, disconnect
+│   ├── legal/                     # Privacy, terms, DPA (draft)
 │   └── api/
-│       ├── webhooks/stripe/  # Stripe event handler
-│       ├── survey/           # Survey form submission
-│       ├── themes/           # AI clustering cron (Mon 06:00 UTC)
-│       └── digest/           # Weekly email cron (Mon 07:00 UTC)
+│       ├── webhooks/stripe/[orgId]/  # Per-org Stripe event handler
+│       ├── onboarding/            # Key validation + webhook registration
+│       ├── auth/                  # Magic-link request/verify, logout
+│       ├── survey/                # Survey submission + opt-out
+│       ├── settings/              # Survey config, status, disconnect
+│       ├── themes/                # AI clustering cron (Mon 06:00 UTC)
+│       ├── digest/                # Weekly email cron (Mon 07:00 UTC)
+│       └── health/                # Railway healthcheck
 ├── lib/
-│   ├── supabase.ts
-│   ├── stripe.ts
-│   ├── resend.ts
-│   └── openai.ts
-emails/
-└── weekly-digest.tsx         # React Email template
-supabase/
-└── migrations/001_initial.sql
+│   ├── db.ts                      # pg pool + query helpers
+│   ├── crypto.ts                  # AES-256-GCM key storage, signed tokens
+│   ├── auth.ts                    # Org session cookie
+│   ├── app-url.ts                 # Public-URL resolution behind the proxy
+│   ├── openai.ts                  # Theme clustering
+│   ├── resend.ts / survey-email.ts
+│   ├── survey-config.ts           # Per-org survey customization
+│   └── ratelimit.ts / week.ts / legal.ts / env.ts
+└── instrumentation.ts             # In-process weekly cron scheduler
+scripts/
+└── migrate.js                     # Idempotent schema migration
 ```
 
 ---
@@ -72,23 +82,27 @@ npm install
 
 # 2. Set environment variables
 cp .env.example .env.local
-# Fill in: SUPABASE, STRIPE, OPENAI, RESEND keys
+# Fill in: DATABASE_URL, OPENAI_API_KEY, RESEND_API_KEY,
+#          ENCRYPTION_KEY, CRON_SECRET, NEXT_PUBLIC_APP_URL
 
-# 3. Apply DB schema
-npx supabase db push
+# 3. Apply DB schema (idempotent — safe to re-run)
+npm run db:migrate
 
-# 4. Start dev server
+# 4. Start dev server (port 5000)
 npm run dev
-
-# 5. Preview email template
-npx email dev
 ```
 
 ### Stripe webhook (local)
 
+Webhooks are per-org, so the forwarding URL needs the org's id. Connect an org
+through `/onboarding` first, then:
+
 ```bash
-stripe listen --forward-to localhost:3000/api/webhooks/stripe
+stripe listen --forward-to localhost:5000/api/webhooks/stripe/<orgId>
 ```
+
+ChurnLens never uses a platform-level Stripe key — each org's restricted key is
+collected at onboarding and stored encrypted, so there is nothing to set here.
 
 ---
 
@@ -107,8 +121,6 @@ command, `/api/health` healthcheck). The weekly cron jobs run in-process via
    NEXT_PUBLIC_APP_URL=https://${{ RAILWAY_PUBLIC_DOMAIN }}
    ENCRYPTION_KEY=<64-hex>   # node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
    CRON_SECRET=<random>
-   STRIPE_SECRET_KEY=sk_live_...
-   STRIPE_WEBHOOK_SECRET=whsec_...
    RESEND_API_KEY=re_...
    RESEND_FROM_EMAIL=digest@churnlens.com
    OPENAI_API_KEY=sk-...

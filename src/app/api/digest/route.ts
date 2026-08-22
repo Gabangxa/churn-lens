@@ -126,6 +126,7 @@ Manage preferences: ${settingsUrl}`;
   return NextResponse.json({ sent });
 }
 
-// Vercel Cron issues GET requests; alias to the same handler. Safe to expose as
-// GET because it is CRON_SECRET-gated and idempotent (cron_runs guard).
+// Kept for manual triggering and any external scheduler that issues GET; the
+// in-process scheduler in instrumentation.ts uses POST. Safe to expose as GET
+// because it is CRON_SECRET-gated and idempotent (cron_runs guard).
 export const GET = POST;
