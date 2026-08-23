@@ -130,6 +130,21 @@ async function migrate() {
       ADD COLUMN IF NOT EXISTS survey_email_last_attempt_at timestamptz;
   `);
 
+  // Polar billing linkage. ChurnLens bills itself through Polar (its customers'
+  // Stripe keys are a separate, unrelated thing — see stripe_api_key_enc).
+  //
+  // polar_synced_at holds the `modified_at` of the last subscription event we
+  // applied. Webhook delivery is not ordered, so a delayed `subscription.updated`
+  // can arrive after the `subscription.revoked` that superseded it; without a
+  // watermark that stale event would silently restore a plan the customer no
+  // longer pays for. Events at or before this timestamp are ignored.
+  await pool.query(`
+    ALTER TABLE organizations
+      ADD COLUMN IF NOT EXISTS polar_customer_id text,
+      ADD COLUMN IF NOT EXISTS polar_subscription_id text,
+      ADD COLUMN IF NOT EXISTS polar_synced_at timestamptz;
+  `);
+
   await pool.query(`
     DO $$
     BEGIN
