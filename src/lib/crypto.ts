@@ -11,6 +11,47 @@ const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
 
+/**
+ * Stored wire format for encrypted secrets (organizations.stripe_api_key_enc,
+ * organizations.stripe_webhook_secret_enc):
+ *
+ *   v1  "v1." + base64(iv[12] || authTag[16] || ciphertext)   aes-256-gcm
+ *   v0          base64(iv[12] || authTag[16] || ciphertext)   aes-256-gcm  (legacy, unprefixed)
+ *
+ * v0 and v1 are byte-identical apart from the prefix. The prefix buys nothing
+ * today; it exists so the NEXT change is cheap. Without a version marker,
+ * rotating ENCRYPTION_KEY or moving off aes-256-gcm means every stored row has
+ * to be rewritten in a single flag-day migration, because nothing can tell old
+ * ciphertext from new. With it, a v2 writer ships alongside a reader that still
+ * accepts v0 and v1, and rows get re-encrypted at their own pace.
+ *
+ * '.' is the separator because it is outside the base64 alphabet
+ * (A-Za-z0-9+/=), so it can never occur inside the payload — the split is
+ * unambiguous.
+ *
+ * To add v2: bump CURRENT_VERSION, emit the new payload in encryptApiKey, and
+ * add one branch to decryptApiKey. Old branches stay until the old rows are gone.
+ *
+ * WRITES ARE STAGED, READS ARE NOT. The reader accepts v0 and v1 from the moment
+ * it ships; the writer keeps emitting v0 until ENCRYPTION_WRITE_VERSION=1 is set.
+ * That ordering is what keeps a rollback survivable: the previous build's reader
+ * has no prefix handling and Node's base64 decoder is non-strict, so it would
+ * decode a 'v1.'-prefixed value misaligned rather than fail fast, and every
+ * Stripe webhook for that org would 500 until Stripe disabled the endpoint.
+ * Flip the flag only once THIS build is the confirmed rollback target.
+ */
+const CURRENT_VERSION = 1;
+const LEGACY_VERSION = 0;
+const VERSION_PREFIX = /^v(\d+)\./;
+
+/**
+ * Which format new ciphertext is written in. Defaults to v0 (unprefixed), the
+ * format every already-deployed build can read.
+ */
+function getWriteVersion(): number {
+  return process.env.ENCRYPTION_WRITE_VERSION === '1' ? CURRENT_VERSION : LEGACY_VERSION;
+}
+
 function getEncryptionKey(): Buffer {
   const hex = process.env.ENCRYPTION_KEY;
   if (!hex) throw new Error('ENCRYPTION_KEY is not set');
@@ -25,7 +66,9 @@ export function encryptApiKey(plaintext: string): string {
   const cipher = createCipheriv(ALGORITHM, key, iv, { authTagLength: AUTH_TAG_LENGTH });
   const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
   const authTag = cipher.getAuthTag();
-  return Buffer.concat([iv, authTag, encrypted]).toString('base64');
+  const payload = Buffer.concat([iv, authTag, encrypted]).toString('base64');
+  const version = getWriteVersion();
+  return version === LEGACY_VERSION ? payload : `v${version}.${payload}`;
 }
 
 export interface SurveyTokenPayload {
@@ -89,9 +132,20 @@ export function hashLoginToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
-export function decryptApiKey(ciphertext: string): string {
+/**
+ * Split a stored value into its version and its base64 payload. A value with no
+ * recognized `v<N>.` prefix is legacy v0, written before versioning existed.
+ */
+function parseVersionedPayload(stored: string): { version: number; payload: string } {
+  const match = VERSION_PREFIX.exec(stored);
+  if (!match) return { version: LEGACY_VERSION, payload: stored };
+  return { version: Number(match[1]), payload: stored.slice(match[0].length) };
+}
+
+/** Decrypt the aes-256-gcm layout shared by v0 and v1: iv || authTag || ciphertext. */
+function decryptAesGcmPayload(payload: string): string {
   const key = getEncryptionKey();
-  const data = Buffer.from(ciphertext, 'base64');
+  const data = Buffer.from(payload, 'base64');
   const minLength = IV_LENGTH + AUTH_TAG_LENGTH + 1;
   if (data.length < minLength) {
     throw new Error('Invalid ciphertext: payload too short');
@@ -102,4 +156,19 @@ export function decryptApiKey(ciphertext: string): string {
   const decipher = createDecipheriv(ALGORITHM, key, iv, { authTagLength: AUTH_TAG_LENGTH });
   decipher.setAuthTag(authTag);
   return decipher.update(encrypted) + decipher.final('utf8');
+}
+
+export function decryptApiKey(stored: string): string {
+  const { version, payload } = parseVersionedPayload(stored);
+
+  // v0 (legacy, unprefixed) and v1 share the same layout, so one reader serves
+  // both. An unrecognized version means the value was written by a build we do
+  // not understand — say so, rather than handing it to the v0 parser and
+  // surfacing it as a misleading auth-tag failure.
+  if (version === LEGACY_VERSION || version === CURRENT_VERSION) {
+    return decryptAesGcmPayload(payload);
+  }
+  throw new Error(
+    `Unsupported encrypted payload version "v${version}": this build reads v${LEGACY_VERSION} (legacy, unprefixed) and v${CURRENT_VERSION}. The value was likely written by a newer deploy.`,
+  );
 }
