@@ -19,6 +19,71 @@ const PORTAL_FEEDBACK_TO_REASON: Record<string, string> = {
   other: 'Other',
 };
 
+// One subscription line item, narrowed to just the fields MRR needs. Structural
+// types (rather than Stripe's own) keep this route testable without building a
+// full Stripe.Subscription fixture.
+interface SubscriptionItemForMrr {
+  quantity?: number | null;
+  price: {
+    unit_amount: number | null;
+    recurring?: { interval: string; interval_count: number } | null;
+  };
+}
+
+// How many months one billing interval is worth, i.e. the factor that converts
+// a per-interval amount into a per-month amount. Weeks and days use calendar
+// averages (52 weeks / 365 days a year) because there is no exact conversion.
+const MONTHS_PER_INTERVAL: Record<string, number> = {
+  day: 12 / 365,
+  week: 12 / 52,
+  month: 1,
+  year: 12,
+};
+
+/**
+ * Normalizes one subscription item to monthly cents: an annual plan must not be
+ * recorded as 12x its true MRR, and a 5-seat plan must not be recorded as 1/5.
+ *
+ * Returns fractional cents on purpose — callers sum every item first and round
+ * once at the end, so per-item rounding error cannot accumulate.
+ *
+ * Deliberately NOT exported: Next 14 type-checks the export shape of every
+ * route.ts and rejects any export that is not an HTTP method or a known segment
+ * config, so a named export here fails `next build`. To unit-test this directly
+ * it has to move to its own module under src/lib.
+ */
+function monthlyCentsForItem(item: SubscriptionItemForMrr): number {
+  // unit_amount is null for tiered and metered prices. The deleted-subscription
+  // payload carries neither the tier that applied nor the usage that was billed,
+  // so there is nothing to price from — count 0 rather than invent a number that
+  // would land in a customer-visible revenue stat.
+  const unitAmount = item.price.unit_amount ?? 0;
+  if (unitAmount === 0) return 0;
+
+  const recurring = item.price.recurring ?? null;
+
+  let monthsPerInterval = recurring ? MONTHS_PER_INTERVAL[recurring.interval] : undefined;
+  if (monthsPerInterval === undefined) {
+    // An interval we do not recognize (a new Stripe value, or a payload missing
+    // its recurring block) must not silently become 0 revenue — that would
+    // under-report churn with no signal. Treat it as monthly, which is the most
+    // common case and the least wrong default, and say so in the logs.
+    console.warn(
+      `Unrecognized billing interval ${JSON.stringify(recurring?.interval)} on subscription item — treating it as monthly for MRR.`,
+    );
+    monthsPerInterval = 1;
+  }
+
+  // interval_count is how many intervals one billing period spans (e.g. every 3
+  // months). Guard 0/undefined, which would divide to Infinity or NaN.
+  const intervalCount =
+    recurring && recurring.interval_count > 0 ? recurring.interval_count : 1;
+
+  const quantity = item.quantity ?? 1;
+
+  return (unitAmount * quantity) / (monthsPerInterval * intervalCount);
+}
+
 export async function POST(
   req: NextRequest,
   { params }: { params: { orgId: string } },
@@ -66,7 +131,7 @@ export async function POST(
   const subscription = event.data.object as {
     id: string;
     customer: string;
-    items: { data: Array<{ price: { unit_amount: number | null } }> };
+    items: { data: SubscriptionItemForMrr[] };
     cancellation_details?: {
       comment: string | null;
       feedback: string | null;
@@ -129,9 +194,14 @@ export async function POST(
   const surveyUrl = `${process.env.NEXT_PUBLIC_APP_URL}/survey/${token}`;
   const optOutUrl = `${process.env.NEXT_PUBLIC_APP_URL}/api/survey/opt-out?token=${token}`;
 
-  const mrrLost = Math.round(
-    (subscription.items.data[0]?.price.unit_amount ?? 0) / 100,
+  // Sum every line item, not just the first: a subscription with a base plan
+  // plus an add-on lost both. survey_responses.mrr_lost is an integer dollar
+  // column, so the arithmetic stays in cents and rounds exactly once, here.
+  const mrrLostCents = subscription.items.data.reduce(
+    (total, item) => total + monthlyCentsForItem(item),
+    0,
   );
+  const mrrLost = Math.round(mrrLostCents / 100);
 
   // If the customer already answered Stripe's Customer Portal cancellation
   // survey, record that answer as a completed response and skip the email.
