@@ -19,6 +19,21 @@ const PORTAL_FEEDBACK_TO_REASON: Record<string, string> = {
   other: 'Other',
 };
 
+// How many times we let Stripe retry a survey email before giving up. A
+// permanently-failing address (hard bounce, blocked domain) would otherwise
+// make this route 500 on every retry for the whole of Stripe's retry window.
+const MAX_SURVEY_EMAIL_ATTEMPTS = 5;
+
+// How long a claimed send is treated as still in flight. Stripe delivers
+// at-least-once, so two deliveries of the same cancellation can overlap; the
+// claim UPDATE below refuses the second one while the first is inside this
+// window, which is what stops the customer getting two identical emails.
+//
+// The floor is the platform request timeout (10s on Vercel), past which an
+// in-flight send is dead and its row is genuinely stranded. The ceiling is
+// Stripe's first retry interval (~1h), so a real retry is never blocked.
+const SURVEY_EMAIL_CLAIM_COOLDOWN_SECONDS = 120;
+
 // One subscription line item, narrowed to just the fields MRR needs. Structural
 // types (rather than Stripe's own) keep this route testable without building a
 // full Stripe.Subscription fixture.
@@ -191,9 +206,6 @@ export async function POST(
     exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
   });
 
-  const surveyUrl = `${process.env.NEXT_PUBLIC_APP_URL}/survey/${token}`;
-  const optOutUrl = `${process.env.NEXT_PUBLIC_APP_URL}/api/survey/opt-out?token=${token}`;
-
   // Sum every line item, not just the first: a subscription with a base plan
   // plus an add-on lost both. survey_responses.mrr_lost is an integer dollar
   // column, so the arithmetic stays in cents and rounds exactly once, here.
@@ -211,6 +223,12 @@ export async function POST(
     : null;
 
   if (portalReason) {
+    // survey_email_sent_at stays NULL here, which is the truth: this branch
+    // deliberately sends no email. It cannot be picked up by the stranded-send
+    // retry path below because that path also requires surveyed_at IS NULL, and
+    // every row this branch writes sets surveyed_at. Keeping sent_at honest (as
+    // opposed to back-dating it to suppress the retry) means delivery stats can
+    // still tell "we never emailed this customer" from "the email went out".
     const inserted = await execute(
       `INSERT INTO survey_responses
          (org_id, customer_email, customer_name, stripe_subscription_id, mrr_lost, token, reason_category, open_text, surveyed_at)
@@ -237,26 +255,154 @@ export async function POST(
   }
 
   // Idempotency guard: skip if this subscription has already been processed.
+  //
+  // The insert claims the send in the same statement — survey_email_attempts
+  // starts at 1 and survey_email_last_attempt_at at now(), BEFORE the email
+  // goes out. Counting the attempt afterwards would miss the send that never
+  // returns (Resend stalls, the platform kills the request mid-flight): the
+  // counter would stay at 0 and the attempt cap would never engage, while a
+  // concurrent delivery would see an unclaimed row and mail the customer again.
   const inserted = await execute(
-    `INSERT INTO survey_responses (org_id, customer_email, customer_name, stripe_subscription_id, mrr_lost, token)
-     VALUES ($1, $2, $3, $4, $5, $6)
+    `INSERT INTO survey_responses
+       (org_id, customer_email, customer_name, stripe_subscription_id, mrr_lost, token,
+        survey_email_attempts, survey_email_last_attempt_at)
+     VALUES ($1, $2, $3, $4, $5, $6, 1, now())
      ON CONFLICT (stripe_subscription_id) DO NOTHING`,
     [org.id, customerEmail, customer.name ?? null, subscription.id, mrrLost, token],
   );
 
+  // The token that will actually be emailed. On the first insert it is the one
+  // we just signed and stored; on a retry it must be the token already on the
+  // row (see below).
+  let emailToken = token;
+
   if (inserted === 0) {
-    return NextResponse.json({ received: true, skipped: 'duplicate_event' });
+    // The row already exists. That is usually a genuine duplicate delivery — but
+    // it is also exactly what a *failed* send looks like on Stripe's retry.
+    //
+    // Claim the send with a single conditional UPDATE rather than reading the
+    // row and then deciding. Every condition that makes a row re-sendable is in
+    // the WHERE clause, and the same statement consumes the attempt, so under
+    // concurrent deliveries Postgres serializes the two writers on the row lock
+    // and re-checks the predicate against the winner's committed version: only
+    // one delivery can ever come away with a token, and therefore only one email
+    // is sent. A read-then-act would let both deliveries observe the pre-send
+    // state and both send.
+    //
+    // Reuse the token on the row, never a freshly signed one: survey_responses.
+    // token is UNIQUE and the survey page resolves the row *by* token, so a new
+    // token would email a link that matches no row at all.
+    const claimed = await queryOne<{ token: string }>(
+      `UPDATE survey_responses
+       SET survey_email_attempts = survey_email_attempts + 1,
+           survey_email_last_attempt_at = now()
+       WHERE stripe_subscription_id = $1
+         AND org_id = $2
+         AND surveyed_at IS NULL
+         AND survey_email_sent_at IS NULL
+         AND NOT is_test
+         AND token IS NOT NULL
+         AND survey_email_attempts < $3
+         AND (survey_email_last_attempt_at IS NULL
+              OR survey_email_last_attempt_at < now() - make_interval(secs => $4))
+       RETURNING token`,
+      [
+        subscription.id,
+        org.id,
+        MAX_SURVEY_EMAIL_ATTEMPTS,
+        SURVEY_EMAIL_CLAIM_COOLDOWN_SECONDS,
+      ],
+    );
+
+    if (!claimed) {
+      // We did not win the claim. Read the row to tell Stripe *why*, so an
+      // address that will never work stops being retried. This read decides
+      // only the response body — never whether to send — so it cannot race.
+      const existing = await queryOne<{
+        surveyed_at: string | null;
+        survey_email_sent_at: string | null;
+        survey_email_attempts: number;
+        is_test: boolean;
+      }>(
+        `SELECT surveyed_at, survey_email_sent_at, survey_email_attempts, is_test
+         FROM survey_responses
+         WHERE stripe_subscription_id = $1 AND org_id = $2`,
+        [subscription.id, org.id],
+      );
+
+      if (
+        existing &&
+        existing.surveyed_at === null &&
+        existing.survey_email_sent_at === null &&
+        !existing.is_test &&
+        existing.survey_email_attempts >= MAX_SURVEY_EMAIL_ATTEMPTS
+      ) {
+        // Return 200 so Stripe stops retrying — the address is not going to
+        // start working. The row stays with survey_email_sent_at NULL, which is
+        // how an operator finds it.
+        // The recipient address is deliberately NOT logged. It is a tenant's
+        // customer's personal information and this log ships to the platform's
+        // aggregator; the subscription id identifies the row for an operator
+        // without putting a data subject's email in third-party retention.
+        console.error(
+          `Survey email for org ${org.id}, subscription ${subscription.id} exhausted ` +
+            `${MAX_SURVEY_EMAIL_ATTEMPTS} send attempts — giving up.`,
+        );
+        return NextResponse.json({ received: true, skipped: 'email_send_exhausted' });
+      }
+
+      // Everything else — already answered, already emailed, a test row, no
+      // token, another org's subscription, or a sibling delivery holding the
+      // claim right now — is a plain duplicate.
+      return NextResponse.json({ received: true, skipped: 'duplicate_event' });
+    }
+
+    emailToken = claimed.token;
   }
+
+  const surveyUrl = `${process.env.NEXT_PUBLIC_APP_URL}/survey/${emailToken}`;
+  const optOutUrl = `${process.env.NEXT_PUBLIC_APP_URL}/api/survey/opt-out?token=${emailToken}`;
 
   const config = await loadSurveyConfig(org.id);
 
-  await sendSurveyEmail({
-    to: customerEmail,
-    customerName: customer.name ?? null,
-    surveyUrl,
-    optOutUrl,
-    displayName: config.displayName,
-  });
+  try {
+    await sendSurveyEmail({
+      to: customerEmail,
+      customerName: customer.name ?? null,
+      surveyUrl,
+      optOutUrl,
+      displayName: config.displayName,
+    });
+  } catch (err) {
+    // The attempt was already counted by the claim, so there is no bookkeeping
+    // to do here — which is the point: a send that dies without returning at all
+    // (provider stall, platform timeout) has consumed its attempt just the same.
+    console.error(
+      `Survey email send failed for org ${org.id}, subscription ${subscription.id}:`,
+      err,
+    );
+
+    // 5xx on purpose: Stripe retries 5xx with backoff, and the stranded-send
+    // path above turns that retry into a real second attempt.
+    return NextResponse.json({ error: 'Survey email send failed' }, { status: 500 });
+  }
+
+  try {
+    await execute(
+      `UPDATE survey_responses
+       SET survey_email_sent_at = now()
+       WHERE stripe_subscription_id = $1 AND org_id = $2`,
+      [subscription.id, org.id],
+    );
+  } catch (err) {
+    // The email is already out. A 5xx here would make Stripe retry and send a
+    // second copy to someone who just cancelled, so we accept the bookkeeping
+    // gap and log it loudly instead.
+    console.error(
+      `Survey email sent but marking survey_email_sent_at failed for subscription ${subscription.id}:`,
+      err,
+    );
+  }
 
   return NextResponse.json({ received: true });
 }

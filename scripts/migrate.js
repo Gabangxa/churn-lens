@@ -108,6 +108,28 @@ async function migrate() {
       ADD COLUMN IF NOT EXISTS is_test boolean NOT NULL DEFAULT false;
   `);
 
+  // Survey email delivery bookkeeping. Without these, a failed Resend send left
+  // a row with surveyed_at NULL — indistinguishable from a customer who simply
+  // never replied — while Stripe's webhook retry hit the ON CONFLICT DO NOTHING
+  // idempotency guard and reported a duplicate, so the email was lost forever.
+  // survey_email_sent_at NULL means "no email has ever successfully gone out",
+  // which is what makes a stranded row re-sendable; survey_email_attempts caps
+  // how long we keep asking Stripe to retry a permanently-failing address.
+  //
+  // survey_email_last_attempt_at is the concurrency guard. Stripe delivers
+  // at-least-once, so two deliveries of the same event can be in flight at the
+  // same time; both would otherwise see survey_email_sent_at NULL (it is only
+  // stamped AFTER the send returns) and both would email the customer. The
+  // webhook claims a send with a conditional UPDATE on this column, so the
+  // second delivery finds a fresh timestamp and backs off. A stranded row is
+  // still re-sendable once the timestamp ages past the cooldown.
+  await pool.query(`
+    ALTER TABLE survey_responses
+      ADD COLUMN IF NOT EXISTS survey_email_sent_at timestamptz,
+      ADD COLUMN IF NOT EXISTS survey_email_attempts integer NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS survey_email_last_attempt_at timestamptz;
+  `);
+
   await pool.query(`
     DO $$
     BEGIN
