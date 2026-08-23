@@ -62,7 +62,10 @@ export async function POST(req: NextRequest) {
     const loginUrl = `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/verify?token=${token}`;
 
     try {
-      await getResend().emails.send({
+      // Resend resolves with `{ data: null, error }` rather than throwing, so
+      // the catch below only sees failures if we surface them ourselves.
+      // Without this, a rejected send is logged as a delivered login link.
+      const { error } = await getResend().emails.send({
         from: FROM_EMAIL,
         to: normEmail,
         subject: 'Your ChurnLens login link',
@@ -77,6 +80,10 @@ this, you can safely ignore this email — nothing will happen.
 
 — ChurnLens`,
       });
+
+      if (error) {
+        throw new Error(`Resend send failed: ${error.name}: ${error.message}`);
+      }
     } catch (err) {
       // Log but don't leak send status to the caller.
       console.error('Login email send failed:', err);

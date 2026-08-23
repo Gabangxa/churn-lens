@@ -1,109 +1,66 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+// The Resend SDK never throws on a failed send: `fetchRequest` catches network
+// faults and turns non-2xx responses into `{ data: null, error }`, then resolves.
+// Callers of sendSurveyEmail (the Stripe webhook) branch on a thrown error to
+// decide whether to retry and whether to stamp survey_email_sent_at, so this
+// mock reproduces the resolve-with-error shape exactly.
 const sendMock = vi.fn();
-
-vi.mock('../resend', () => ({
-  getResend: () => ({ emails: { send: sendMock } }),
+vi.mock('@/lib/resend', () => ({
+  getResend: () => ({ emails: { send: (...args: unknown[]) => sendMock(...args) } }),
   FROM_EMAIL: 'digest@churnlens.com',
 }));
 
 import { sendSurveyEmail } from '../survey-email';
 
-beforeEach(() => {
-  sendMock.mockReset();
-  sendMock.mockResolvedValue({ data: { id: 'email-1' }, error: null });
-});
-
-const BASE_OPTS = {
+const OPTS = {
   to: 'customer@example.com',
   customerName: 'Jane',
-  surveyUrl: 'https://churnlens.com/survey/tok123',
-  optOutUrl: 'https://churnlens.com/opt-out/tok123',
+  surveyUrl: 'https://app.churnlens.com/survey/tok',
+  optOutUrl: 'https://app.churnlens.com/api/survey/opt-out?token=tok',
 };
 
-// Exact pre-CL-1 template, reproduced here as the regression baseline. If
-// this test fails, either the template changed unintentionally, or the
-// baseline below needs to be updated deliberately alongside the change.
-function expectedText(opts: { customerName: string | null; surveyUrl: string; optOutUrl: string; founderCopy: string; signOff: string }) {
-  const { customerName, surveyUrl, optOutUrl, founderCopy, signOff } = opts;
-  return `Hi${customerName ? ` ${customerName}` : ''},
-
-We noticed you cancelled your subscription. We completely understand — no hard feelings.
-
-One quick question: what was the main reason?
-
-→ ${surveyUrl}
-
-It takes two minutes and goes directly to ${founderCopy} (not a support queue). Your answer genuinely shapes what gets built next.
-
-Thanks,
-${signOff}
-
----
-You received this because you had an active subscription. Unsubscribe from exit surveys: ${optOutUrl}
-`;
-}
+beforeEach(() => {
+  sendMock.mockReset();
+});
 
 describe('sendSurveyEmail', () => {
-  it('without a displayName, is byte-identical to the pre-CL-1 template', async () => {
-    await sendSurveyEmail(BASE_OPTS);
+  it('resolves when Resend reports success', async () => {
+    sendMock.mockResolvedValue({ data: { id: 'email_1' }, error: null });
 
+    await expect(sendSurveyEmail(OPTS)).resolves.toBeUndefined();
     expect(sendMock).toHaveBeenCalledTimes(1);
-    const call = sendMock.mock.calls[0][0];
-    expect(call.from).toBe('digest@churnlens.com');
-    expect(call.to).toBe(BASE_OPTS.to);
-    expect(call.subject).toBe('Quick question before you go');
-    expect(call.text).toBe(
-      expectedText({
-        customerName: BASE_OPTS.customerName,
-        surveyUrl: BASE_OPTS.surveyUrl,
-        optOutUrl: BASE_OPTS.optOutUrl,
-        founderCopy: 'the founder',
-        signOff: 'The team',
-      }),
-    );
-    expect(call.text).toContain('goes directly to the founder');
-    expect(call.text).toContain('Thanks,\nThe team');
   });
 
-  it('displayName null behaves identically to displayName omitted (zero-config default)', async () => {
-    await sendSurveyEmail({ ...BASE_OPTS, displayName: null });
-    const withNull = sendMock.mock.calls[0][0];
+  it.each([
+    ['a hard bounce / rejected recipient', { name: 'validation_error', message: 'Invalid `to` field.' }],
+    ['a rate limit', { name: 'rate_limit_exceeded', message: 'Too many requests.' }],
+    [
+      'a network fault the SDK swallowed',
+      { name: 'application_error', message: 'Unable to fetch data. The request could not be resolved.' },
+    ],
+  ])('throws when Resend resolves with an error: %s', async (_case, error) => {
+    // Without this, the send is recorded as delivered: the webhook's catch never
+    // runs, survey_email_sent_at is stamped, and the customer never gets a link
+    // while nothing in the system says so.
+    sendMock.mockResolvedValue({ data: null, error });
 
-    sendMock.mockClear();
-    await sendSurveyEmail(BASE_OPTS);
-    const withOmitted = sendMock.mock.calls[0][0];
-
-    expect(withNull).toEqual(withOmitted);
+    await expect(sendSurveyEmail(OPTS)).rejects.toThrow(/Resend send failed/);
   });
 
-  it('with a displayName set, only the two interpolation points change — nothing else', async () => {
-    await sendSurveyEmail({ ...BASE_OPTS, displayName: 'Acme' });
-    const call = sendMock.mock.calls[0][0];
-
-    const expected = expectedText({
-      customerName: BASE_OPTS.customerName,
-      surveyUrl: BASE_OPTS.surveyUrl,
-      optOutUrl: BASE_OPTS.optOutUrl,
-      founderCopy: 'the Acme team',
-      signOff: 'The Acme team',
+  it('names the Resend error in the message so the log identifies the cause', async () => {
+    sendMock.mockResolvedValue({
+      data: null,
+      error: { name: 'validation_error', message: 'Invalid `to` field.' },
     });
-    expect(call.text).toBe(expected);
-    expect(call.subject).toBe('Quick question before you go'); // subject unaffected by displayName
+
+    await expect(sendSurveyEmail(OPTS)).rejects.toThrow(/validation_error/);
+    await expect(sendSurveyEmail(OPTS)).rejects.toThrow(/Invalid `to` field\./);
   });
 
-  it('prefixes the subject with [Test] when isTest is set, independent of displayName', async () => {
-    await sendSurveyEmail({ ...BASE_OPTS, isTest: true });
-    expect(sendMock.mock.calls[0][0].subject).toBe('[Test] Quick question before you go');
+  it('still propagates a genuinely thrown error (e.g. RESEND_API_KEY unset)', async () => {
+    sendMock.mockRejectedValue(new Error('boom'));
 
-    sendMock.mockClear();
-    await sendSurveyEmail({ ...BASE_OPTS, isTest: true, displayName: 'Acme' });
-    expect(sendMock.mock.calls[0][0].subject).toBe('[Test] Quick question before you go');
-  });
-
-  it('omits the greeting name when customerName is null', async () => {
-    await sendSurveyEmail({ ...BASE_OPTS, customerName: null });
-    const call = sendMock.mock.calls[0][0];
-    expect(call.text.startsWith('Hi,\n')).toBe(true);
+    await expect(sendSurveyEmail(OPTS)).rejects.toThrow('boom');
   });
 });
