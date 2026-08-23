@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { query, execute } from '@/lib/db';
-import { clusterResponses } from '@/lib/openai';
+import { MAX_RESPONSES_PER_BATCH, clusterResponses } from '@/lib/openai';
 import { verifyCronSecret } from '@/lib/auth';
 import { reportingWeek } from '@/lib/week';
 
@@ -48,6 +48,21 @@ export async function POST(req: Request) {
       .map((r) => ({ text: r.open_text!, reason: r.reason_category }));
 
     if (input.length === 0) continue;
+
+    // Trim here rather than letting clusterResponses do it silently. The theme
+    // counts it returns describe only the responses the model actually saw, and
+    // mrr_impact below divides by this array's length — if the library trimmed
+    // the batch and we kept the untrimmed denominator, every theme's MRR would
+    // be scaled down by the ratio of the two, understating churn cost exactly
+    // where founders read it. Same ceiling either way; the library keeps its own
+    // copy as a backstop for other callers.
+    if (input.length > MAX_RESPONSES_PER_BATCH) {
+      console.warn(
+        `Org ${org.id}: clustering the first ${MAX_RESPONSES_PER_BATCH} of ${input.length} ` +
+          `responses for ${weekOfStr}; theme counts and MRR describe that sample.`,
+      );
+      input.length = MAX_RESPONSES_PER_BATCH;
+    }
 
     let themes;
     try {

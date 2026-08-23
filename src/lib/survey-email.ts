@@ -22,7 +22,12 @@ export async function sendSurveyEmail(opts: {
   const founderCopy = displayName ? `the ${displayName} team` : 'the founder';
   const signOff = displayName ? `The ${displayName} team` : 'The team';
 
-  await getResend().emails.send({
+  // The Resend SDK resolves with `{ data: null, error }` on failure — it does
+  // NOT throw, for HTTP errors or for network faults. Callers here decide what
+  // to do based on a thrown error (the webhook retries; the row stays
+  // unstamped), so an unchecked return value would record every hard bounce as
+  // a successful delivery.
+  const { error } = await getResend().emails.send({
     from: FROM_EMAIL,
     to,
     subject: `${isTest ? '[Test] ' : ''}Quick question before you go`,
@@ -43,4 +48,8 @@ ${signOff}
 You received this because you had an active subscription. Unsubscribe from exit surveys: ${optOutUrl}
 `,
   });
+
+  if (error) {
+    throw new Error(`Resend send failed: ${error.name}: ${error.message}`);
+  }
 }

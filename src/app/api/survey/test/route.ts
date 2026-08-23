@@ -73,6 +73,24 @@ export async function POST(req: NextRequest) {
       isTest: true,
       displayName: config.displayName,
     });
+
+    // Same delivery bookkeeping as the webhook path so the two never drift:
+    // survey_email_sent_at NULL always means "no email ever went out", whichever
+    // route wrote the row. Its own try/catch keeps a bookkeeping failure from
+    // reporting an email that did send as a failed one.
+    try {
+      await execute(
+        `UPDATE survey_responses
+         SET survey_email_sent_at = now(), survey_email_attempts = survey_email_attempts + 1
+         WHERE stripe_subscription_id = $1 AND org_id = $2`,
+        [testSubscriptionId, orgId],
+      );
+    } catch (bookkeepingErr) {
+      console.error(
+        `Test survey sent but marking survey_email_sent_at failed for ${testSubscriptionId}:`,
+        bookkeepingErr,
+      );
+    }
   } catch (err) {
     console.error('Test survey send failed:', err);
     return NextResponse.json({ error: 'Failed to send test survey.' }, { status: 500 });

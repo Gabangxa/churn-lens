@@ -123,6 +123,7 @@ export default async function SurveyPage({ params }: { params: { token: string }
                 id="open-text"
                 name="open_text"
                 rows={4}
+                maxLength={2000}
                 placeholder="Anything helps — even a sentence."
                 className="w-full rounded-3xl border-2 border-zinc-200 dark:border-zinc-800 bg-[#f8f9fa] dark:bg-[#18181b] p-5 text-sm font-medium text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 shadow-inner transition-all focus:border-teal-600 focus:bg-white dark:focus:bg-[#121214] focus:outline-none resize-none"
               />
@@ -141,6 +142,7 @@ export default async function SurveyPage({ params }: { params: { token: string }
                 id="comeback"
                 name="comeback_text"
                 rows={3}
+                maxLength={2000}
                 placeholder="A specific feature, a lower price, better onboarding…"
                 className="w-full rounded-3xl border-2 border-zinc-200 dark:border-zinc-800 bg-[#f8f9fa] dark:bg-[#18181b] p-5 text-sm font-medium text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 shadow-inner transition-all focus:border-teal-600 focus:bg-white dark:focus:bg-[#121214] focus:outline-none resize-none"
               />
