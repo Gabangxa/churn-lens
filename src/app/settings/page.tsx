@@ -28,6 +28,9 @@ export default function SettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [sendingTest, setSendingTest] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [billingNotice, setBillingNotice] = useState<
+    { tone: 'ok' | 'warn'; message: string; showPlans?: boolean } | null
+  >(null);
 
   const reasonIdCounter = useRef(0);
   const [configLoading, setConfigLoading] = useState(true);
@@ -116,6 +119,44 @@ export default function SettingsPage() {
   }, [saveResult]);
 
   useEffect(() => setLogoBroken(false), [logoUrl]);
+
+  // Reasons /api/billing/portal and /api/billing/checkout can send the founder
+  // back here. Those routes are reached by clicking an anchor, so they redirect
+  // rather than answering in JSON, and this turns the reason into a notice.
+  //
+  // window.location rather than useSearchParams: this page is a client component
+  // and useSearchParams would force a Suspense boundary around it at build time.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+
+    if (params.get('checkout') === 'success') {
+      // The checkout route has redirected here since it shipped and nothing
+      // acknowledged it — the founder paid and the page looked unchanged. The
+      // plan itself arrives asynchronously via the subscription webhook, so this
+      // deliberately does not claim the upgrade is already live.
+      setBillingNotice({ tone: 'ok', message: 'Payment received — your plan updates in a moment.' });
+      return;
+    }
+
+    switch (params.get('billing')) {
+      case 'none':
+        setBillingNotice({
+          tone: 'warn',
+          message: 'No billing account yet — pick a plan to open the portal.',
+          showPlans: true,
+        });
+        break;
+      case 'busy':
+        setBillingNotice({ tone: 'warn', message: 'Too many attempts. Give it a minute and try again.' });
+        break;
+      case 'unconfigured':
+        setBillingNotice({ tone: 'warn', message: 'Billing is not set up on this deployment yet.' });
+        break;
+      case 'error':
+        setBillingNotice({ tone: 'warn', message: 'Could not open the billing portal. Please try again.' });
+        break;
+    }
+  }, []);
 
   function handleAddReason() {
     if (reasons.length >= MAX_REASONS) return;
@@ -538,6 +579,67 @@ export default function SettingsPage() {
               </Link>
             </div>
           )}
+        </div>
+
+        {/* ── Billing ── */}
+        <div className="card mt-6">
+          <h2 className="mb-1 text-2xl font-bold font-display text-zinc-900 dark:text-white transition-colors duration-500">
+            Billing
+          </h2>
+          <p className="mb-6 text-sm font-medium text-muted">
+            View invoices, update your card, or cancel. Opens Polar, our payment provider, in a new
+            tab.
+          </p>
+
+          {billingNotice && (
+            <div
+              className={
+                billingNotice.tone === 'ok'
+                  ? 'mb-4 rounded-2xl border-2 border-teal-400/60 bg-teal-400/10 px-4 py-2.5 text-sm text-teal-800 dark:text-teal-300'
+                  : 'mb-4 rounded-2xl border-2 border-amber-400/60 bg-amber-400/10 px-4 py-2.5 text-sm text-amber-800 dark:text-amber-300'
+              }
+            >
+              <p className="font-bold">{billingNotice.message}</p>
+              {billingNotice.showPlans && (
+                <>
+                  {/* The notice names an action, so it has to link to one. Nothing
+                  else in the app reaches checkout — the landing page's plan CTAs
+                  go to /onboarding, which never forwards ?plan — so without these
+                  two links "pick a plan" is an instruction with nowhere to go.
+                  Plain anchors again: prefetching a checkout route would open a
+                  Polar checkout session on hover. */}
+              <p className="mt-1.5 font-medium">
+                <a
+                  href="/api/billing/checkout?plan=starter"
+                  className="font-bold underline underline-offset-2 hover:no-underline"
+                >
+                  Subscribe to Starter
+                </a>
+                <span className="px-2" aria-hidden="true">
+                  ·
+                </span>
+                <a
+                  href="/api/billing/checkout?plan=growth"
+                  className="font-bold underline underline-offset-2 hover:no-underline"
+                >
+                  Subscribe to Growth
+                </a>
+              </p>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* A plain anchor, not next/link: prefetch would mint a live, bearer-
+              authenticated portal URL on hover. */}
+          <a
+            href="/api/billing/portal"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-block rounded-full border-2 border-zinc-200 dark:border-zinc-700 px-6 py-3 text-xs font-extrabold uppercase tracking-widest text-zinc-600 dark:text-zinc-300 hover:border-zinc-900 dark:hover:border-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
+          >
+            Manage billing
+          </a>
         </div>
       </main>
     </div>

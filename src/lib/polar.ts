@@ -31,6 +31,19 @@ export function getPolar(): Polar {
   return new Polar({ accessToken, server: polarServer() });
 }
 
+/**
+ * Whether billing is wired in this environment at all.
+ *
+ * Lets a browser-facing route tell "we never configured this" (503 — retrying
+ * will never help) apart from "Polar had a bad minute" (502 — retrying might).
+ * getPolar() throws for the former, but a thrown Error inside a catch-all is
+ * indistinguishable from a network failure, and the founder gets told to try
+ * again forever.
+ */
+export function isPolarConfigured(): boolean {
+  return !!process.env.POLAR_ACCESS_TOKEN;
+}
+
 export function getPolarWebhookSecret(): string {
   const secret = process.env.POLAR_WEBHOOK_SECRET;
   if (!secret) {
