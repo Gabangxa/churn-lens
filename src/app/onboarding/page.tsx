@@ -22,8 +22,11 @@ const STRIPE_OAUTH_ENABLED = false;
 function OnboardingForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  // Display only. /api/onboarding/connect does not accept or store a plan, so
-  // this is never sent — surfacing it as a chip just confirms the click.
+  // The plan a visitor picked on the landing page. /api/onboarding/connect still
+  // neither accepts nor stores it — the plan is set by Polar's subscription
+  // webhook, not by onboarding — but it decides where the founder goes next: a
+  // paid pick continues to checkout instead of dropping them on the dashboard,
+  // which silently discarded the thing they clicked.
   const plan = searchParams.get('plan');
   const planCopy = plan ? PLAN_COPY[plan] : null;
 
@@ -48,6 +51,15 @@ function OnboardingForm() {
         setError(data.error || 'Something went wrong.');
         return;
       }
+      // Only ever forward a plan we recognize, never the raw query value.
+      if (plan === 'starter' || plan === 'growth') {
+        // Full navigation, not router.push: /api/billing/checkout answers with a
+        // 303 to an external Polar URL, and the client router cannot follow a
+        // redirect off-origin.
+        window.location.assign(`/api/billing/checkout?plan=${plan}`);
+        return;
+      }
+
       router.push('/dashboard');
     } catch {
       setError('Network error. Please try again.');
