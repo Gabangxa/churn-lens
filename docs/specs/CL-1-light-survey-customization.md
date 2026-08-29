@@ -2,7 +2,7 @@
 
 - **Type:** feature
 - **Priority:** P2
-- **Status:** ready
+- **Status:** done — shipped in `d3f7bf2`; code-guardian and test-architect both passed
 - **Gates required:** code-guardian, test-architect (deploy-engineer — not required; see Gates section)
 
 ---
