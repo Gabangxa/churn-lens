@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import LegalPage, { Section, List, Callout } from '@/components/LegalPage';
-import { LEGAL, SUB_PROCESSORS } from '@/lib/legal';
+import { LEGAL, DPA_SUB_PROCESSORS } from '@/lib/legal';
 
 export const metadata = {
   title: 'Data Processing Agreement — ChurnLens',
@@ -115,7 +115,7 @@ export default function DpaPage() {
               </tr>
             </thead>
             <tbody>
-              {SUB_PROCESSORS.map((sp) => (
+              {DPA_SUB_PROCESSORS.map((sp) => (
                 <tr key={sp.name} className="border-b border-zinc-100 dark:border-zinc-800/60">
                   <td className="py-3 pr-4">
                     <a href={sp.url} className="font-bold text-pink-500 dark:text-pink-400 hover:underline" target="_blank" rel="noreferrer">

@@ -173,6 +173,17 @@ export default function PrivacyPolicyPage() {
           agreement with that business.
         </p>
         <p>
+          <strong>Polar receives account data only.</strong> Polar is the merchant of record
+          for ChurnLens subscriptions, so it processes the account holder&apos;s name, email
+          address and billing details. It never receives exit-survey data — no churned
+          customer&apos;s name, email address or free-text answer is disclosed to it. That is
+          why Polar does not appear in the sub-processor table of our{' '}
+          <a href="/legal/dpa" className="font-bold text-pink-500 dark:text-pink-400 hover:underline">
+            Data Processing Agreement
+          </a>
+          , which covers only the data we process on our customers&apos; behalf.
+        </p>
+        <p>
           We may also disclose data where required by law, or to a successor entity in a
           merger or acquisition, in which case this policy continues to apply.
         </p>

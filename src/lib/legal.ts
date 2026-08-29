@@ -37,7 +37,22 @@ export const LEGAL = {
   deletionWindow: '30 days',
 } as const;
 
-/** Named third parties that receive personal data. Disclosed in the policy and DPA. */
+/**
+ * Named third parties that receive personal data. Disclosed in the policy and DPA.
+ *
+ * `processesCustomerData` is what keeps the two documents from lying in opposite
+ * directions. The privacy policy covers BOTH tiers — the founder's own account
+ * data (we are controller) and their churned customers' data (we are processor) —
+ * so it lists every entry. The DPA governs only the second tier, so it must list
+ * only the entries that actually touch a customer's end-customer data.
+ *
+ * Polar is the case that forced the distinction: it bills ChurnLens itself and
+ * never sees a churned customer's name, email or free text. Listing it in the
+ * DPA's table would tell a signing customer that their end customers' data is
+ * disclosed to a payment processor, which is false. Omitting it from the privacy
+ * policy would be equally false in the other direction — it does process the
+ * founder's own name, email and billing details.
+ */
 export const SUB_PROCESSORS = [
   {
     name: 'Railway',
@@ -45,6 +60,7 @@ export const SUB_PROCESSORS = [
     data: 'All data stored by the Service',
     region: 'United States',
     url: 'https://railway.com/legal/dpa',
+    processesCustomerData: true,
   },
   {
     name: 'Resend',
@@ -52,6 +68,7 @@ export const SUB_PROCESSORS = [
     data: 'Recipient email addresses and names, email content',
     region: 'United States',
     url: 'https://resend.com/legal/dpa',
+    processesCustomerData: true,
   },
   {
     name: 'OpenAI',
@@ -59,8 +76,23 @@ export const SUB_PROCESSORS = [
     data: 'Free-text survey answers and the selected cancellation reason',
     region: 'United States',
     url: 'https://openai.com/policies/data-processing-addendum/',
+    processesCustomerData: true,
+  },
+  {
+    name: 'Polar',
+    purpose: 'Subscription billing for ChurnLens accounts (merchant of record)',
+    data: 'Account holder name, email address and billing details. No survey data.',
+    region: 'United States',
+    url: 'https://polar.sh/legal/data-processing-addendum',
+    processesCustomerData: false,
   },
 ] as const;
+
+/**
+ * The subset disclosed in the DPA — those that process the customer's own
+ * end-customer personal data. See the note on SUB_PROCESSORS.
+ */
+export const DPA_SUB_PROCESSORS = SUB_PROCESSORS.filter((sp) => sp.processesCustomerData);
 
 /**
  * True when any placeholder is still unfilled. Used to show the DRAFT banner.
