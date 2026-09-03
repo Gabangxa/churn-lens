@@ -62,8 +62,8 @@ export default function TermsPage() {
         </p>
         <p>
           You can delete your account at any time from Settings. Deletion disconnects Stripe
-          and stops surveys immediately, and is final — your data is permanently erased — 30
-          days after you request it.
+          and stops surveys immediately, and is final — your data is permanently erased —{' '}
+          {LEGAL.deletionWindow} after you request it.
         </p>
       </Section>
 

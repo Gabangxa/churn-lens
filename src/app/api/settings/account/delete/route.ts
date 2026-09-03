@@ -88,5 +88,8 @@ export async function POST(req: NextRequest) {
     ...(billing ? { billing } : {}),
     ...(stripeDisconnectFailed ? { stripe: 'disconnect_failed' } : {}),
   });
-  return clearOrgCookie(response);
+  // When the Polar revoke failed the UI sends the founder to /api/billing/portal
+  // to cancel by hand, and that route needs the session. The account is still
+  // usable during the grace window anyway, so keeping the cookie costs nothing.
+  return billing === 'revoke_failed' ? response : clearOrgCookie(response);
 }

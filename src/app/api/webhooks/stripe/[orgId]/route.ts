@@ -130,14 +130,6 @@ export async function POST(
     return NextResponse.json({ error: 'Unknown organization' }, { status: 404 });
   }
 
-  // Deletion requested: stop collecting new PII for an account on its way out.
-  // Checked before the customer is even retrieved from Stripe — the whole
-  // point is that no further personal data is fetched or stored once erasure
-  // has been requested, not just that no email goes out.
-  if (org.deletion_requested_at) {
-    return NextResponse.json({ received: true, skipped: 'deletion_pending' });
-  }
-
   // CAN-SPAM footer not fillable yet: refuse before anything is recorded, not
   // just before the email is sent. Checked here — before the customer is even
   // retrieved from Stripe, and before either survey_responses write path below
@@ -162,6 +154,16 @@ export async function POST(
   } catch (err) {
     console.error(`Webhook signature verification failed for org ${orgId}:`, err);
     return NextResponse.json({ error: 'Invalid signature' }, { status: 400 });
+  }
+
+  // Deletion requested: stop collecting new PII for an account on its way out.
+  // Checked before the customer is even retrieved from Stripe — the whole
+  // point is that no further personal data is fetched or stored once erasure
+  // has been requested, not just that no email goes out. Sits below signature
+  // verification so an unauthenticated caller holding the URL cannot probe
+  // whether an org is being deleted.
+  if (org.deletion_requested_at) {
+    return NextResponse.json({ received: true, skipped: 'deletion_pending' });
   }
 
   if (event.type !== 'customer.subscription.deleted') {

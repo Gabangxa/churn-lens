@@ -241,9 +241,9 @@ export default function PrivacyPolicyPage() {
             <>
               <strong>Opt-out records</strong> — kept for as long as the business you opted out
               of has an account with us, so the suppression keeps being honoured. Once that
-              business closes its account, the opt-out record is deleted along with it by the
-              same daily job — it no longer protects anyone, since that business can no longer
-              survey you through us at all.
+              business closes its account, the opt-out record is erased with it by the same
+              daily job. If that business later opens a new account, you would need to opt
+              out again.
             </>,
             <>
               <strong>Sign-in tokens</strong> — deleted by the same daily job shortly after they

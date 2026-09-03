@@ -691,7 +691,9 @@ describe('pre-send guards', () => {
     const res = await callPost();
 
     expect(await res.json()).toEqual({ received: true, skipped: 'deletion_pending' });
-    expect(constructEventMock).not.toHaveBeenCalled();
+    // Signature is verified first so the URL alone cannot probe deletion state;
+    // after that nothing else is fetched or written.
+    expect(constructEventMock).toHaveBeenCalledTimes(1);
     expect(customersRetrieveMock).not.toHaveBeenCalled();
     expect(sendSurveyEmailMock).not.toHaveBeenCalled();
     expect(executeMock).not.toHaveBeenCalled();
@@ -810,15 +812,16 @@ describe('an org that has requested deletion', () => {
     queryOneMock.mockResolvedValue(orgRow({ deletion_requested_at: '2026-08-01T00:00:00Z' }));
   });
 
-  it('is skipped before the event is even parsed, so no payload data is read', async () => {
-    // The skip sits above constructEvent on purpose: the point is that no
-    // further personal data is fetched, parsed or stored for an account on its
-    // way out — not merely that no email is sent.
+  it('is skipped right after the signature is verified, before any customer data is fetched', async () => {
+    // The skip sits just below constructEvent: signature first, so an
+    // unauthenticated caller holding the URL cannot probe whether an org is
+    // being deleted; then nothing further is fetched, parsed or stored.
     const res = await callPost();
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ received: true, skipped: 'deletion_pending' });
-    expect(constructEventMock).not.toHaveBeenCalled();
+    expect(constructEventMock).toHaveBeenCalledTimes(1);
+    expect(customersRetrieveMock).not.toHaveBeenCalled();
   });
 
   it('runs no further queries — no free-tier count, no suppression check, no insert', async () => {

@@ -220,7 +220,7 @@ describe('POST /api/settings/account/delete — teardown order and cookie', () =
     expect(order).toEqual(['mark', 'disconnect', 'revoke', 'clear-cookie']);
   });
 
-  it('clears the session cookie even when the Polar revoke failed', async () => {
+  it('keeps the session when the Polar revoke failed, so the billing-portal link still works', async () => {
     queryOneMock.mockResolvedValue({
       deletion_requested_at: '2026-09-01T00:00:00.000Z',
       polar_subscription_id: 'sub_123',
@@ -229,10 +229,9 @@ describe('POST /api/settings/account/delete — teardown order and cookie', () =
 
     const res = await POST(deleteRequest());
 
-    expect(clearOrgCookieMock).toHaveBeenCalledTimes(1);
-    // The response returned is the one the cookie was cleared on, not a
-    // different object that happens to have the same body.
-    expect(clearOrgCookieMock.mock.results[0].value).toBe(res);
+    // /api/billing/portal needs the session; clearing it here would dead-end
+    // the one remediation the founder is being asked to perform.
+    expect(clearOrgCookieMock).not.toHaveBeenCalled();
     expect(await res.json()).toMatchObject({ ok: true, billing: 'revoke_failed' });
   });
 

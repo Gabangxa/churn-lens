@@ -165,10 +165,12 @@ export async function clusterResponses(
     ],
     temperature: 0.2,
     response_format: { type: 'json_object' },
-    // Opts this request out of OpenAI's default 30-day retention. The input
-    // here is a churned customer's free-text survey answer — data we process
-    // as a processor on someone else's instructions, not our own — so it
-    // should not be retained by a sub-processor any longer than necessary.
+    // Asks OpenAI not to store this completion for its evals/distillation
+    // features. It does not change OpenAI's abuse-monitoring retention; that
+    // needs Zero Data Retention on the API project (see the privacy policy).
+    // The input is a churned customer's free-text answer — data we handle as
+    // a processor on someone else's instructions — so opt out of anything
+    // optional.
     store: false,
   });
 
