@@ -767,3 +767,90 @@ describe('scripts/migrate.js survey-email bookkeeping columns', () => {
     expect(alter).toBeGreaterThan(create);
   });
 });
+
+// ─── Deletion pending: nothing further may be collected ───────────────────
+
+describe('an org that has requested deletion', () => {
+  beforeEach(() => {
+    queryOneMock.mockReset();
+    queryOneMock.mockResolvedValue(orgRow({ deletion_requested_at: '2026-08-01T00:00:00Z' }));
+  });
+
+  it('is skipped before the event is even parsed, so no payload data is read', async () => {
+    // The skip sits above constructEvent on purpose: the point is that no
+    // further personal data is fetched, parsed or stored for an account on its
+    // way out — not merely that no email is sent.
+    const res = await callPost();
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ received: true, skipped: 'deletion_pending' });
+    expect(constructEventMock).not.toHaveBeenCalled();
+  });
+
+  it('runs no further queries — no free-tier count, no suppression check, no insert', async () => {
+    await callPost();
+
+    expect(queryCountMock).not.toHaveBeenCalled();
+    expect(executeMock).not.toHaveBeenCalled();
+    expect(queryOneMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips regardless of plan or stored Stripe credentials', async () => {
+    queryOneMock.mockResolvedValue(
+      orgRow({ deletion_requested_at: '2026-08-01T00:00:00Z', plan: 'free' }),
+    );
+
+    expect(await (await callPost()).json()).toEqual({
+      received: true,
+      skipped: 'deletion_pending',
+    });
+    expect(customersRetrieveMock).not.toHaveBeenCalled();
+  });
+
+  it('still 404s an unknown org rather than reporting a deletion skip', async () => {
+    queryOneMock.mockResolvedValue(null);
+
+    const res = await callPost();
+
+    expect(res.status).toBe(404);
+  });
+});
+
+// ─── The footer guard must not swallow real send failures ─────────────────
+
+describe('discriminating the legal-footer refusal from a delivery failure', () => {
+  it('500s an error that merely shares the name but is not the exported class', async () => {
+    // The route branches on `instanceof LegalFooterUnfilledError`, not on
+    // err.name. If that ever became a name/message check, a Resend failure that
+    // happened to mention the class would be answered 200 and the customer
+    // would never be surveyed — silently, since nothing retries a 200.
+    const impostor = new Error('LegalFooterUnfilledError');
+    impostor.name = 'LegalFooterUnfilledError';
+    sendSurveyEmailMock.mockRejectedValue(impostor);
+
+    const res = await callPost();
+
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: 'Survey email send failed' });
+  });
+
+  it('500s a subclass of Error that is not the footer error', async () => {
+    class ResendTransportError extends Error {}
+    sendSurveyEmailMock.mockRejectedValue(new ResendTransportError('socket hang up'));
+
+    const res = await callPost();
+
+    expect(res.status).toBe(500);
+  });
+
+  it('leaves the row claimable: one attempt counted, sent_at never stamped', async () => {
+    sendSurveyEmailMock.mockRejectedValue(new MockLegalFooterUnfilledError('unfilled'));
+
+    await callPost();
+
+    const stampWrites = executeMock.mock.calls.filter(([sql]) =>
+      /UPDATE survey_responses[\s\S]*survey_email_sent_at/.test(String(sql)),
+    );
+    expect(stampWrites).toHaveLength(0);
+  });
+});

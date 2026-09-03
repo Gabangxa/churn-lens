@@ -19,6 +19,7 @@ import {
   isPurgeDue,
   JOBS,
   MAX_ATTEMPTS,
+  PURGE_HOUR_UTC,
   STALE_RUNNING_MS,
   todayDateStr,
 } from '../cron';
@@ -346,37 +347,65 @@ describe('decidePollAction', () => {
   });
 });
 
-describe('isPurgeDue', () => {
-  it('is not due at 02:59 UTC', () => {
-    expect(isPurgeDue(new Date('2026-03-16T02:59:00Z'))).toBe(false);
+describe('isPurgeDue — the boundary of the daily window', () => {
+  // A pure time-of-day gate, with no DB dependency and no status argument:
+  // the scheduler checks this BEFORE reading cron_runs at all, so it can
+  // skip that read entirely before 03:00 UTC instead of querying every 10
+  // minutes for a job that can't be due yet. Whether today's row is worth
+  // calling again (succeeded / stale-running / under-the-attempts-cap /
+  // exhausted) is decidePollAction's job once isPurgeDue has said yes — see
+  // its suite above, which applies to purge exactly the same way it does to
+  // the weekly jobs.
+  it('is not due at 02:59:59.999 UTC', () => {
+    expect(isPurgeDue(new Date('2026-03-16T02:59:59.999Z'))).toBe(false);
   });
 
-  it('is due at 03:00 UTC', () => {
-    expect(isPurgeDue(new Date('2026-03-16T03:00:00Z'))).toBe(true);
+  it('is due at exactly 03:00:00.000 UTC', () => {
+    expect(isPurgeDue(new Date('2026-03-16T03:00:00.000Z'))).toBe(true);
   });
 
-  it('is due any time after 03:00 UTC', () => {
-    expect(isPurgeDue(new Date('2026-03-16T23:59:00Z'))).toBe(true);
+  it('is due any time after 03:00 UTC, any day', () => {
+    expect(isPurgeDue(new Date('2026-03-17T03:00:00Z'))).toBe(true);
+    expect(isPurgeDue(new Date('2026-03-17T23:59:00Z'))).toBe(true);
   });
 
-  it('is not due before 03:00 UTC', () => {
-    expect(isPurgeDue(new Date('2026-03-16T00:00:00Z'))).toBe(false);
+  it('is not due before 03:00 UTC the next day either', () => {
+    expect(isPurgeDue(new Date('2026-03-17T02:00:00Z'))).toBe(false);
   });
 
-  // Whether a day that's already succeeded is worth calling again is
-  // decidePollAction's job, not isPurgeDue's — isPurgeDue is purely a
-  // time-of-day gate so the scheduler can skip the cronRunRecord read
-  // entirely before 03:00 UTC. See the decidePollAction suite above for the
-  // succeeded/running/failed/attempts-cap behaviour, which applies to purge
-  // exactly the same way it does to the weekly jobs.
+  it('uses UTC hours, not the host’s local hours', () => {
+    const beforeWindow = new Date(Date.UTC(2026, 2, 16, PURGE_HOUR_UTC - 1, 30));
+    const inWindow = new Date(Date.UTC(2026, 2, 16, PURGE_HOUR_UTC, 0));
+    expect(isPurgeDue(beforeWindow)).toBe(false);
+    expect(isPurgeDue(inWindow)).toBe(true);
+  });
 });
 
-describe('todayDateStr', () => {
-  it('formats as YYYY-MM-DD in UTC', () => {
-    expect(todayDateStr(new Date('2026-03-16T23:59:00Z'))).toBe('2026-03-16');
+describe('todayDateStr — the key the purge claims under', () => {
+  it('is YYYY-MM-DD', () => {
+    expect(todayDateStr(new Date('2026-09-01T12:00:00Z'))).toBe('2026-09-01');
+    expect(todayDateStr(new Date('2026-09-01T12:00:00Z'))).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
-  it('does not roll over to the next day for a time still within UTC today', () => {
-    expect(todayDateStr(new Date('2026-03-16T00:00:00Z'))).toBe('2026-03-16');
+  it('rolls over at UTC midnight, not local midnight', () => {
+    // A host in UTC+2 is already on the 17th at 23:30Z on the 16th. The key has
+    // to be UTC or two instances in different regions would claim different
+    // rows for the same run and purge twice.
+    expect(todayDateStr(new Date('2026-03-16T23:59:59.999Z'))).toBe('2026-03-16');
+    expect(todayDateStr(new Date('2026-03-17T00:00:00.000Z'))).toBe('2026-03-17');
+  });
+
+  it('matches the date’s own UTC fields', () => {
+    const now = new Date('2026-12-31T22:15:00Z');
+    const expected = [
+      now.getUTCFullYear(),
+      String(now.getUTCMonth() + 1).padStart(2, '0'),
+      String(now.getUTCDate()).padStart(2, '0'),
+    ].join('-');
+    expect(todayDateStr(now)).toBe(expected);
+  });
+
+  it('zero-pads single-digit months and days', () => {
+    expect(todayDateStr(new Date('2026-01-05T06:00:00Z'))).toBe('2026-01-05');
   });
 });
