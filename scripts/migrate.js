@@ -430,6 +430,46 @@ async function migrate() {
     END $$;
   `);
 
+  // Durable "has a human ever signed in" signal for the purge job's
+  // abandoned-signup rule. login_tokens rows are NOT durable enough for this:
+  // they live 15 minutes and are deleted a day after they expire (see the
+  // login_tokens cleanup step in src/app/api/purge), so "no used token" is
+  // vacuously true for any org whose founder simply hasn't signed in within
+  // the last day — which is every normal user most of the time, not just
+  // abandoned signups. last_login_at is stamped by /api/auth/verify on every
+  // successful sign-in and never deleted, so it stays true for as long as the
+  // org is actually used.
+  //
+  // The backfill (last_login_at = created_at) runs ONLY at the moment the
+  // column is introduced, guarded by the same information_schema check as the
+  // ADD COLUMN — never on every deploy. It exists purely to grandfather in
+  // rows that predate this column (which may well have real founders and real
+  // data) so they never read as an abandoned signup on the day this ships.
+  // If it re-ran on every deploy instead, it would ALSO backfill every
+  // genuinely new, real signup created since — before their first login —
+  // making a freshly abandoned signup look logged-in forever and never
+  // eligible for cleanup.
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'organizations' AND column_name = 'last_login_at'
+      ) THEN
+        ALTER TABLE organizations ADD COLUMN IF NOT EXISTS last_login_at timestamptz;
+        UPDATE organizations SET last_login_at = created_at;
+      END IF;
+    END $$;
+  `);
+
+  // cron_runs rows older than 90 days are pure operational history (nothing
+  // reads a run older than the current week/day) and carry no org_id, so
+  // they are not part of any per-org cascade — only the daily purge step
+  // below reclaims them.
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS cron_runs_ran_at ON cron_runs (ran_at);
+  `);
+
   console.log('Database migration complete');
   await pool.end();
 }

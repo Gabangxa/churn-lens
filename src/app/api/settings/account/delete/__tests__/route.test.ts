@@ -10,9 +10,11 @@ vi.mock('@/lib/db', () => ({
 
 const requireOrgIdMock = vi.fn();
 const clearOrgCookieMock = vi.fn();
+const assertSameOriginMock = vi.fn();
 vi.mock('@/lib/auth', () => ({
   requireOrgId: (...args: unknown[]) => requireOrgIdMock(...args),
   clearOrgCookie: (...args: unknown[]) => clearOrgCookieMock(...args),
+  assertSameOrigin: (...args: unknown[]) => assertSameOriginMock(...args),
 }));
 
 const disconnectStripeMock = vi.fn();
@@ -40,6 +42,8 @@ beforeEach(() => {
   disconnectStripeMock.mockReset();
   revokeMock.mockReset();
 
+  assertSameOriginMock.mockReset();
+  assertSameOriginMock.mockReturnValue(null); // same-origin by default
   requireOrgIdMock.mockReturnValue({ orgId: ORG_ID });
   queryOneMock.mockResolvedValue({
     deletion_requested_at: '2026-09-01T00:00:00.000Z',
@@ -54,6 +58,18 @@ beforeEach(() => {
 });
 
 describe('POST /api/settings/account/delete', () => {
+  it('rejects a cross-site request before touching the session or the org row', async () => {
+    assertSameOriginMock.mockReturnValue(
+      NextResponse.json({ error: 'Cross-site request rejected.' }, { status: 403 }),
+    );
+
+    const res = await POST(deleteRequest());
+
+    expect(res.status).toBe(403);
+    expect(requireOrgIdMock).not.toHaveBeenCalled();
+    expect(queryOneMock).not.toHaveBeenCalled();
+  });
+
   it('returns 401 without a session', async () => {
     requireOrgIdMock.mockReturnValue({ error: NextResponse.json({ error: 'Not authenticated.' }, { status: 401 }) });
 
@@ -129,13 +145,14 @@ describe('POST /api/settings/account/delete', () => {
     expect(clearOrgCookieMock).toHaveBeenCalledTimes(1);
   });
 
-  it('returns 404 when the org row no longer exists', async () => {
+  it('returns 404 when the org row no longer exists, but still clears the session cookie', async () => {
     queryOneMock.mockResolvedValue(null);
 
     const res = await POST(deleteRequest());
 
     expect(res.status).toBe(404);
     expect(disconnectStripeMock).not.toHaveBeenCalled();
+    expect(clearOrgCookieMock).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -242,24 +259,50 @@ describe('POST /api/settings/account/delete — teardown order and cookie', () =
     expect(clearOrgCookieMock).not.toHaveBeenCalled();
   });
 
-  it('leaves the session alone when the org row is missing', async () => {
+  it('still clears the session cookie when the org row is missing (nothing left to hold a session open for)', async () => {
     queryOneMock.mockResolvedValue(null);
 
     await POST(deleteRequest());
 
     expect(revokeMock).not.toHaveBeenCalled();
-    expect(clearOrgCookieMock).not.toHaveBeenCalled();
+    expect(clearOrgCookieMock).toHaveBeenCalledTimes(1);
   });
 
-  it('surfaces a failed Stripe disconnect instead of reporting success', async () => {
-    // Current behaviour, pinned deliberately: disconnectStripe rejecting (its
-    // credential-clearing UPDATE failed — it swallows Stripe API failures
-    // itself) propagates, so the founder gets a 500 and keeps their session.
-    // deletion_requested_at is already committed by then, so the purge still
-    // happens on schedule; what is lost is the cookie clear and the response.
+  it('does not surface a failed Stripe disconnect as a 500 — deletion_requested_at is already committed', async () => {
+    // disconnectStripe rejecting (its credential-clearing UPDATE failed — it
+    // swallows Stripe API failures itself) must not turn the whole request
+    // into a 500: the founder's deletion request already succeeded in the way
+    // that matters (the row is marked, and the purge job disconnects Stripe
+    // again itself once the grace period elapses), so failing the response
+    // here would only make them think nothing happened and retry.
     disconnectStripeMock.mockRejectedValue(new Error('db down'));
 
-    await expect(POST(deleteRequest())).rejects.toThrow('db down');
-    expect(clearOrgCookieMock).not.toHaveBeenCalled();
+    const res = await POST(deleteRequest());
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toMatchObject({ ok: true, stripe: 'disconnect_failed' });
+    expect(clearOrgCookieMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports both a failed Stripe disconnect and a failed Polar revoke independently', async () => {
+    queryOneMock.mockResolvedValue({
+      deletion_requested_at: '2026-09-01T00:00:00.000Z',
+      polar_subscription_id: 'sub_123',
+    });
+    disconnectStripeMock.mockRejectedValue(new Error('db down'));
+    revokeMock.mockRejectedValue(new Error('polar 500'));
+
+    const res = await POST(deleteRequest());
+    const body = await res.json();
+
+    expect(body).toMatchObject({ ok: true, stripe: 'disconnect_failed', billing: 'revoke_failed' });
+  });
+
+  it('omits `stripe` from the response when disconnect succeeds', async () => {
+    const res = await POST(deleteRequest());
+    const body = await res.json();
+
+    expect(body).not.toHaveProperty('stripe');
   });
 });

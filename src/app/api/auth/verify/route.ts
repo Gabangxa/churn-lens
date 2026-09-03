@@ -33,8 +33,14 @@ export async function GET(req: NextRequest) {
 
   if (!row) return fail();
 
+  // Stamped in the same statement as the lookup (UPDATE ... RETURNING, not a
+  // separate SELECT + UPDATE): this is the one place a real, inbox-verified
+  // sign-in happens, and the purge job's abandoned-signup rule (src/app/api/
+  // purge) depends on last_login_at surviving as long as this org keeps being
+  // used, distinct from login_tokens rows, which the same job deletes a day
+  // after they expire regardless of whether anyone ever used them.
   const org = await queryOne<{ stripe_api_key_enc: string | null }>(
-    'SELECT stripe_api_key_enc FROM organizations WHERE id = $1',
+    'UPDATE organizations SET last_login_at = now() WHERE id = $1 RETURNING stripe_api_key_enc',
     [row.org_id],
   );
 

@@ -3,6 +3,7 @@ import Stripe from 'stripe';
 import { queryOne, queryCount, execute } from '@/lib/db';
 import { decryptApiKey, signSurveyToken } from '@/lib/crypto';
 import { sendSurveyEmail, LegalFooterUnfilledError } from '@/lib/survey-email';
+import { legalFooterReady } from '@/lib/legal';
 import { loadSurveyConfig } from '@/lib/survey-config';
 
 // Stripe Customer Portal cancellation reasons → our survey categories.
@@ -135,6 +136,21 @@ export async function POST(
   // has been requested, not just that no email goes out.
   if (org.deletion_requested_at) {
     return NextResponse.json({ received: true, skipped: 'deletion_pending' });
+  }
+
+  // CAN-SPAM footer not fillable yet: refuse before anything is recorded, not
+  // just before the email is sent. Checked here — before the customer is even
+  // retrieved from Stripe, and before either survey_responses write path below
+  // (the portal-feedback insert and the email-claim insert both write real,
+  // permanent rows) — so a not-yet-configured deploy burns no claim attempt
+  // and records nothing at all. 200 so Stripe does not retry-storm the event.
+  if (!legalFooterReady()) {
+    console.error(
+      `Survey email blocked for org ${org.id}: src/lib/legal.ts still has unfilled ` +
+        'placeholders required for the CAN-SPAM footer (LEGAL.entity / LEGAL.postalAddress). ' +
+        'Fill them in before this deploys real traffic.',
+    );
+    return NextResponse.json({ received: true, skipped: 'legal_footer_unfilled' });
   }
 
   const webhookSecret = decryptApiKey(org.stripe_webhook_secret_enc);
@@ -384,12 +400,13 @@ export async function POST(
     });
   } catch (err) {
     if (err instanceof LegalFooterUnfilledError) {
-      // Not a delivery failure — a deploy that shouldn't be sending real
-      // survey emails yet. Named loudly at the one file a human has to edit,
-      // and 200 so Stripe does not retry-storm this event every few minutes
-      // until someone notices. The row's survey_email_sent_at stays NULL
-      // (nothing above stamped it), so the existing stranded-send path picks
-      // it up and sends it for real once src/lib/legal.ts is filled in.
+      // Belt-and-braces only: legalFooterReady() is already checked above,
+      // before either survey_responses write path, so sendSurveyEmail should
+      // never actually reach this in practice — there is no window between
+      // that check and this call where the answer could change. If it somehow
+      // fires anyway, the attempt was already claimed by the INSERT above (same
+      // as any other send failure below), so treat it the same way: log
+      // clearly which file to fix, and 200 so Stripe does not retry-storm it.
       console.error(
         `Survey email blocked for org ${org.id}, subscription ${subscription.id}: ` +
           'src/lib/legal.ts still has unfilled placeholders required for the CAN-SPAM footer ' +

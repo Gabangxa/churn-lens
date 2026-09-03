@@ -51,7 +51,7 @@ export const LEGAL = {
   /** The above, as a number, for the purge job's SQL. */
   deletionWindowDays: DELETION_WINDOW_DAYS,
 
-  /** POPIA s17 requires a designated Information Officer to be named. */
+  /** POPIA s55/s56 requires a designated Information Officer to be named and registered with the Information Regulator. */
   informationOfficer: '[INFORMATION OFFICER NAME]',
   /** POPIA's supervisory authority — the equivalent of the UK ICO or an EU DPA. */
   regulatorName: 'Information Regulator (South Africa)',

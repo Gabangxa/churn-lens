@@ -194,9 +194,11 @@ export default function DpaPage() {
         </p>
         <p>
           Opt-out records are the sole exception: we retain the minimum needed — the account
-          identifier and the email address that opted out — so that the suppression continues
-          to be honoured. Retaining this is itself a legal requirement and is in the data
-          subject&apos;s interest.
+          identifier and the email address that opted out — for as long as your account with us
+          exists, so that the suppression continues to be honoured while it can still apply.
+          Once your account is closed, the corresponding opt-out records are deleted along with
+          it by the same daily job: retaining them any longer serves no purpose once you can no
+          longer instruct us to survey that customer again.
         </p>
       </Section>
 

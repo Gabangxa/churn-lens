@@ -42,6 +42,11 @@ vi.mock('@/lib/survey-config', () => ({
   loadSurveyConfig: async () => ({ displayName: null, logoUrl: null, customReasons: [] }),
 }));
 
+const legalFooterReadyMock = vi.fn();
+vi.mock('@/lib/legal', () => ({
+  legalFooterReady: (...args: unknown[]) => legalFooterReadyMock(...args),
+}));
+
 const constructEventMock = vi.fn();
 const customersRetrieveMock = vi.fn();
 vi.mock('stripe', () => {
@@ -161,14 +166,17 @@ beforeEach(() => {
   sendSurveyEmailMock.mockReset();
   constructEventMock.mockReset();
   customersRetrieveMock.mockReset();
+  legalFooterReadyMock.mockReset();
 
-  // Happy path: known org, not free tier, not unsubscribed, INSERT wins, send OK.
+  // Happy path: known org, not free tier, not unsubscribed, INSERT wins, send OK,
+  // and src/lib/legal.ts is filled in (a configured production deploy).
   queryOneMock.mockResolvedValue(orgRow());
   queryCountMock.mockResolvedValue(0);
   executeMock.mockResolvedValue(1);
   sendSurveyEmailMock.mockResolvedValue(undefined);
   customersRetrieveMock.mockResolvedValue({ deleted: false, email: CUSTOMER_EMAIL, name: 'Jane' });
   constructEventMock.mockReturnValue(deletedEvent());
+  legalFooterReadyMock.mockReturnValue(true);
 
   consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
   consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -688,38 +696,64 @@ describe('pre-send guards', () => {
     expect(sendSurveyEmailMock).not.toHaveBeenCalled();
     expect(executeMock).not.toHaveBeenCalled();
   });
+
+  it('skips when the legal footer is unfilled, before the signature is even verified', async () => {
+    legalFooterReadyMock.mockReturnValue(false);
+
+    const res = await callPost();
+
+    expect(await res.json()).toEqual({ received: true, skipped: 'legal_footer_unfilled' });
+    expect(constructEventMock).not.toHaveBeenCalled();
+    expect(customersRetrieveMock).not.toHaveBeenCalled();
+    expect(sendSurveyEmailMock).not.toHaveBeenCalled();
+    expect(executeMock).not.toHaveBeenCalled();
+  });
 });
 
 // ─── Legal footer guard ────────────────────────────────────────────────────
+// Hoisted next to the deletion_pending check — before signature verification,
+// before the customer is retrieved, and before EITHER survey_responses write
+// path (the portal-feedback insert and the email-claim insert). Nothing is
+// recorded and no attempt is burned; a later, separate test below covers the
+// belt-and-braces catch for the (practically unreachable) case where
+// sendSurveyEmail itself still throws LegalFooterUnfilledError.
 
-describe('when sendSurveyEmail refuses because the legal footer is unfilled', () => {
+describe('when the legal footer is unfilled', () => {
+  beforeEach(() => {
+    legalFooterReadyMock.mockReturnValue(false);
+  });
+
   it('returns 200 skipped, not a 500, so Stripe does not retry-storm the event', async () => {
-    sendSurveyEmailMock.mockRejectedValue(new MockLegalFooterUnfilledError('unfilled'));
-
     const res = await callPost();
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ received: true, skipped: 'legal_footer_unfilled' });
   });
 
-  it('leaves survey_email_sent_at unstamped so the stranded-send path can retry it later', async () => {
-    sendSurveyEmailMock.mockRejectedValue(new MockLegalFooterUnfilledError('unfilled'));
-
+  it('records nothing at all — not even a claimed, unstamped row', async () => {
     await callPost();
 
-    // Only the claiming INSERT ran — no follow-up UPDATE stamped sent_at.
-    expect(executeMock).toHaveBeenCalledTimes(1);
-    const [sql] = executeMock.mock.calls[0];
-    expect(sql).toMatch(/INSERT INTO survey_responses/);
+    expect(executeMock).not.toHaveBeenCalled();
+    expect(queryCountMock).not.toHaveBeenCalled();
   });
 
   it('names src/lib/legal.ts in the log so it is discoverable', async () => {
-    sendSurveyEmailMock.mockRejectedValue(new MockLegalFooterUnfilledError('unfilled'));
-
     await callPost();
 
     const logged = consoleErrorSpy.mock.calls.map((c) => String(c[0])).join('\n');
     expect(logged).toContain('src/lib/legal.ts');
+  });
+
+  it('skips regardless of plan, event type, or portal feedback', async () => {
+    constructEventMock.mockReturnValue({ type: 'invoice.paid', data: { object: {} } });
+
+    const res = await callPost();
+
+    // Never even reaches constructEvent, so the event type is irrelevant —
+    // this pins that the check really is hoisted above it, not merely
+    // agreeing with what invoice.paid would have answered anyway.
+    expect(constructEventMock).not.toHaveBeenCalled();
+    expect(await res.json()).toEqual({ received: true, skipped: 'legal_footer_unfilled' });
   });
 });
 

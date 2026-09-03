@@ -146,7 +146,7 @@ describe('POST /api/purge', () => {
     expect(body.orgsDeleted).toBe(1);
   });
 
-  it('deletes abandoned signups: 30+ days old, no Stripe key, no Polar subscription, no used login token', async () => {
+  it('deletes abandoned signups: 30+ days old, never signed in, no Stripe key, no Polar subscription, no pending deletion, no survey responses', async () => {
     await POST(purgeRequest());
 
     const call = executeMock.mock.calls.find(
@@ -156,8 +156,27 @@ describe('POST /api/purge', () => {
     );
     expect(call).toBeDefined();
     const [sql] = call!;
+    expect(sql).toMatch(/last_login_at IS NULL/);
     expect(sql).toMatch(/polar_subscription_id IS NULL/);
-    expect(sql).toMatch(/used_at IS NOT NULL/);
+    expect(sql).toMatch(/deletion_requested_at IS NULL/);
+    expect(sql).toMatch(/NOT EXISTS \(\s*SELECT 1 FROM survey_responses r WHERE r\.org_id = o\.id\s*\)/);
+  });
+
+  it('deletes opt-out records whose org no longer exists', async () => {
+    await POST(purgeRequest());
+
+    const call = executeMock.mock.calls.find(([sql]) => String(sql).includes('DELETE FROM unsubscribes'));
+    expect(call).toBeDefined();
+    const [sql] = call!;
+    expect(sql).toMatch(/NOT EXISTS \(SELECT 1 FROM organizations o WHERE o\.id = u\.org_id\)/);
+  });
+
+  it('deletes cron_runs rows older than 90 days', async () => {
+    await POST(purgeRequest());
+
+    const call = executeMock.mock.calls.find(([sql]) => String(sql).includes('DELETE FROM cron_runs'));
+    expect(call).toBeDefined();
+    expect(call![0]).toMatch(/ran_at < now\(\) - interval '90 days'/);
   });
 
   it('reports one failing step in `failed` while the others still run', async () => {
@@ -266,39 +285,26 @@ describe('POST /api/purge — step predicates', () => {
     );
   });
 
-  it('never selects an abandoned signup that has a key, a subscription, or a used token', async () => {
+  it('never selects an abandoned signup that has a key, a subscription, a pending deletion, a survey response, or a recorded login', async () => {
     await POST(purgeRequest());
 
-    // Asserted as one exact predicate rather than four independent substring
-    // matches: the substrings would still pass if an AND became an OR, if the
-    // NOT EXISTS lost its `lt.org_id = o.id` correlation (which would then make
-    // *any* used token anywhere protect *every* org, or none), or if a
-    // condition drifted into a different clause.
+    // Asserted as one exact predicate rather than independent substring
+    // matches: a substring would still pass if an AND became an OR, if the
+    // NOT EXISTS lost its `r.org_id = o.id` correlation (which would then make
+    // *any* survey response anywhere protect *every* org, or none), or if a
+    // condition drifted into a different clause. last_login_at (not a
+    // login_tokens lookup) is the durable "has this org ever been signed
+    // into" signal — see the migration and /api/auth/verify for why a
+    // login_tokens row can't be trusted for this (it is deleted a day after
+    // it expires by step (b) above, regardless of whether it was ever used).
     expect(sqlPassedTo(executeMock, 'DELETE FROM organizations o')).toBe(
       "DELETE FROM organizations o WHERE o.created_at < now() - interval '30 days' " +
+        'AND o.last_login_at IS NULL ' +
         'AND o.stripe_api_key_enc IS NULL ' +
         'AND o.polar_subscription_id IS NULL ' +
-        'AND NOT EXISTS ( SELECT 1 FROM login_tokens lt ' +
-        'WHERE lt.org_id = o.id AND lt.used_at IS NOT NULL )',
+        'AND o.deletion_requested_at IS NULL ' +
+        'AND NOT EXISTS ( SELECT 1 FROM survey_responses r WHERE r.org_id = o.id )',
     );
-  });
-
-  it('deletes expired login_tokens BEFORE testing orgs for abandonment', async () => {
-    await POST(purgeRequest());
-
-    const order = executeMock.mock.calls.map(([sql]) => String(sql));
-    const tokensAt = order.findIndex((sql) => sql.includes('DELETE FROM login_tokens'));
-    const abandonedAt = order.findIndex((sql) => sql.includes('DELETE FROM organizations o'));
-
-    expect(tokensAt).toBeGreaterThanOrEqual(0);
-    expect(abandonedAt).toBeGreaterThanOrEqual(0);
-    // Documents a real hazard, not a preference: login tokens live 15 minutes
-    // (src/app/api/auth/request/route.ts TOKEN_TTL_MS) and this step removes any
-    // row whose expires_at is over a day old, so the used-token row is the
-    // abandoned-signup rule's only evidence that a human ever signed in — and it
-    // is gone roughly a day after they did, in this very run. See the
-    // it.fails case in route.db.test.ts.
-    expect(tokensAt).toBeLessThan(abandonedAt);
   });
 });
 
@@ -320,6 +326,8 @@ describe('POST /api/purge — one broken step does not stop the others', () => {
     ['DELETE FROM themes', 'themes'],
     ['DELETE FROM login_tokens', 'login_tokens'],
     ['DELETE FROM organizations o', 'abandoned_signups'],
+    ['DELETE FROM unsubscribes', 'orphaned_unsubscribes'],
+    ['DELETE FROM cron_runs', 'cron_runs'],
   ];
 
   it.each(STEPS)('names %s in `failed` as "%s"', async (needle, stepName) => {
@@ -464,7 +472,10 @@ describe('POST /api/purge — guards', () => {
       if (sql.includes('DELETE FROM themes')) return 2;
       if (sql.includes('DELETE FROM login_tokens')) return 5;
       if (sql.includes('DELETE FROM organizations o')) return 4;
-      return 1;
+      if (sql.includes('DELETE FROM organizations WHERE id')) return 1; // org-a hard-deleted
+      if (sql.includes('DELETE FROM unsubscribes')) return 6;
+      if (sql.includes('DELETE FROM cron_runs')) return 7;
+      return 0;
     });
 
     await POST(purgeRequest());
@@ -472,8 +483,8 @@ describe('POST /api/purge — guards', () => {
     expect(finishCronRunMock).toHaveBeenCalledWith(
       'purge',
       DATE_STR,
-      // 3 + 2 + 5 + 1 org hard-deleted + 4 abandoned
-      expect.objectContaining({ status: 'succeeded', processed: 15, failed: 0 }),
+      // 3 + 2 + 5 + 1 org hard-deleted + 4 abandoned + 6 orphaned unsubscribes + 7 old cron_runs
+      expect.objectContaining({ status: 'succeeded', processed: 28, failed: 0 }),
     );
   });
 });

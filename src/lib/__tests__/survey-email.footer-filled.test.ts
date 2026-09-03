@@ -84,9 +84,11 @@ describe('sendSurveyEmail with the legal footer filled in', () => {
     const sent = sendMock.mock.calls[0][0];
 
     expect(sent.text as string).toContain(`Unsubscribe from exit surveys: ${OPTS.optOutUrl}`);
-    expect((sent.headers as Record<string, string>)['List-Unsubscribe']).toBe(
-      `<${OPTS.optOutUrl}>`,
-    );
+    const headers = sent.headers as Record<string, string>;
+    expect(headers['List-Unsubscribe']).toBe(`<${OPTS.optOutUrl}>`);
+    // RFC 8058: tells the provider it can POST the URL directly (one click,
+    // no confirmation page) rather than opening it in a browser.
+    expect(headers['List-Unsubscribe-Post']).toBe('List-Unsubscribe=One-Click');
   });
 
   it('names the sender on whose behalf the email goes out', async () => {

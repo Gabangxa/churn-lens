@@ -82,8 +82,13 @@ Privacy: ${LEGAL.siteUrl}/legal/privacy
 `,
     // CAN-SPAM's one-click unsubscribe (and most mailbox providers' spam
     // filtering) expects this header, not just a link in the body text.
+    // List-Unsubscribe-Post is RFC 8058: it tells the provider this is a real
+    // one-click unsubscribe (not just a mailto: or a link to click through),
+    // so it can POST optOutUrl directly instead of opening it in a browser —
+    // src/app/api/survey/opt-out/route.ts's POST handler is what answers that.
     headers: {
       'List-Unsubscribe': `<${optOutUrl}>`,
+      'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
     },
   });
 

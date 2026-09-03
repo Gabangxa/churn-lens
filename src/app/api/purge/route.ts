@@ -41,6 +41,8 @@ export async function POST(req: Request) {
   let tokens = 0;
   let orgsDeleted = 0;
   let abandonedDeleted = 0;
+  let unsubscribesOrphaned = 0;
+  let cronRunsPurged = 0;
   const failed: string[] = [];
 
   // (a) Survey-response retention (privacy policy s8 / DPA s9). Interval math
@@ -80,10 +82,13 @@ export async function POST(req: Request) {
   // (c) Hard-delete orgs whose 30-day deletion grace period has elapsed.
   // Stripe disconnect first (best-effort, logs and continues on its own
   // failure — see disconnectStripe), then the row itself; ON DELETE CASCADE
-  // takes users/survey_responses/themes/login_tokens/digest_sends/cron_runs
-  // with it. unsubscribes is the deliberate exception — its FK to
-  // organizations was dropped in the migration precisely so this DELETE
-  // cannot take the opt-out suppression list down with the org.
+  // takes users/survey_responses/themes/login_tokens/digest_sends with it —
+  // every one of those tables carries an org_id FK. unsubscribes and
+  // cron_runs are the two things that do NOT go with it: unsubscribes'
+  // FK was dropped in the migration precisely so this DELETE cannot take the
+  // opt-out suppression list down with the org (steps (e)/(f) below reclaim
+  // both on their own, unrelated schedule), and cron_runs has no org_id at
+  // all — it is keyed by (job, week_of/date), not by org.
   try {
     const dueOrgs = await query<{ id: string }>(
       `SELECT id FROM organizations WHERE deletion_requested_at < now() - ($1 || ' days')::interval`,
@@ -104,23 +109,27 @@ export async function POST(req: Request) {
     failed.push('org_delete_query');
   }
 
-  // (d) Abandoned signups: an org created 30+ days ago that never connected
-  // Stripe, never connected Polar, and has no login_tokens row with
-  // used_at set (an email address that requested a sign-in link and never
-  // clicked it — never proved it controls that inbox, let alone used the
-  // product). Safe to delete unprompted: nothing was ever configured, nobody
-  // has ever authenticated into it, and there is no data (surveys, themes,
-  // billing) that this would be destroying — only a stub account no human
-  // ever confirmed they wanted.
+  // (d) Abandoned signups: an org created 30+ days ago that has never been
+  // signed into (last_login_at IS NULL — stamped durably by /api/auth/verify,
+  // unlike login_tokens rows, which live 15 minutes and are deleted a day
+  // after they expire by step (b) above; "no used token" would otherwise be
+  // vacuously true for any founder who simply hasn't signed in within the
+  // last day), never connected Stripe, never connected Polar, has no pending
+  // deletion request of its own (that org is already handled, on its own
+  // 30-day grace period, by step (c)), and has collected no survey response.
+  // Safe to delete unprompted: nothing was ever configured, nobody has ever
+  // authenticated into it, and there is no data this would be destroying —
+  // only a stub account no human ever confirmed they wanted.
   try {
     abandonedDeleted = await execute(
       `DELETE FROM organizations o
        WHERE o.created_at < now() - interval '30 days'
+         AND o.last_login_at IS NULL
          AND o.stripe_api_key_enc IS NULL
          AND o.polar_subscription_id IS NULL
+         AND o.deletion_requested_at IS NULL
          AND NOT EXISTS (
-           SELECT 1 FROM login_tokens lt
-           WHERE lt.org_id = o.id AND lt.used_at IS NOT NULL
+           SELECT 1 FROM survey_responses r WHERE r.org_id = o.id
          )`,
     );
   } catch (err) {
@@ -128,12 +137,50 @@ export async function POST(req: Request) {
     failed.push('abandoned_signups');
   }
 
-  const result = { responses, themes, tokens, orgsDeleted, abandonedDeleted, failed };
+  // (e) Opt-out records whose org no longer exists. unsubscribes has no FK to
+  // organizations (dropped in the migration, on purpose, so step (c) above
+  // can never cascade the suppression list away) — which means a row here
+  // can outlive the org that created it, with nothing to ever clean it up on
+  // its own. Once the org is gone there is no account left for it to protect
+  // and it is unreachable personal data (an email address) sitting with no
+  // purpose, so it is deleted once the org row it refers to is confirmed gone.
+  try {
+    unsubscribesOrphaned = await execute(
+      `DELETE FROM unsubscribes u
+       WHERE NOT EXISTS (SELECT 1 FROM organizations o WHERE o.id = u.org_id)`,
+    );
+  } catch (err) {
+    console.error(`Purge ${dateStr}: orphaned unsubscribes cleanup step failed:`, err);
+    failed.push('orphaned_unsubscribes');
+  }
+
+  // (f) cron_runs rows older than 90 days: pure operational history once a
+  // week/day is long past — nothing ever reads a run that old — and unlike
+  // every table in step (c), this one has no org_id, so it is never touched
+  // by an org's deletion and needs its own reclaim.
+  try {
+    cronRunsPurged = await execute(`DELETE FROM cron_runs WHERE ran_at < now() - interval '90 days'`);
+  } catch (err) {
+    console.error(`Purge ${dateStr}: cron_runs cleanup step failed:`, err);
+    failed.push('cron_runs');
+  }
+
+  const result = {
+    responses,
+    themes,
+    tokens,
+    orgsDeleted,
+    abandonedDeleted,
+    unsubscribesOrphaned,
+    cronRunsPurged,
+    failed,
+  };
   console.log(`[purge] ${dateStr} →`, result);
 
   await finishCronRun('purge', dateStr, {
     status: failed.length > 0 ? 'failed' : 'succeeded',
-    processed: responses + themes + tokens + orgsDeleted + abandonedDeleted,
+    processed:
+      responses + themes + tokens + orgsDeleted + abandonedDeleted + unsubscribesOrphaned + cronRunsPurged,
     failed: failed.length,
   });
 

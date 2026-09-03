@@ -42,7 +42,7 @@ export default function SettingsPage() {
   const [sendingTest, setSendingTest] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [billingNotice, setBillingNotice] = useState<
-    { tone: 'ok' | 'warn'; message: string; showPlans?: boolean } | null
+    { tone: 'ok' | 'warn'; message: string; showPlans?: boolean; showPortalLink?: boolean } | null
   >(null);
 
   const reasonIdCounter = useRef(0);
@@ -255,6 +255,22 @@ export default function SettingsPage() {
       const data = await res.json();
       if (!res.ok) {
         setDeleteAccountError(data.error || 'Failed to delete account.');
+        return;
+      }
+      if (data.billing === 'revoke_failed') {
+        // The account is already deleted server-side (Stripe disconnected,
+        // deletion_requested_at set, session cookie cleared) — but Polar
+        // wasn't told, so it will keep billing a subscription we failed to
+        // revoke. Stay on this page rather than navigating away, so the
+        // founder has a chance to click through to Polar's portal and cancel
+        // it themselves before this tab becomes useless (its session is
+        // already gone either way).
+        setBillingNotice({
+          tone: 'warn',
+          message:
+            'Your account was deleted, but we could not automatically cancel your Polar subscription. Cancel it from the billing portal to stop future charges.',
+          showPortalLink: true,
+        });
         return;
       }
       // Deletion is requested and the session cookie is already cleared server
@@ -676,6 +692,23 @@ export default function SettingsPage() {
                 </a>
               </p>
                 </>
+              )}
+              {billingNotice.showPortalLink && (
+                // Account deletion already went through (Stripe disconnected,
+                // session cleared) even though the Polar revoke failed — the
+                // only thing left to do is cancel from Polar's own portal, so
+                // this stays a plain anchor (opens in a new tab) rather than
+                // navigating this page away before the founder can click it.
+                <p className="mt-1.5 font-medium">
+                  <a
+                    href="/api/billing/portal"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-bold underline underline-offset-2 hover:no-underline"
+                  >
+                    Manage billing
+                  </a>
+                </p>
               )}
             </div>
           )}

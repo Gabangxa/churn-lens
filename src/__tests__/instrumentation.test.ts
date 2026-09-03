@@ -40,6 +40,32 @@ function calledPaths(): string[] {
   return fetchMock.mock.calls.map(([url]) => String(url).replace(APP_URL, ''));
 }
 
+type Rec = { status: 'running' | 'succeeded' | 'failed'; ranAt: Date; attempts: number } | null;
+
+// Purge is a third, independent job on the same scheduler (see
+// src/instrumentation.ts) with its own daily due-check (isPurgeDue), so it is
+// "due" at essentially every system time this file exercises (all well past
+// 03:00 UTC). Defaulting it to already-succeeded here means every test written
+// before purge existed keeps meaning exactly what it says — "themes" and
+// "digest" behavior — without also having to account for a third fetch call.
+// Tests that actually exercise purge (see 'register — purge' below) pass an
+// explicit `purge` record to override this.
+const PURGE_INERT: Rec = { status: 'succeeded', ranAt: MONDAY_0800, attempts: 1 };
+
+function stubCronRunRecord(records: { themes?: Rec; digest?: Rec; purge?: Rec } = {}) {
+  cronRunRecordMock.mockImplementation(async (job: string) => {
+    if (job === 'purge') return records.purge !== undefined ? records.purge : PURGE_INERT;
+    if (job === 'themes') return records.themes !== undefined ? records.themes : null;
+    if (job === 'digest') return records.digest !== undefined ? records.digest : null;
+    return null;
+  });
+}
+
+/** Applies the same record to both weekly jobs, leaving purge inert (unless overridden). */
+function stubWeeklyRecord(record: Rec, purge?: Rec) {
+  stubCronRunRecord({ themes: record, digest: record, purge });
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(MONDAY_0800);
@@ -47,7 +73,7 @@ beforeEach(() => {
   validateEnvMock.mockReset();
   validateEnvMock.mockImplementation(() => {});
   cronRunRecordMock.mockReset();
-  cronRunRecordMock.mockResolvedValue(null);
+  stubWeeklyRecord(null);
 
   fetchMock = vi.fn().mockResolvedValue(okResponse());
   vi.stubGlobal('fetch', fetchMock);
@@ -117,7 +143,7 @@ describe('register — poll cadence', () => {
   });
 
   it('keeps polling every 10 minutes', async () => {
-    cronRunRecordMock.mockResolvedValue(null);
+    stubWeeklyRecord(null);
     await bootAndPoll();
     const afterFirst = fetchMock.mock.calls.length;
 
@@ -152,7 +178,11 @@ describe('register — what the poll decides to call', () => {
     await bootAndPoll();
 
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(cronRunRecordMock).not.toHaveBeenCalled();
+    // Themes/digest aren't due yet at 05:00, so neither is even looked up.
+    // Purge has its own, unrelated daily gate (03:00 UTC) and IS due at
+    // 05:00 — it's still queried, just inert (stubbed succeeded above).
+    expect(cronRunRecordMock).not.toHaveBeenCalledWith('themes', expect.anything());
+    expect(cronRunRecordMock).not.toHaveBeenCalledWith('digest', expect.anything());
   });
 
   it('calls only themes between 06:00 and 07:00 UTC', async () => {
@@ -189,7 +219,7 @@ describe('register — what the poll decides to call', () => {
   });
 
   it('reclaims a run whose process died mid-flight (running, older than 2h)', async () => {
-    cronRunRecordMock.mockResolvedValue({
+    stubWeeklyRecord({
       status: 'running',
       ranAt: new Date('2026-03-16T05:00:00Z'), // 3h old
       attempts: 1,
@@ -203,7 +233,7 @@ describe('register — what the poll decides to call', () => {
   it('retries a failed week once its backoff window has elapsed, while under the attempts cap', async () => {
     // attempts=4 backs off min(30min * 2^3, 8h) = 4h. ranAt is ~6h before the
     // poll, so the window has elapsed and the retry is due.
-    cronRunRecordMock.mockResolvedValue({
+    stubWeeklyRecord({
       status: 'failed',
       ranAt: new Date('2026-03-16T02:00:00Z'),
       attempts: 4,
@@ -230,7 +260,7 @@ describe('register — what the poll decides to call', () => {
   });
 
   it('stops retrying once a week has failed 5 times, and says so only once', async () => {
-    cronRunRecordMock.mockResolvedValue({
+    stubWeeklyRecord({
       status: 'failed',
       ranAt: new Date('2026-03-16T06:05:00Z'),
       attempts: 5,
@@ -353,5 +383,104 @@ describe('register — endpoint failures do not kill the loop', () => {
     // for (the endpoint is still called every 10 minutes), it just isn't
     // re-logged once we've said it.
     expect(deferredLogsAfterMore).toBe(1);
+  });
+});
+
+describe('register — purge', () => {
+  const DATE_STR = '2026-03-16'; // todayDateStr(MONDAY_0800)
+
+  it('is not queried at all before its 03:00 UTC daily gate', async () => {
+    vi.setSystemTime(new Date('2026-03-16T02:59:00Z'));
+    stubWeeklyRecord({ status: 'succeeded', ranAt: new Date('2026-03-09T06:05:00Z'), attempts: 1 });
+
+    await bootAndPoll();
+
+    expect(cronRunRecordMock).not.toHaveBeenCalledWith('purge', expect.anything());
+    expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining('/api/purge'), expect.anything());
+  });
+
+  it('is called once past 03:00 UTC when it has never run today', async () => {
+    // Weekly jobs both already succeeded this week, so the only fetch left
+    // this poll is purge — isolates the assertion to purge alone.
+    stubWeeklyRecord(
+      { status: 'succeeded', ranAt: new Date('2026-03-09T06:05:00Z'), attempts: 1 },
+      null, // purge: never run
+    );
+
+    await bootAndPoll();
+
+    expect(calledPaths()).toEqual(['/api/purge']);
+    expect(cronRunRecordMock).toHaveBeenCalledWith('purge', DATE_STR);
+  });
+
+  it('is not called again once today’s run has succeeded', async () => {
+    stubWeeklyRecord(
+      { status: 'succeeded', ranAt: new Date('2026-03-09T06:05:00Z'), attempts: 1 },
+      { status: 'succeeded', ranAt: MONDAY_0800, attempts: 1 },
+    );
+
+    await bootAndPoll();
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('reclaims a stale running purge row the same way the weekly jobs do', async () => {
+    stubWeeklyRecord(
+      { status: 'succeeded', ranAt: new Date('2026-03-09T06:05:00Z'), attempts: 1 },
+      { status: 'running', ranAt: new Date('2026-03-16T05:00:00Z'), attempts: 1 }, // 3h old
+    );
+
+    await bootAndPoll();
+
+    expect(calledPaths()).toEqual(['/api/purge']);
+  });
+
+  it('stops retrying once purge has failed 5 times, and logs it only once', async () => {
+    stubWeeklyRecord(
+      { status: 'succeeded', ranAt: new Date('2026-03-09T06:05:00Z'), attempts: 1 },
+      { status: 'failed', ranAt: new Date('2026-03-16T06:05:00Z'), attempts: 5 },
+    );
+    const error = console.error as unknown as ReturnType<typeof vi.fn>;
+
+    await bootAndPoll();
+    expect(fetchMock).not.toHaveBeenCalled();
+    const afterFirstPoll = error.mock.calls.length;
+    expect(afterFirstPoll).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 3);
+    expect(error.mock.calls.length).toBe(afterFirstPoll);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('a DB error evaluating purge is logged and skipped, without taking themes/digest down or leaking a rejection', async () => {
+    const leaked: unknown[] = [];
+    const priorListeners = process.listeners('unhandledRejection');
+    process.removeAllListeners('unhandledRejection');
+    process.on('unhandledRejection', (reason) => leaked.push(reason));
+
+    try {
+      // themes and digest resolve normally (both never-run, so both get
+      // called); purge's own read rejects.
+      cronRunRecordMock.mockImplementation(async (job: string) => {
+        if (job === 'purge') throw new Error('connection terminated');
+        return null;
+      });
+      const error = console.error as unknown as ReturnType<typeof vi.fn>;
+
+      await bootAndPoll();
+
+      expect(calledPaths()).toEqual(['/api/themes', '/api/digest']);
+      expect(error.mock.calls.flat().join(' ')).toContain('connection terminated');
+
+      await new Promise((resolve) => process.nextTick(resolve));
+      await new Promise((resolve) => process.nextTick(resolve));
+      expect(leaked).toEqual([]);
+    } finally {
+      process.removeAllListeners('unhandledRejection');
+      for (const listener of priorListeners) {
+        process.on('unhandledRejection', listener as (reason: unknown) => void);
+      }
+    }
   });
 });

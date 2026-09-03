@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryOne } from '@/lib/db';
-import { requireOrgId, clearOrgCookie } from '@/lib/auth';
+import { assertSameOrigin, requireOrgId, clearOrgCookie } from '@/lib/auth';
 import { disconnectStripe } from '@/lib/stripe-disconnect';
 import { getPolar } from '@/lib/polar';
 import { LEGAL } from '@/lib/legal';
@@ -16,10 +16,9 @@ import { LEGAL } from '@/lib/legal';
  * anything here becomes irreversible. This route never deletes a row.
  */
 export async function POST(req: NextRequest) {
-  // TODO(auth-merge): add a same-origin (CSRF) check once the concurrent auth
-  // rewrite lands. src/lib/auth.ts has no assertSameOrigin (or equivalent) in
-  // this worktree yet, and adding one here would collide with that in-flight
-  // work rather than build on it.
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
   const auth = requireOrgId(req);
   if ('error' in auth) return auth.error;
   const { orgId } = auth;
@@ -39,13 +38,30 @@ export async function POST(req: NextRequest) {
   );
 
   if (!org) {
-    return NextResponse.json({ error: 'Organization not found.' }, { status: 404 });
+    // No org left to disconnect from, but the session cookie still names one
+    // that no longer exists — clear it rather than leaving the browser
+    // holding a dead credential.
+    const response = NextResponse.json({ error: 'Organization not found.' }, { status: 404 });
+    return clearOrgCookie(response);
   }
 
   // Stops surveys and revokes Stripe access immediately. The 30-day window
   // that follows is purely a grace period before erasure — the integration
   // itself does not keep working during it.
-  await disconnectStripe(orgId);
+  //
+  // Non-fatal if it throws: deletion_requested_at is already committed above,
+  // so the founder's request has already succeeded in the way that matters —
+  // failing the whole response here would make them think nothing happened
+  // and retry, when actually the org is already on its way out. The purge job
+  // disconnects Stripe again itself once the grace period elapses, so a
+  // failure here just means it happens then instead of now.
+  let stripeDisconnectFailed = false;
+  try {
+    await disconnectStripe(orgId);
+  } catch (err) {
+    console.error(`Stripe disconnect failed during account deletion for org ${orgId}:`, err);
+    stripeDisconnectFailed = true;
+  }
 
   let billing: 'revoke_failed' | undefined;
   if (org.polar_subscription_id) {
@@ -70,6 +86,7 @@ export async function POST(req: NextRequest) {
     ok: true,
     purgeAfter,
     ...(billing ? { billing } : {}),
+    ...(stripeDisconnectFailed ? { stripe: 'disconnect_failed' } : {}),
   });
   return clearOrgCookie(response);
 }

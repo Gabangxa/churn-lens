@@ -221,8 +221,8 @@ export default function PrivacyPolicyPage() {
 
       <Section heading="8. How long we keep it">
         <p>
-          Retention here is not a policy we intend to honour — it is what a job running in our
-          infrastructure actually does, every day, without a human triggering it.
+          Retention here is enforced by a job that runs in our infrastructure every day, without
+          a human triggering it — not a policy we merely intend to honour.
         </p>
         <List
           items={[
@@ -230,8 +230,7 @@ export default function PrivacyPolicyPage() {
               <strong>Customer account data</strong> — for as long as the account is open. A
               founder can request deletion at any time from Settings; we disconnect Stripe and
               stop surveys immediately, and a daily job permanently erases the account{' '}
-              {LEGAL.deletionWindow} later, once {LEGAL.deletionWindowDays} days have passed
-              since the request.
+              {LEGAL.deletionWindow} after the request.
             </>,
             <>
               <strong>Survey responses</strong> — a daily job deletes any survey response older
@@ -240,10 +239,11 @@ export default function PrivacyPolicyPage() {
               to delete it directly.
             </>,
             <>
-              <strong>Opt-out records</strong> — kept indefinitely, including past the deletion
-              of the account that generated them. We have to remember that you opted out in
-              order to keep honouring it, for as long as anyone might otherwise try to survey
-              you again.
+              <strong>Opt-out records</strong> — kept for as long as the business you opted out
+              of has an account with us, so the suppression keeps being honoured. Once that
+              business closes its account, the opt-out record is deleted along with it by the
+              same daily job — it no longer protects anyone, since that business can no longer
+              survey you through us at all.
             </>,
             <>
               <strong>Sign-in tokens</strong> — deleted by the same daily job shortly after they

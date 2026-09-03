@@ -113,6 +113,12 @@ describe('sendSurveyEmail', () => {
       const headers = sendMock.mock.calls[0][0].headers as Record<string, string>;
       expect(headers['List-Unsubscribe']).toBe(`<${OPTS.optOutUrl}>`);
     });
+
+    it('sets List-Unsubscribe-Post so providers can one-click POST instead of opening a browser', async () => {
+      await sendSurveyEmail(OPTS);
+      const headers = sendMock.mock.calls[0][0].headers as Record<string, string>;
+      expect(headers['List-Unsubscribe-Post']).toBe('List-Unsubscribe=One-Click');
+    });
   });
 
   // ── Production guard ──────────────────────────────────────────────────────

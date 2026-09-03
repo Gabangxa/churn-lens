@@ -20,7 +20,7 @@ import { Pool } from 'pg';
  *   TEST_DATABASE_URL='postgresql://postgres:pw@127.0.0.1:55432/churnlens_test' \
  *     npx vitest run src/app/api/purge
  *
- * It TRUNCATEs organizations and unsubscribes between tests. Never point it at
+ * It TRUNCATEs organizations, unsubscribes and cron_runs between tests. Never point it at
  * a database you care about.
  */
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -72,6 +72,8 @@ interface PurgeResult {
   tokens: number;
   orgsDeleted: number;
   abandonedDeleted: number;
+  unsubscribesOrphaned: number;
+  cronRunsPurged: number;
   failed: string[];
 }
 
@@ -88,6 +90,8 @@ interface OrgOpts {
   stripeApiKeyEnc?: string | null;
   polarSubscriptionId?: string | null;
   plan?: string;
+  /** SQL interval ago (e.g. "7 days"), or null (the default) for "never signed in". */
+  lastLoginAt?: string | null;
 }
 
 /** Seeds one org. Ages are SQL interval expressions, e.g. "31 days", "25 months". */
@@ -98,11 +102,12 @@ async function seedOrg(name: string, opts: OrgOpts = {}): Promise<string> {
     stripeApiKeyEnc = null,
     polarSubscriptionId = null,
     plan = 'free',
+    lastLoginAt = null,
   } = opts;
   const { rows } = await pool().query(
     `INSERT INTO organizations
-       (name, created_at, deletion_requested_at, stripe_api_key_enc, polar_subscription_id, plan)
-     VALUES ($1, now() - $2::interval, $3, $4, $5, $6)
+       (name, created_at, deletion_requested_at, stripe_api_key_enc, polar_subscription_id, plan, last_login_at)
+     VALUES ($1, now() - $2::interval, $3, $4, $5, $6, $7)
      RETURNING id`,
     [
       name,
@@ -111,6 +116,7 @@ async function seedOrg(name: string, opts: OrgOpts = {}): Promise<string> {
       stripeApiKeyEnc,
       polarSubscriptionId,
       plan,
+      lastLoginAt === null ? null : new Date(Date.now() - intervalToMs(lastLoginAt)),
     ],
   );
   return rows[0].id as string;
@@ -185,8 +191,13 @@ suite('POST /api/purge against a real database', () => {
 
   beforeEach(async () => {
     // unsubscribes has no FK to organizations any more (that is the point of it),
-    // so it has to be truncated explicitly rather than by cascade.
-    await pool().query('TRUNCATE organizations, unsubscribes CASCADE');
+    // so it has to be truncated explicitly rather than by cascade. cron_runs
+    // has no org_id at all, so it is never touched by TRUNCATE ... CASCADE
+    // from organizations either, and the "cron_runs history" tests below
+    // write directly to it — without this it would be the one table that
+    // leaks rows across test *runs* (not just across tests within a run),
+    // since nothing else in this file ever inserts into it.
+    await pool().query('TRUNCATE organizations, unsubscribes, cron_runs CASCADE');
   });
 
   // ── Retention: 24 months, exactly ────────────────────────────────────────
@@ -280,20 +291,29 @@ suite('POST /api/purge against a real database', () => {
       expect(rows[0].n).toBe(0);
     });
 
-    it('keeps the opt-out suppression list, which must outlive the org', async () => {
-      // Privacy policy s8 / DPA s9: an unsubscribe survives account deletion so
-      // the address can never be re-surveyed. This is why the migration drops
-      // unsubscribes' FK — with it, this DELETE would cascade the promise away.
+    it('the opt-out suppression list survives the org hard-delete step itself, via the FK-less DELETE', async () => {
+      // This is why the migration drops unsubscribes' FK: with it, the org
+      // hard-delete two lines above would CASCADE and take this row with it
+      // in the same statement, before the orphaned-unsubscribes step below
+      // ever got a chance to run as a deliberate, auditable step of its own.
+      // The row IS still cleaned up in this same run — see the next test —
+      // just by the purge job's own later, dedicated step, not as a side
+      // effect of the org's DELETE.
       const doomed = await seedOrg('doomed', { deletionRequestedAt: '31 days' });
       await pool().query(
         `INSERT INTO unsubscribes (org_id, customer_email) VALUES ($1, 'optout@example.com')`,
         [doomed],
       );
 
-      await runPurge();
+      const result = await runPurge();
 
       expect(await surviving('organizations')).toEqual([]);
-      expect(await surviving('unsubscribes')).toEqual(['optout@example.com']);
+      expect(result.orgsDeleted).toBe(1);
+      // Deleted by the orphaned-unsubscribes step (below), not by a cascade —
+      // if the FK still existed, this would already be gone by the time that
+      // step ran, and result.unsubscribesOrphaned would be 0, not 1.
+      expect(result.unsubscribesOrphaned).toBe(1);
+      expect(await surviving('unsubscribes')).toEqual([]);
     });
   });
 
@@ -334,18 +354,30 @@ suite('POST /api/purge against a real database', () => {
       expect(await surviving('organizations')).toEqual(['has-polar']);
     });
 
-    it('never deletes an org with a used login token', async () => {
-      const org = await seedOrg('signed-in', { createdAt: '400 days' });
-      // Still inside the login_tokens cleanup's grace, so it survives step (b)
-      // and is there to protect the org in step (d).
-      await seedLoginToken(org, 'used-recent', { expiredFor: '2 hours', used: true });
+    it('never deletes an org that has signed in, even long ago, no matter what its login tokens look like', async () => {
+      // last_login_at — not a login_tokens lookup — is the durable signal.
+      // Fixed from a real bug: login tokens live 15 minutes (auth/request/
+      // route.ts TOKEN_TTL_MS) and step (b) of this same run deletes every
+      // token whose expires_at is over a day old, so a *used* token is gone
+      // roughly a day after the sign-in that used it — "no used token" used
+      // to mean "hasn't signed in within about a day", which every normal
+      // user satisfies, not "never signed in". This org has no login_tokens
+      // row at all (all of them long expired and reaped), only last_login_at.
+      const org = await seedOrg('signed-in', { createdAt: '400 days', lastLoginAt: '7 days' });
+      await seedLoginToken(org, 'used-a-week-ago', { expiredFor: '2 days', used: true });
 
       await runPurge();
 
       expect(await surviving('organizations')).toEqual(['signed-in']);
+      // Confirms the login_tokens row really is gone by the time abandonment
+      // is evaluated — this org survives on last_login_at alone.
+      const { rows } = await pool().query('SELECT count(*)::int AS n FROM login_tokens');
+      expect(rows[0].n).toBe(0);
     });
 
-    it('deletes an org whose only token was requested and never clicked', async () => {
+    it('deletes an org whose only login token was requested and never clicked', async () => {
+      // The login token itself is irrelevant to the new rule either way — this
+      // documents that an unused, expired token does not confer "signed in".
       const org = await seedOrg('never-clicked', { createdAt: '400 days' });
       await seedLoginToken(org, 'unused', { expiredFor: '2 hours', used: false });
 
@@ -354,11 +386,11 @@ suite('POST /api/purge against a real database', () => {
       expect(await surviving('organizations')).toEqual([]);
     });
 
-    it("is not fooled by another org's used token", async () => {
-      // Guards the NOT EXISTS correlation (lt.org_id = o.id): drop it and one
-      // signed-in org anywhere protects every abandoned stub in the table.
-      const signedIn = await seedOrg('signed-in', { createdAt: '400 days' });
-      await seedLoginToken(signedIn, 'used-recent', { expiredFor: '2 hours', used: true });
+    it("is not fooled by another org's recorded login", async () => {
+      // last_login_at lives on the org row itself, not a joined table, so
+      // there is no cross-org correlation risk for this signal the way there
+      // was for login_tokens — this just pins that down.
+      await seedOrg('signed-in', { createdAt: '400 days', lastLoginAt: '7 days' });
       await seedOrg('abandoned', { createdAt: '400 days' });
 
       await runPurge();
@@ -366,35 +398,105 @@ suite('POST /api/purge against a real database', () => {
       expect(await surviving('organizations')).toEqual(['signed-in']);
     });
 
-    it.fails(
-      'KNOWN BUG: hard-deletes a live free-plan org because its used login token already expired',
-      async () => {
-        // Login tokens live 15 minutes (auth/request/route.ts TOKEN_TTL_MS) and
-        // step (b) of this same run deletes every token whose expires_at is over
-        // a day old. So `NOT EXISTS (used token)` does not mean "never signed
-        // in" — it means "has not signed in within roughly the last day", which
-        // every normal user satisfies.
-        //
-        // The org below is a real, active, free-plan account: a founder who
-        // signed in a week ago, has survey data, and simply has not connected
-        // Stripe (or disconnected it from Settings, which NULLs the key). It is
-        // silently hard-deleted with all of its data, with no deletion request
-        // and no grace period.
-        //
-        // Marked it.fails so the suite stays green while the bug stands and
-        // fails loudly the moment it is fixed. Delete the wrapper then.
-        const org = await seedOrg('live-free-plan-org', { createdAt: '90 days' });
-        await pool().query(
-          `INSERT INTO users (org_id, email) VALUES ($1, 'founder@example.com')`,
-          [org],
-        );
-        await seedResponse(org, 'sub_recent', '3 days');
-        await seedLoginToken(org, 'used-a-week-ago', { expiredFor: '7 days', used: true });
+    it("is not fooled by another org's survey response", async () => {
+      // Guards the NOT EXISTS correlation (r.org_id = o.id): drop it and one
+      // org's survey response anywhere protects every abandoned stub in the
+      // table.
+      const hasData = await seedOrg('has-data', { createdAt: '400 days' });
+      await seedResponse(hasData, 'sub_x', '3 days');
+      await seedOrg('abandoned', { createdAt: '400 days' });
 
-        await runPurge();
+      await runPurge();
 
-        expect(await surviving('organizations')).toEqual(['live-free-plan-org']);
-      },
-    );
+      expect(await surviving('organizations')).toEqual(['has-data']);
+    });
+
+    it('keeps a disconnected org that still has survey responses (fixed from a real bug)', async () => {
+      // A real, active free-plan account: a founder who disconnected Stripe
+      // from Settings (which NULLs stripe_api_key_enc, identical to never
+      // having connected it) but whose account has actual collected data.
+      // Never signed in recently and never asked to be deleted — the
+      // survey_responses correlation is what has to protect it.
+      const org = await seedOrg('disconnected-with-data', { createdAt: '90 days' });
+      await pool().query(
+        `INSERT INTO users (org_id, email) VALUES ($1, 'founder@example.com')`,
+        [org],
+      );
+      await seedResponse(org, 'sub_recent', '3 days');
+
+      await runPurge();
+
+      expect(await surviving('organizations')).toEqual(['disconnected-with-data']);
+    });
+
+    it('does not hard-delete a live free-plan org that has signed in, even once its login tokens have all expired and been reaped', async () => {
+      // The bug this documents being fixed: a real account — signed in a week
+      // ago, has survey data, simply hasn't connected Stripe — used to be
+      // silently hard-deleted with no deletion request and no grace period,
+      // because its evidence of ever signing in (a used login_tokens row)
+      // does not outlive step (b) of this very run. last_login_at does.
+      const org = await seedOrg('live-free-plan-org', { createdAt: '90 days', lastLoginAt: '7 days' });
+      await pool().query(
+        `INSERT INTO users (org_id, email) VALUES ($1, 'founder@example.com')`,
+        [org],
+      );
+      await seedResponse(org, 'sub_recent', '3 days');
+      await seedLoginToken(org, 'used-a-week-ago', { expiredFor: '7 days', used: true });
+
+      await runPurge();
+
+      expect(await surviving('organizations')).toEqual(['live-free-plan-org']);
+    });
+  });
+
+  // ── Orphaned opt-out records ─────────────────────────────────────────────
+
+  describe('orphaned unsubscribes', () => {
+    it('deletes an unsubscribe row whose org no longer exists', async () => {
+      // unsubscribes has no FK to organizations (the migration drops it), so
+      // nothing stops a row from outliving the org it referred to — insert
+      // one directly against a random id rather than a real, then-deleted org.
+      await pool().query(
+        `INSERT INTO unsubscribes (org_id, customer_email) VALUES (gen_random_uuid(), 'gone@example.com')`,
+      );
+
+      const result = await runPurge();
+
+      expect(await surviving('unsubscribes')).toEqual([]);
+      expect(result.unsubscribesOrphaned).toBe(1);
+    });
+
+    it("keeps an unsubscribe row whose org still exists, even one hard-deleted in the very same run", async () => {
+      const live = await seedOrg('live');
+      await pool().query(
+        `INSERT INTO unsubscribes (org_id, customer_email) VALUES ($1, 'still-here@example.com')`,
+        [live],
+      );
+
+      await runPurge();
+
+      expect(await surviving('unsubscribes')).toEqual(['still-here@example.com']);
+    });
+  });
+
+  // ── Old cron_runs history ─────────────────────────────────────────────────
+
+  describe('cron_runs history', () => {
+    it('deletes cron_runs rows older than 90 days and keeps fresher ones', async () => {
+      await pool().query(
+        `INSERT INTO cron_runs (job, week_of, ran_at) VALUES ('themes', '2020-01-06', now() - interval '91 days')`,
+      );
+      await pool().query(
+        `INSERT INTO cron_runs (job, week_of, ran_at) VALUES ('digest', '2026-03-09', now() - interval '89 days')`,
+      );
+
+      const result = await runPurge();
+
+      const { rows } = await pool().query('SELECT job FROM cron_runs ORDER BY job');
+      // The purge run itself just inserted a 'purge' row (claimCronRun is
+      // mocked away here, so it isn't — only the two seeded rows are real).
+      expect(rows.map((r) => r.job)).toEqual(['digest']);
+      expect(result.cronRunsPurged).toBe(1);
+    });
   });
 });

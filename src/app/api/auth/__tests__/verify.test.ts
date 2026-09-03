@@ -206,3 +206,29 @@ describe('GET /api/auth/verify — redirect_to is re-validated, not trusted as s
     expect(res.headers.get('location')).toBe(`${APP_URL}/onboarding`);
   });
 });
+
+// last_login_at is the purge job's durable "has this org ever signed in"
+// signal (src/app/api/purge) — login_tokens rows don't last long enough to
+// serve that purpose (see the migration and the purge route for why).
+describe('GET /api/auth/verify — records the sign-in', () => {
+  it('stamps last_login_at on the org in the same statement as the lookup', async () => {
+    queryOneMock.mockResolvedValueOnce({ org_id: ORG_ID, redirect_to: null });
+    queryOneMock.mockResolvedValueOnce({ stripe_api_key_enc: 'v1.encrypted' });
+
+    await GET(verifyRequest('good-token'));
+
+    expect(queryOneMock).toHaveBeenCalledTimes(2);
+    const [sql, params] = queryOneMock.mock.calls[1];
+    expect(sql).toMatch(/UPDATE organizations SET last_login_at = now\(\)/);
+    expect(sql).toMatch(/RETURNING stripe_api_key_enc/);
+    expect(params).toEqual([ORG_ID]);
+  });
+
+  it('does not stamp anything when the token is invalid — no org lookup happens at all', async () => {
+    queryOneMock.mockResolvedValueOnce(null);
+
+    await GET(verifyRequest('bad-token'));
+
+    expect(queryOneMock).toHaveBeenCalledTimes(1);
+  });
+});
