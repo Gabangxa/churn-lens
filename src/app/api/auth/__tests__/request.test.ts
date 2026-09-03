@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { NextRequest, NextResponse } from 'next/server';
 
 const assertSameOriginMock = vi.fn();
@@ -212,5 +212,138 @@ describe('POST /api/auth/request — rate limiting', () => {
 
     expect(res.status).toBe(429);
     expect(queryOneMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/auth/request — input validation', () => {
+  it('rejects a malformed JSON body with 400 before any DB work', async () => {
+    const req = new NextRequest('http://localhost/api/auth/request', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: 'not json',
+    });
+
+    const res = await POST(req);
+
+    expect(res.status).toBe(400);
+    expect(queryOneMock).not.toHaveBeenCalled();
+    expect(withTransactionMock).not.toHaveBeenCalled();
+    expect(executeMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a missing email', {}],
+    ['a non-string email', { email: 12345 }],
+    ['an address with no @', { email: 'nope' }],
+  ])('rejects %s with 400 and creates no account', async (_label, body) => {
+    const res = await POST(requestBody(body));
+
+    expect(res.status).toBe(400);
+    expect(withTransactionMock).not.toHaveBeenCalled();
+    expect(executeMock).not.toHaveBeenCalled();
+    expect(sendMock).not.toHaveBeenCalled();
+  });
+
+  it('drops a non-string next instead of storing or crashing on it', async () => {
+    queryOneMock.mockResolvedValueOnce({ org_id: EXISTING_ORG_ID });
+
+    const res = await POST(requestBody({ email: 'founder@example.com', next: ['/dashboard'] }));
+
+    expect(res.status).toBe(200);
+    const tokenInsert = executeMock.mock.calls.find(([sql]) => sql.includes('INSERT INTO login_tokens'));
+    expect(tokenInsert![1][4]).toBeNull();
+  });
+
+  it('drops a query-string variant of an allow-listed path (exact match only)', async () => {
+    queryOneMock.mockResolvedValueOnce({ org_id: EXISTING_ORG_ID });
+
+    // /settings is allow-listed; /settings?x=1 is not the same string, and the
+    // allow-list is deliberately exact so no parameter can ride along.
+    await POST(requestBody({ email: 'founder@example.com', next: '/settings?x=1' }));
+
+    const tokenInsert = executeMock.mock.calls.find(([sql]) => sql.includes('INSERT INTO login_tokens'));
+    expect(tokenInsert![1][4]).toBeNull();
+  });
+
+  it.each([
+    ['//evil.com'],
+    ['https://evil.com'],
+    ['http://localhost/dashboard'],
+    ['/dashboard/../../evil'],
+    ['/onboarding?plan=enterprise'],
+  ])('drops the open-redirect candidate %s', async (next) => {
+    queryOneMock.mockResolvedValueOnce({ org_id: EXISTING_ORG_ID });
+
+    await POST(requestBody({ email: 'founder@example.com', next }));
+
+    const tokenInsert = executeMock.mock.calls.find(([sql]) => sql.includes('INSERT INTO login_tokens'));
+    expect(tokenInsert![1][4]).toBeNull();
+  });
+});
+
+describe('POST /api/auth/request — signup transaction failure', () => {
+  it('issues no login token when the signup transaction fails', async () => {
+    // withTransaction rolls back and rethrows (see lib/db.test.ts for the
+    // BEGIN/ROLLBACK proof); what matters here is that the route does not
+    // continue on to mint a token for an org that was never committed.
+    withTransactionMock.mockRejectedValue(new Error('insert failed'));
+
+    await expect(POST(requestBody({ email: 'new-founder@example.com' }))).rejects.toThrow(
+      'insert failed',
+    );
+
+    const tokenInsert = executeMock.mock.calls.find(([sql]) => sql.includes('INSERT INTO login_tokens'));
+    expect(tokenInsert).toBeUndefined();
+    expect(sendMock).not.toHaveBeenCalled();
+  });
+
+  it('does not send a login email when the token insert fails', async () => {
+    queryOneMock.mockResolvedValueOnce({ org_id: EXISTING_ORG_ID });
+    executeMock.mockImplementation(async (sql: string) => {
+      if (sql.includes('INSERT INTO login_tokens')) throw new Error('token insert failed');
+      return 1;
+    });
+
+    await expect(POST(requestBody({ email: 'founder@example.com' }))).rejects.toThrow(
+      'token insert failed',
+    );
+    // A link whose token was never stored can only end in "expired" — it must
+    // not reach the inbox and burn the per-email rate-limit budget.
+    expect(sendMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/auth/request — email delivery failures stay invisible to the caller', () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  it('still answers ok when Resend reports an error object rather than throwing', async () => {
+    // Resend resolves with { data: null, error } — swallowing that silently
+    // would log a failed send as a delivered login link.
+    sendMock.mockResolvedValue({ data: null, error: { name: 'validation_error', message: 'bad' } });
+    queryOneMock.mockResolvedValueOnce({ org_id: EXISTING_ORG_ID });
+
+    const res = await POST(requestBody({ email: 'founder@example.com' }));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it('still answers ok when the send throws outright', async () => {
+    sendMock.mockRejectedValue(new Error('network down'));
+    queryOneMock.mockResolvedValueOnce({ org_id: EXISTING_ORG_ID });
+
+    const res = await POST(requestBody({ email: 'founder@example.com' }));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
   });
 });

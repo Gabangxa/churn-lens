@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { NextRequest, NextResponse } from 'next/server';
 import { setOrgCookie, requireOrgId, clearOrgCookie, assertSameOrigin } from '../auth';
 
@@ -167,7 +167,7 @@ describe('assertSameOrigin', () => {
     expect(result).toBeNull();
   });
 
-  it('allows a same-site request from the reverse of the wrong side', () => {
+  it('rejects Sec-Fetch-Site: same-site — a sibling subdomain is not us', () => {
     const result = assertSameOrigin(requestWithHeaders({ 'sec-fetch-site': 'same-site' }));
     expect(result).not.toBeNull();
     expect(result!.status).toBe(403);
@@ -192,5 +192,92 @@ describe('assertSameOrigin', () => {
     const result = assertSameOrigin(req);
     expect(result).not.toBeNull();
     expect(result!.status).toBe(403);
+  });
+});
+
+// ─── assertSameOrigin: misconfiguration and header precedence ─────────────────
+//
+// The cases above cover the intended shape of the check. These cover the ways
+// it can be undermined: a missing/broken NEXT_PUBLIC_APP_URL (must fail closed,
+// not open) and a request that sends BOTH headers with the Origin lying about
+// nothing while Sec-Fetch-Site claims same-origin.
+
+describe('assertSameOrigin — misconfiguration and header precedence', () => {
+  const ORIGINAL_APP_URL = process.env.NEXT_PUBLIC_APP_URL;
+  const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    // @ts-expect-error NODE_ENV is normally read-only in its type, but tests need to flip it.
+    process.env.NODE_ENV = 'production';
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+    if (ORIGINAL_APP_URL === undefined) delete process.env.NEXT_PUBLIC_APP_URL;
+    else process.env.NEXT_PUBLIC_APP_URL = ORIGINAL_APP_URL;
+    // @ts-expect-error see above
+    process.env.NODE_ENV = ORIGINAL_NODE_ENV;
+  });
+
+  it('fails closed in production when NEXT_PUBLIC_APP_URL is not set', () => {
+    delete process.env.NEXT_PUBLIC_APP_URL;
+    const req = new NextRequest('https://app.churnlens.com/api/whatever', {
+      headers: { origin: 'https://app.churnlens.com' },
+    });
+    // No configured origin means there is nothing to match against; rejecting is
+    // the safe direction. (A deploy in this state is broken either way — better
+    // visibly broken than silently accepting every origin.)
+    const result = assertSameOrigin(req);
+    expect(result).not.toBeNull();
+    expect(result!.status).toBe(403);
+  });
+
+  it('fails closed when NEXT_PUBLIC_APP_URL is not a parseable URL', () => {
+    process.env.NEXT_PUBLIC_APP_URL = 'not a url';
+    const result = assertSameOrigin(
+      new NextRequest('https://app.churnlens.com/api/whatever', {
+        headers: { origin: 'https://app.churnlens.com' },
+      }),
+    );
+    expect(result).not.toBeNull();
+    expect(result!.status).toBe(403);
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it('compares origins, not strings — a configured URL with a path still matches', () => {
+    process.env.NEXT_PUBLIC_APP_URL = 'https://app.churnlens.com/';
+    const result = assertSameOrigin(
+      new NextRequest('https://app.churnlens.com/api/whatever', {
+        headers: { origin: 'https://app.churnlens.com' },
+      }),
+    );
+    expect(result).toBeNull();
+  });
+
+  it('rejects on a foreign Origin even when Sec-Fetch-Site claims same-origin', () => {
+    // Origin is the stronger signal and is checked first: a forged
+    // Sec-Fetch-Site (only possible from a non-browser client) must not be able
+    // to talk its way past a foreign Origin.
+    process.env.NEXT_PUBLIC_APP_URL = 'https://app.churnlens.com';
+    const result = assertSameOrigin(
+      new NextRequest('https://app.churnlens.com/api/whatever', {
+        headers: { origin: 'https://evil.example', 'sec-fetch-site': 'same-origin' },
+      }),
+    );
+    expect(result).not.toBeNull();
+    expect(result!.status).toBe(403);
+  });
+
+  it('rejects a scheme/port mismatch on an otherwise identical host', () => {
+    process.env.NEXT_PUBLIC_APP_URL = 'https://app.churnlens.com';
+    for (const origin of ['http://app.churnlens.com', 'https://app.churnlens.com:8443']) {
+      const result = assertSameOrigin(
+        new NextRequest('https://app.churnlens.com/api/whatever', { headers: { origin } }),
+      );
+      expect(result, origin).not.toBeNull();
+      expect(result!.status).toBe(403);
+    }
   });
 });

@@ -44,3 +44,46 @@ describe('POST /api/auth/logout', () => {
     expect(Object.keys(route)).toEqual(['POST']);
   });
 });
+
+// The real assertSameOrigin runs here (this file mocks nothing), so these
+// exercise the actual header check, not a stub of it.
+describe('POST /api/auth/logout — cross-site rejection', () => {
+  it('rejects a foreign Origin with 403 and clears nothing', async () => {
+    const req = new NextRequest('http://localhost/api/auth/logout', {
+      method: 'POST',
+      headers: { origin: 'https://evil.example' },
+    });
+
+    const res = await POST(req);
+
+    expect(res.status).toBe(403);
+    // A drive-by logout is an annoyance, not a breach — but the guard being
+    // present here is what proves it is wired on every mutating route.
+    expect(res.headers.get('set-cookie')).toBeNull();
+    expect(res.headers.get('location')).toBeNull();
+  });
+
+  it('rejects a cross-site form post that carries no Origin but does carry Sec-Fetch-Site', async () => {
+    const req = new NextRequest('http://localhost/api/auth/logout', {
+      method: 'POST',
+      headers: { 'sec-fetch-site': 'cross-site' },
+    });
+
+    const res = await POST(req);
+
+    expect(res.status).toBe(403);
+    expect(res.headers.get('set-cookie')).toBeNull();
+  });
+
+  it('allows a same-origin post and still logs the user out', async () => {
+    const req = new NextRequest('http://localhost/api/auth/logout', {
+      method: 'POST',
+      headers: { origin: 'http://localhost', 'sec-fetch-site': 'same-origin' },
+    });
+
+    const res = await POST(req);
+
+    expect(res.status).toBe(303);
+    expect(res.headers.get('set-cookie') ?? '').toMatch(/Max-Age=0|Expires=Thu, 01 Jan 1970/);
+  });
+});

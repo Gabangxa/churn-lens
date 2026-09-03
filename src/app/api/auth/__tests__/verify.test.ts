@@ -91,3 +91,108 @@ describe('GET /api/auth/verify', () => {
     expect(res.headers.get('location')).toBe(`${APP_URL}/dashboard`);
   });
 });
+
+// ─── The destination rules, exhaustively ─────────────────────────────────────
+//
+// verify is the only route that mints a session, so where it drops the founder
+// and — far more important — WHEN it is willing to set a cookie at all are the
+// two behaviours worth pinning down hard.
+
+describe('GET /api/auth/verify — destination rules', () => {
+  it('honours a plan carried in redirect_to for a keyless org (growth)', async () => {
+    queryOneMock.mockResolvedValueOnce({ org_id: ORG_ID, redirect_to: '/onboarding?plan=growth' });
+    queryOneMock.mockResolvedValueOnce({ stripe_api_key_enc: null });
+
+    const res = await GET(verifyRequest('good-token'));
+
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toBe(`${APP_URL}/onboarding?plan=growth`);
+    expect(res.headers.get('set-cookie')).toContain('churnlens_org_id=');
+  });
+
+  it.each([['/settings'], ['/dashboard']])(
+    'overrides redirect_to %s with /onboarding when the org has no Stripe key',
+    async (redirectTo) => {
+      queryOneMock.mockResolvedValueOnce({ org_id: ORG_ID, redirect_to: redirectTo });
+      queryOneMock.mockResolvedValueOnce({ stripe_api_key_enc: null });
+
+      const res = await GET(verifyRequest('good-token'));
+
+      // A founder with no key cannot use either page; onboarding wins.
+      expect(res.headers.get('location')).toBe(`${APP_URL}/onboarding`);
+    },
+  );
+
+  it('sends a keyless org to /onboarding even when the org row is missing entirely', async () => {
+    queryOneMock.mockResolvedValueOnce({ org_id: ORG_ID, redirect_to: '/dashboard' });
+    queryOneMock.mockResolvedValueOnce(null); // org deleted out from under a live token
+
+    const res = await GET(verifyRequest('good-token'));
+
+    expect(res.headers.get('location')).toBe(`${APP_URL}/onboarding`);
+  });
+});
+
+describe('GET /api/auth/verify — token handling', () => {
+  it('looks the token up by hash, never by its raw value, under a single-use guard', async () => {
+    queryOneMock.mockResolvedValueOnce({ org_id: ORG_ID, redirect_to: null });
+    queryOneMock.mockResolvedValueOnce({ stripe_api_key_enc: 'v1.encrypted' });
+
+    await GET(verifyRequest('raw-token-value'));
+
+    expect(hashLoginTokenMock).toHaveBeenCalledWith('raw-token-value');
+    const [sql, params] = queryOneMock.mock.calls[0];
+    expect(params).toEqual(['hashed-token']);
+    // Atomic consume-and-check: single-use is enforced by the UPDATE's WHERE
+    // clause, not a read-then-write that two concurrent clicks could both pass.
+    expect(sql).toMatch(/UPDATE login_tokens SET used_at = now\(\)/);
+    expect(sql).toMatch(/used_at IS NULL/);
+    expect(sql).toMatch(/expires_at > now\(\)/);
+  });
+
+  it('sets no cookie for a used, expired, or unknown token', async () => {
+    queryOneMock.mockResolvedValueOnce(null); // the UPDATE guard matched no row
+
+    const res = await GET(verifyRequest('already-used-token'));
+
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toBe(`${APP_URL}/login?error=expired`);
+    // The failure must not mint a session — this is the one route that can.
+    expect(res.headers.get('set-cookie')).toBeNull();
+    // And it must not go looking up the org either.
+    expect(queryOneMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('sets no cookie when no token is supplied at all', async () => {
+    const res = await GET(verifyRequest());
+    expect(res.headers.get('set-cookie')).toBeNull();
+  });
+
+  it('sets the cookie for the token row org, not for anything supplied by the caller', async () => {
+    queryOneMock.mockResolvedValueOnce({ org_id: 'org-from-token', redirect_to: null });
+    queryOneMock.mockResolvedValueOnce({ stripe_api_key_enc: 'v1.encrypted' });
+
+    const res = await GET(verifyRequest('good-token'));
+
+    const setCookie = res.headers.get('set-cookie') ?? '';
+    expect(setCookie).toContain('churnlens_org_id=org-from-token.');
+    expect(setCookie).toContain('HttpOnly');
+    expect(setCookie).toContain('SameSite=lax');
+  });
+});
+
+// CHARACTERIZATION, not an endorsement: verify re-uses redirect_to exactly as
+// stored and does not re-run the allow-list. Today the only writer is
+// /api/auth/request, which does allow-list it, so this is unreachable — but it
+// means the open-redirect guard exists in exactly one place. If verify ever
+// starts validating on read (it should), invert this test.
+describe('GET /api/auth/verify — redirect_to is trusted as stored', () => {
+  it('would follow an off-origin redirect_to if one ever reached the table', async () => {
+    queryOneMock.mockResolvedValueOnce({ org_id: ORG_ID, redirect_to: 'https://evil.example/' });
+    queryOneMock.mockResolvedValueOnce({ stripe_api_key_enc: 'v1.encrypted' });
+
+    const res = await GET(verifyRequest('good-token'));
+
+    expect(res.headers.get('location')).toBe('https://evil.example/');
+  });
+});
