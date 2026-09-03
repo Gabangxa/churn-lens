@@ -27,21 +27,18 @@ vi.mock('@/lib/auth', () => ({
   verifyCronSecret: (...args: unknown[]) => verifyCronSecretMock(...args),
 }));
 
-// MAX_ATTEMPTS is a plain value (not a closure deferring its lookup), so
-// building it via vi.hoisted() — rather than a normal top-level const read
-// directly inside the factory below — avoids a temporal-dead-zone
-// ReferenceError: vi.mock factories run when this file's imports are
-// evaluated, which happens before its own top-level const declarations do.
-const { MAX_ATTEMPTS } = vi.hoisted(() => ({ MAX_ATTEMPTS: 5 }));
 const claimCronRunMock = vi.fn();
 const cronRunRecordMock = vi.fn();
 const finishCronRunMock = vi.fn();
-vi.mock('@/lib/cron', () => ({
+// Only the DB-touching helpers are faked; the constants come from the real
+// module so a change to MAX_ATTEMPTS or STALE_RUNNING_MS is tested, not hidden.
+vi.mock('@/lib/cron', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/cron')>()),
   claimCronRun: (...args: unknown[]) => claimCronRunMock(...args),
   cronRunRecord: (...args: unknown[]) => cronRunRecordMock(...args),
   finishCronRun: (...args: unknown[]) => finishCronRunMock(...args),
-  MAX_ATTEMPTS,
 }));
+import { MAX_ATTEMPTS, STALE_RUNNING_MS } from '@/lib/cron';
 
 const WEEK_OF = '2026-03-09';
 vi.mock('@/lib/week', () => ({
@@ -62,10 +59,12 @@ function digestRequest() {
 }
 
 /** A themes cron_runs record — succeeded by default (the terminal, happy case). */
-function themesRecord(overrides: { status?: 'succeeded' | 'failed' | 'running'; attempts?: number } = {}) {
+function themesRecord(
+  overrides: { status?: 'succeeded' | 'failed' | 'running'; attempts?: number; ranAt?: Date } = {},
+) {
   return {
     status: overrides.status ?? 'succeeded',
-    ranAt: new Date('2026-03-16T06:05:00Z'),
+    ranAt: overrides.ranAt ?? new Date('2026-03-16T06:05:00Z'),
     attempts: overrides.attempts ?? 1,
   };
 }
@@ -297,6 +296,37 @@ describe('POST /api/digest — deferral gate', () => {
     expect(body).not.toHaveProperty('deferred');
     expect(claimCronRunMock).toHaveBeenCalledWith('digest', WEEK_OF);
     expect(body).toEqual({ sent: 1, failed: 0, weekOf: WEEK_OF });
+  });
+
+  it('proceeds when themes is stuck running at the attempts cap and the row is stale', async () => {
+    // The scheduler treats attempts >= MAX_ATTEMPTS as exhausted regardless of
+    // status, so a run that kept dying mid-flight never becomes 'failed'. If
+    // digest only accepted 'failed' here it would defer all week.
+    cronRunRecordMock.mockResolvedValue(
+      themesRecord({
+        status: 'running',
+        attempts: MAX_ATTEMPTS,
+        ranAt: new Date(Date.now() - STALE_RUNNING_MS - 1000),
+      }),
+    );
+
+    const res = await POST(digestRequest());
+    const body = await res.json();
+
+    expect(body).not.toHaveProperty('deferred');
+    expect(claimCronRunMock).toHaveBeenCalledWith('digest', WEEK_OF);
+  });
+
+  it('still defers when themes is running at the cap but the row is fresh', async () => {
+    cronRunRecordMock.mockResolvedValue(
+      themesRecord({ status: 'running', attempts: MAX_ATTEMPTS, ranAt: new Date(Date.now() - 60_000) }),
+    );
+
+    const res = await POST(digestRequest());
+    const body = await res.json();
+
+    expect(body).toEqual({ deferred: 'themes_not_ready', weekOf: WEEK_OF });
+    expect(claimCronRunMock).not.toHaveBeenCalled();
   });
 
   it.each(['running', null] as const)(

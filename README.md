@@ -142,8 +142,8 @@ to wait for the next backoff window), reset it from a `psql` session against the
 Railway Postgres:
 
 ```sql
-UPDATE cron_runs SET status = 'failed', attempts = 0 WHERE job = $1 AND week_of = $2;
--- e.g. UPDATE cron_runs SET status = 'failed', attempts = 0 WHERE job = 'themes' AND week_of = '2026-03-09';
+-- substitute the job ('themes' or 'digest') and the Monday the week starts on
+UPDATE cron_runs SET status = 'failed', attempts = 0 WHERE job = 'themes' AND week_of = '2026-03-09';
 ```
 
 This resets `attempts` so decidePollAction (src/lib/cron.ts) no longer reports the

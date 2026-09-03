@@ -3,7 +3,7 @@ import { query, queryOne, queryCount, execute } from '@/lib/db';
 import { getResend, FROM_EMAIL } from '@/lib/resend';
 import { verifyCronSecret } from '@/lib/auth';
 import { reportingWeek } from '@/lib/week';
-import { claimCronRun, cronRunRecord, finishCronRun, MAX_ATTEMPTS } from '@/lib/cron';
+import { claimCronRun, cronRunRecord, finishCronRun, MAX_ATTEMPTS, STALE_RUNNING_MS } from '@/lib/cron';
 
 interface ThemeRow {
   org_id: string;
@@ -41,9 +41,16 @@ export async function POST(req: Request) {
   // orgs that have theme rows, so a partial themes run just means a partial
   // (not wrong) digest.
   const themesRecord = await cronRunRecord('themes', weekOfStr);
+  // "Terminal" mirrors decidePollAction: the scheduler gives up at
+  // MAX_ATTEMPTS regardless of status, so a run stuck at 'running' (process
+  // died mid-run) with attempts at the cap is just as final as a 'failed'
+  // one — only a still-fresh 'running' row means themes may yet finish.
   const themesTerminal =
     themesRecord?.status === 'succeeded' ||
-    (themesRecord?.status === 'failed' && themesRecord.attempts >= MAX_ATTEMPTS);
+    (themesRecord != null &&
+      themesRecord.attempts >= MAX_ATTEMPTS &&
+      (themesRecord.status === 'failed' ||
+        Date.now() - themesRecord.ranAt.getTime() >= STALE_RUNNING_MS));
   if (!themesTerminal) {
     return NextResponse.json({ deferred: 'themes_not_ready', weekOf: weekOfStr });
   }

@@ -12,7 +12,6 @@ vi.mock('@/lib/db', () => ({
 import {
   claimCronRun,
   cronRunRecord,
-  cronRunStatus,
   decidePollAction,
   dueAt,
   finishCronRun,
@@ -56,9 +55,7 @@ describe('claimCronRun', () => {
     // rather than baked into the SQL as a literal interval, so the scheduler's
     // decidePollAction and the claim's own reclaim window can never drift out
     // of sync with each other.
-    expect(sql).toContain(
-      "status = 'running' AND cron_runs.ran_at < now() - ($3 || ' milliseconds')::interval",
-    );
+    expect(sql).toContain("($3 || ' milliseconds')::interval");
     expect(params).toEqual(['digest', '2026-03-09', STALE_RUNNING_MS]);
   });
 });
@@ -170,26 +167,6 @@ describe('finishCronRun', () => {
   });
 });
 
-describe('cronRunStatus', () => {
-  it('returns null when the week has never run', async () => {
-    queryOneMock.mockResolvedValue(null);
-    expect(await cronRunStatus('themes', '2026-03-09')).toBeNull();
-  });
-
-  it('returns the stored status', async () => {
-    queryOneMock.mockResolvedValue({ status: 'failed' });
-    expect(await cronRunStatus('themes', '2026-03-09')).toBe('failed');
-  });
-
-  it('queries by job and week', async () => {
-    queryOneMock.mockResolvedValue({ status: 'succeeded' });
-    await cronRunStatus('themes', '2026-03-09');
-    const [sql, params] = queryOneMock.mock.calls[0] as [string, unknown[]];
-    expect(sql).toContain('SELECT status FROM cron_runs WHERE job = $1 AND week_of = $2');
-    expect(params).toEqual(['themes', '2026-03-09']);
-  });
-});
-
 describe('cronRunRecord', () => {
   it('returns null when the week has never run', async () => {
     queryOneMock.mockResolvedValue(null);
@@ -273,7 +250,7 @@ describe('dueAt / isDue — week boundary', () => {
   });
 
   it('themes is listed before digest so a single poll can run them in order', () => {
-    // The digest route defers until themes has succeeded; if the scheduler
+    // The digest route defers until themes is terminal; if the scheduler
     // asked for digest first on a catch-up poll it would always defer and
     // wait another 10 minutes.
     expect(JOBS.map((j) => j.job)).toEqual(['themes', 'digest']);

@@ -79,15 +79,6 @@ export async function finishCronRun(
   );
 }
 
-/** Current status for a (job, week), or null if it has never run. */
-export async function cronRunStatus(job: string, weekOfStr: string): Promise<CronRunStatus | null> {
-  const row = await queryOne<{ status: CronRunStatus }>(
-    `SELECT status FROM cron_runs WHERE job = $1 AND week_of = $2`,
-    [job, weekOfStr],
-  );
-  return row?.status ?? null;
-}
-
 export interface CronRunRecord {
   status: CronRunStatus;
   ranAt: Date;
@@ -95,10 +86,9 @@ export interface CronRunRecord {
 }
 
 /**
- * Fuller read used by the scheduler, which needs `attempts` (to stop retrying
- * a permanently-broken week) and `ranAt` (to decide whether a 'running' row
- * looks crashed) — detail `cronRunStatus` deliberately doesn't expose to route
- * callers that only care about succeeded/not-succeeded. Also used by the
+ * Read used by the scheduler, which needs `attempts` (to stop retrying a
+ * permanently-broken week) and `ranAt` (to decide whether a 'running' row
+ * looks crashed). Also used by the
  * digest route, which needs `attempts` to tell "themes is still retrying"
  * apart from "themes has given up" (both report status='failed').
  */
