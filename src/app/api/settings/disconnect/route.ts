@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne } from '@/lib/db';
 import { decryptApiKey } from '@/lib/crypto';
-import { requireOrgId, clearOrgCookie } from '@/lib/auth';
+import { assertSameOrigin, requireOrgId } from '@/lib/auth';
 import Stripe from 'stripe';
 
 export async function DELETE(req: NextRequest) {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
   const auth = requireOrgId(req);
   if ('error' in auth) return auth.error;
   const { orgId } = auth;
@@ -43,7 +46,10 @@ export async function DELETE(req: NextRequest) {
     [orgId],
   );
 
+  // Disconnecting Stripe is not logging out — the session survives, unlike the
+  // old behavior which cleared the cookie here. Sessions are minted only by
+  // /api/auth/verify now, so there is nothing to re-derive from a login-less
+  // reconnect; clearing the cookie would just force a pointless re-login.
   const appUrl = process.env.NEXT_PUBLIC_APP_URL || '';
-  const response = NextResponse.redirect(`${appUrl}/onboarding`, { status: 303 });
-  return clearOrgCookie(response);
+  return NextResponse.redirect(`${appUrl}/onboarding`, { status: 303 });
 }

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { signSurveyToken } from '@/lib/crypto';
-import { requireOrgId } from '@/lib/auth';
+import { assertSameOrigin, requireOrgId } from '@/lib/auth';
 import { publicAppUrl, redirectUrl } from '@/lib/app-url';
 
 /**
@@ -9,6 +9,9 @@ import { publicAppUrl, redirectUrl } from '@/lib/app-url';
  * submitting it never writes to the database.
  */
 export async function GET(req: NextRequest) {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
   // Redirects resolve against the public app URL, never req.url — see
   // lib/app-url.ts for why. Unlike the other routes we hard-fail rather than
   // fall back below, because a preview link on the wrong host is useless.
@@ -16,7 +19,9 @@ export async function GET(req: NextRequest) {
 
   const authResult = requireOrgId(req);
   if ('error' in authResult) {
-    return NextResponse.redirect(redirectUrl('/onboarding', req));
+    // Not /onboarding: onboarding now requires a session too, so an
+    // unauthenticated visitor bounces straight to where they can get one.
+    return NextResponse.redirect(redirectUrl('/login', req));
   }
 
   if (!appUrl) {

@@ -1,8 +1,17 @@
 'use client';
 
-import Link from 'next/link';
 import { useState, useEffect, FormEvent } from 'react';
 import SiteHeader from '@/components/SiteHeader';
+
+// Signup and login are the same form now: /api/auth/request creates the org +
+// owner user the first time it sees an email, so there is no separate
+// "create account" step (and no separate endpoint an attacker could target
+// with a victim's email and their own Stripe key — see /api/onboarding/connect).
+
+// Must mirror the allowlist in src/app/api/auth/request/route.ts. Kept as a
+// literal set here (not imported) because that route module pulls in
+// next/server, db, and email helpers that have no business in a client bundle.
+const ALLOWED_NEXT_PATHS = new Set(['/dashboard', '/settings', '/onboarding']);
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
@@ -10,12 +19,26 @@ export default function LoginPage() {
   const [sent, setSent] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expired, setExpired] = useState(false);
+  // The redirect to send along with this request, computed once from the URL.
+  // Null means "omit it" — the server defaults to /dashboard (or /onboarding,
+  // if the org still has no Stripe key) when nothing is sent.
+  const [next, setNext] = useState<string | null>(null);
 
-  // Surfaced when /api/auth/verify bounces an invalid/expired/used link back here.
+  // Surfaced when /api/auth/verify bounces an invalid/expired/used link back here,
+  // or when a plan/next was carried from the landing page or a login-gated route.
   // Read from the URL client-side to avoid a useSearchParams Suspense boundary.
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).get('error') === 'expired') {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('error') === 'expired') {
       setExpired(true);
+    }
+
+    const plan = params.get('plan');
+    const rawNext = params.get('next');
+    if (plan === 'starter' || plan === 'growth') {
+      setNext(`/onboarding?plan=${plan}`);
+    } else if (rawNext && ALLOWED_NEXT_PATHS.has(rawNext)) {
+      setNext(rawNext);
     }
   }, []);
 
@@ -29,7 +52,7 @@ export default function LoginPage() {
       const res = await fetch('/api/auth/request', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email }),
+        body: JSON.stringify(next ? { email, next } : { email }),
       });
 
       if (!res.ok) {
@@ -63,17 +86,17 @@ export default function LoginPage() {
               Check your email
             </h1>
             <p className="mt-3 text-sm font-medium text-muted leading-relaxed">
-              If an account exists for that address, a login link is on its way. It&apos;s valid for
-              15 minutes.
+              Check your email — your link is valid for 15 minutes.
             </p>
           </div>
         ) : (
           <>
             <h1 className="mb-2 text-2xl font-bold font-display tracking-tight text-zinc-900 dark:text-white transition-colors duration-500">
-              Log in to ChurnLens
+              Log in or sign up
             </h1>
             <p className="mb-8 text-sm font-medium text-muted leading-relaxed">
-              Enter your email and we&apos;ll send you a one-time login link — no password needed.
+              Enter your email and we&apos;ll send you a one-time link — no password needed.
+              New here? The same link finishes creating your account.
             </p>
 
             {expired && (
@@ -113,13 +136,6 @@ export default function LoginPage() {
                 {loading ? 'Sending…' : 'Send login link'}
               </button>
             </form>
-
-            <p className="mt-8 border-t border-zinc-100 dark:border-zinc-800 pt-6 text-xs font-medium text-muted">
-              New to ChurnLens?{' '}
-              <Link href="/onboarding" className="font-bold text-pink-500 dark:text-pink-400 hover:underline">
-                Connect Stripe to get started
-              </Link>
-            </p>
           </>
         )}
       </div>

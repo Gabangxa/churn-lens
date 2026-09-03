@@ -91,7 +91,10 @@ async function getDashboardData(orgId: string) {
 
 export default async function DashboardPage() {
   const orgId = getOrgIdFromCookieStore(cookies());
-  if (!orgId) redirect('/onboarding');
+  // Not /onboarding: onboarding now requires a session too (it no longer
+  // creates one), so an unauthenticated visitor goes to /login, which carries
+  // them back here once they've signed in or signed up.
+  if (!orgId) redirect('/login?next=/dashboard');
 
   const { themes, responses, latestWeek, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending, stripeConnected } =
     await getDashboardData(orgId);

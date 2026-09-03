@@ -2,8 +2,10 @@ import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vites
 import { NextRequest, NextResponse } from 'next/server';
 
 const requireOrgIdMock = vi.fn();
+const assertSameOriginMock = vi.fn();
 vi.mock('@/lib/auth', () => ({
   requireOrgId: (...args: unknown[]) => requireOrgIdMock(...args),
+  assertSameOrigin: (...args: unknown[]) => assertSameOriginMock(...args),
 }));
 
 const checkRateLimitMock = vi.fn();
@@ -115,6 +117,7 @@ function loggedText(): string {
 
 beforeEach(() => {
   requireOrgIdMock.mockReset();
+  assertSameOriginMock.mockReset().mockReturnValue(null);
   createMock.mockReset();
   checkRateLimitMock.mockReset().mockReturnValue({ allowed: true, retryAfterSec: 0 });
   process.env.NEXT_PUBLIC_APP_URL = APP_URL;
@@ -253,19 +256,37 @@ describe('GET /api/billing/portal — the portal URL is a bearer credential', ()
   });
 });
 
+// ─── CSRF ─────────────────────────────────────────────────────────────────
+
+describe('GET /api/billing/portal — CSRF', () => {
+  it('rejects a foreign origin before checking auth or minting a session', async () => {
+    assertSameOriginMock.mockReturnValue(
+      NextResponse.json({ error: 'Cross-site request rejected.' }, { status: 403 }),
+    );
+
+    const res = await GET(portalRequest());
+
+    expect(res.status).toBe(403);
+    expect(requireOrgIdMock).not.toHaveBeenCalled();
+    expect(createMock).not.toHaveBeenCalled();
+  });
+});
+
 // ─── refusals before any session is minted ───────────────────────────────────
 
 describe('GET /api/billing/portal — refuses before minting', () => {
-  it('sends an unauthenticated visitor to onboarding rather than a raw 401 JSON blob', async () => {
+  it('sends an unauthenticated visitor to /login rather than a raw 401 JSON blob', async () => {
     authFail();
 
     const res = await GET(portalRequest());
 
     // "Manage billing" is an anchor a browser follows, so a JSON body would
     // render as text on screen. This deliberately diverges from the checkout
-    // sibling and matches api/survey/preview.
+    // sibling and matches api/survey/preview. Not /onboarding: onboarding now
+    // requires a session too, so there is nothing to send an unauthenticated
+    // visitor there for.
     expect(res.status).toBe(307);
-    expect(res.headers.get('location')).toBe(`${APP_URL}/onboarding`);
+    expect(res.headers.get('location')).toBe(`${APP_URL}/login`);
     expect(createMock).not.toHaveBeenCalled();
   });
 

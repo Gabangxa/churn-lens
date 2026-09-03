@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
 import { queryOne, execute } from '@/lib/db';
 import { signSurveyToken } from '@/lib/crypto';
-import { requireOrgId } from '@/lib/auth';
+import { assertSameOrigin, requireOrgId } from '@/lib/auth';
 import { checkRateLimit } from '@/lib/ratelimit';
 import { sendSurveyEmail } from '@/lib/survey-email';
 import { loadSurveyConfig } from '@/lib/survey-config';
@@ -13,6 +13,9 @@ import { loadSurveyConfig } from '@/lib/survey-config';
  * so it never counts toward stats, themes, digests, or the free-tier cap.
  */
 export async function POST(req: NextRequest) {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
   const authResult = requireOrgId(req);
   if ('error' in authResult) return authResult.error;
   const { orgId } = authResult;

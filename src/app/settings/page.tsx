@@ -73,7 +73,7 @@ export default function SettingsPage() {
       try {
         const res = await fetch('/api/settings/status');
         if (res.status === 401) {
-          router.push('/onboarding');
+          router.push('/login?next=/settings');
           return;
         }
         const data = await res.json();
@@ -91,7 +91,7 @@ export default function SettingsPage() {
       try {
         const res = await fetch('/api/settings/survey-config');
         if (res.status === 401) {
-          router.push('/onboarding');
+          router.push('/login?next=/settings');
           return;
         }
         if (!res.ok) {
@@ -185,7 +185,7 @@ export default function SettingsPage() {
         }),
       });
       if (res.status === 401) {
-        router.push('/onboarding');
+        router.push('/login?next=/settings');
         return;
       }
       const data = await res.json();
@@ -237,7 +237,7 @@ export default function SettingsPage() {
     try {
       const res = await fetch('/api/survey/test', { method: 'POST' });
       if (res.status === 401) {
-        router.push('/onboarding');
+        router.push('/login?next=/settings');
         return;
       }
       const data = await res.json();

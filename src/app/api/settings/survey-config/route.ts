@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { execute } from '@/lib/db';
-import { requireOrgId } from '@/lib/auth';
+import { assertSameOrigin, requireOrgId } from '@/lib/auth';
 import { loadSurveyConfig, validateSurveyConfig, toStoredConfig } from '@/lib/survey-config';
 
 /** Org-scoped read of the current survey customization (display name, logo, extra reasons). */
@@ -15,6 +15,9 @@ export async function GET(req: NextRequest) {
 
 /** Org-scoped, authoritative validate-and-save of survey customization. */
 export async function PUT(req: NextRequest) {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
   const authResult = requireOrgId(req);
   if ('error' in authResult) return authResult.error;
   const { orgId } = authResult;

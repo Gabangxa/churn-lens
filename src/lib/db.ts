@@ -1,4 +1,4 @@
-import { Pool } from 'pg';
+import { Pool, PoolClient } from 'pg';
 
 // TLS: verify the server certificate when a CA is provided (DATABASE_CA_CERT).
 // Without it we fall back to an unverified connection — a MITM risk — so we warn
@@ -74,6 +74,40 @@ export async function queryCount(
 ): Promise<number> {
   const result = await getPool().query(text, params);
   return parseInt(result.rows[0]?.count ?? '0', 10);
+}
+
+/**
+ * Runs `fn` against a single dedicated connection wrapped in BEGIN/COMMIT, so a
+ * multi-statement write either fully lands or fully rolls back. The plain
+ * `query`/`execute` helpers above go through the pool and each call may land on
+ * a different connection, so they cannot be composed into a transaction — any
+ * caller needing atomicity (e.g. signup: create an org and its owner user
+ * together) must use this instead and issue its statements against the
+ * supplied client, not the pool-backed helpers.
+ *
+ * On any error the transaction is rolled back and the original error is
+ * rethrown untouched, so callers see the real failure rather than a rollback
+ * failure masking it.
+ */
+export async function withTransaction<T>(
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackErr) {
+      console.error('Transaction rollback failed:', rollbackErr);
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 export interface Organization {

@@ -2,8 +2,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { NextRequest, NextResponse } from 'next/server';
 
 const requireOrgIdMock = vi.fn();
+const assertSameOriginMock = vi.fn();
 vi.mock('@/lib/auth', () => ({
   requireOrgId: (...args: unknown[]) => requireOrgIdMock(...args),
+  assertSameOrigin: (...args: unknown[]) => assertSameOriginMock(...args),
 }));
 
 const queryOneMock = vi.fn();
@@ -40,6 +42,7 @@ function putRequest(body: unknown) {
 
 beforeEach(() => {
   requireOrgIdMock.mockReset();
+  assertSameOriginMock.mockReset().mockReturnValue(null);
   queryOneMock.mockReset();
   executeMock.mockReset();
   executeMock.mockResolvedValue(1);
@@ -96,6 +99,16 @@ describe('GET /api/settings/survey-config', () => {
 // ─── PUT ──────────────────────────────────────────────────────────────────
 
 describe('PUT /api/settings/survey-config', () => {
+  it('rejects a foreign origin before checking auth or persisting anything', async () => {
+    assertSameOriginMock.mockReturnValue(
+      NextResponse.json({ error: 'Cross-site request rejected.' }, { status: 403 }),
+    );
+    const res = await PUT(putRequest({ displayName: 'Acme' }));
+    expect(res.status).toBe(403);
+    expect(requireOrgIdMock).not.toHaveBeenCalled();
+    expect(executeMock).not.toHaveBeenCalled();
+  });
+
   it('returns 401 when unauthenticated and persists nothing', async () => {
     authFail();
     const res = await PUT(putRequest({ displayName: 'Acme' }));

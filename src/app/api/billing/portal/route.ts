@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { PolarError } from '@polar-sh/sdk/models/errors/polarerror.js';
 import { HTTPValidationError } from '@polar-sh/sdk/models/errors/httpvalidationerror.js';
-import { requireOrgId } from '@/lib/auth';
+import { assertSameOrigin, requireOrgId } from '@/lib/auth';
 import { publicAppUrl, redirectUrl } from '@/lib/app-url';
 import { getPolar, isPolarConfigured } from '@/lib/polar';
 import { checkRateLimit } from '@/lib/ratelimit';
@@ -30,6 +30,9 @@ import { checkRateLimit } from '@/lib/ratelimit';
  * fallback of its own.
  */
 export async function GET(req: NextRequest) {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
   // Resolved first, like api/survey/preview: the returnUrl handed to Polar must
   // be the public origin. Behind Railway's proxy req.url is https://localhost:8080,
   // which would render a dead "back" button inside Polar's portal.
@@ -48,7 +51,9 @@ export async function GET(req: NextRequest) {
   // same way and has the same problem.
   const authResult = requireOrgId(req);
   if ('error' in authResult) {
-    return NextResponse.redirect(redirectUrl('/onboarding', req));
+    // Not /onboarding: onboarding now requires a session too, so an
+    // unauthenticated visitor bounces straight to where they can get one.
+    return NextResponse.redirect(redirectUrl('/login', req));
   }
   const { orgId } = authResult;
 

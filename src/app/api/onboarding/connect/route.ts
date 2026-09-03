@@ -1,14 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { randomUUID } from 'crypto';
 import Stripe from 'stripe';
 import { query, queryOne } from '@/lib/db';
 import { encryptApiKey } from '@/lib/crypto';
-import { setOrgCookie, requireOrgId } from '@/lib/auth';
+import { assertSameOrigin, requireOrgId, clearOrgCookie } from '@/lib/auth';
 import { checkRateLimit, clientIp } from '@/lib/ratelimit';
 
+/**
+ * Attach (or replace) the signed-in org's Stripe restricted key and register
+ * ChurnLens's webhook on the customer's Stripe account.
+ *
+ * A session is required — this route no longer creates orgs or users, and no
+ * longer accepts an email. Both of those used to be trusted from the request
+ * body with nothing proving the caller owned that address; that was the
+ * account-takeover hole this route was rewritten to close. Signup now happens
+ * only in /api/auth/request, and a session is minted only in /api/auth/verify.
+ */
 export async function POST(req: NextRequest) {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
   try {
-    // Throttle org creation / Stripe webhook registration per IP.
+    // Throttle webhook registration per IP, independent of the per-org session.
     const rl = checkRateLimit(`onboard:${clientIp(req)}`, 8, 600_000);
     if (!rl.allowed) {
       return NextResponse.json(
@@ -17,12 +29,12 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const body = await req.json();
-    const { apiKey, email } = body;
+    const authResult = requireOrgId(req);
+    if ('error' in authResult) return authResult.error;
+    const { orgId } = authResult;
 
-    if (!email || typeof email !== 'string' || !email.includes('@')) {
-      return NextResponse.json({ error: 'A valid email address is required.' }, { status: 400 });
-    }
+    const body = await req.json();
+    const { apiKey } = body;
 
     if (!apiKey || typeof apiKey !== 'string') {
       return NextResponse.json({ error: 'API key is required.' }, { status: 400 });
@@ -35,29 +47,27 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Use existing org from cookie, or generate a new UUID server-side.
-    // orgId is NEVER accepted from the request body.
-    const authResult = requireOrgId(req);
-    const orgId = 'orgId' in authResult ? authResult.orgId : randomUUID();
-
-    const encrypted = encryptApiKey(apiKey);
-
     const existing = await queryOne<{ id: string; stripe_webhook_id: string | null }>(
       'SELECT id, stripe_webhook_id FROM organizations WHERE id = $1',
       [orgId],
     );
 
-    if (existing) {
-      await query(
-        'UPDATE organizations SET stripe_api_key_enc = $1 WHERE id = $2',
-        [encrypted, orgId],
+    if (!existing) {
+      // The cookie's signature verified, but the org row it names is gone
+      // (deleted out from under an old session, or a session from a
+      // different environment/database). There is nothing to attach a key
+      // to, and creating a fresh org here would silently reintroduce the
+      // "connect without proving who you are" hole this route was rewritten
+      // to close — so this forces a real re-login instead.
+      const response = NextResponse.json(
+        { error: 'Session is no longer valid. Please log in again.' },
+        { status: 401 },
       );
-    } else {
-      await query(
-        `INSERT INTO organizations (id, name, stripe_api_key_enc) VALUES ($1, $2, $3)`,
-        [orgId, 'My Organization', encrypted],
-      );
+      return clearOrgCookie(response);
     }
+
+    const encrypted = encryptApiKey(apiKey);
+    await query('UPDATE organizations SET stripe_api_key_enc = $1 WHERE id = $2', [encrypted, orgId]);
 
     // Register ChurnLens webhook on the customer's Stripe account (only if not already done).
     // Stripe rejects webhook URLs without an explicit https scheme, so fail fast here
@@ -73,7 +83,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (!existing?.stripe_webhook_id) {
+    if (!existing.stripe_webhook_id) {
       let webhookEndpoint: Stripe.WebhookEndpoint;
       try {
         const customerStripe = new Stripe(apiKey, { apiVersion: '2024-04-10', typescript: true });
@@ -107,22 +117,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Upsert the founder's user row so the weekly digest can reach them.
-    const existingUser = await queryOne<{ id: string }>(
-      'SELECT id FROM users WHERE org_id = $1',
-      [orgId],
-    );
-    if (existingUser) {
-      await query('UPDATE users SET email = $1 WHERE org_id = $2', [email, orgId]);
-    } else {
-      await query(
-        'INSERT INTO users (org_id, email, role) VALUES ($1, $2, $3)',
-        [orgId, email, 'owner'],
-      );
-    }
-
-    const response = NextResponse.json({ success: true });
-    return setOrgCookie(response, orgId);
+    return NextResponse.json({ success: true });
   } catch (err) {
     console.error('Onboarding connect error:', err);
     return NextResponse.json({ error: 'Internal server error.' }, { status: 500 });

@@ -71,6 +71,71 @@ export function requireOrgId(req: NextRequest): { orgId: string } | { error: Nex
 }
 
 /**
+ * Rejects cross-site requests to a state-changing route (login CSRF, and
+ * generally, session-riding requests).
+ *
+ * SameSite=Lax on the org cookie already blocks cross-site *simple* form posts
+ * from carrying the cookie, but it does not stop a foreign page's fetch() (no
+ * credentials needed for auth/request, which sets no cookie on the attacker's
+ * behalf but can still mint tokens/spend rate-limit budget against a victim's
+ * inbox) or a same-site-cookie-bearing request issued via something Lax does
+ * allow (top-level navigation). Checking Origin/Sec-Fetch-Site directly is the
+ * standard defense and does not depend on cookie semantics at all.
+ *
+ * Preferred signal is the `Origin` header, sent by browsers on every
+ * state-changing fetch/XHR and on cross-origin navigations. When it is
+ * present, it must exactly match the app's own origin (or, outside
+ * production, the request's own origin — so local dev on a non-default port
+ * still works without needing NEXT_PUBLIC_APP_URL set to match it exactly).
+ *
+ * Some requests carry no Origin header at all (same-origin GETs, and some
+ * older/simple requests) — for those we fall back to `Sec-Fetch-Site`, which
+ * every modern browser attaches. `same-origin` and `none` (e.g. a user typing
+ * the URL directly, or a bookmark) are allowed; anything else (`cross-site`,
+ * `same-site`) is rejected. A request with neither header is allowed through,
+ * since that combination only occurs from very old browsers we cannot
+ * evaluate — rejecting them would break real users for a theoretical gain
+ * against attackers who, lacking both headers, are almost certainly not a
+ * browser we need to worry about anyway.
+ *
+ * Call this FIRST in a route handler, before any other work — the whole point
+ * is to refuse a forged request before it can do (or even schedule) anything.
+ */
+export function assertSameOrigin(req: NextRequest): NextResponse | null {
+  const origin = req.headers.get('origin');
+
+  const allowedOrigins = new Set<string>();
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL;
+  if (appUrl) {
+    try {
+      allowedOrigins.add(new URL(appUrl).origin);
+    } catch {
+      // Misconfigured NEXT_PUBLIC_APP_URL. Nothing to add — an Origin header
+      // present on the request will simply fail to match below, which is the
+      // safe direction to fail in (reject rather than silently allow).
+      console.error(`assertSameOrigin: NEXT_PUBLIC_APP_URL "${appUrl}" is not a valid URL.`);
+    }
+  }
+  if (process.env.NODE_ENV !== 'production') {
+    allowedOrigins.add(req.nextUrl.origin);
+  }
+
+  if (origin) {
+    if (!allowedOrigins.has(origin)) {
+      return NextResponse.json({ error: 'Cross-site request rejected.' }, { status: 403 });
+    }
+    return null;
+  }
+
+  const secFetchSite = req.headers.get('sec-fetch-site');
+  if (secFetchSite && secFetchSite !== 'same-origin' && secFetchSite !== 'none') {
+    return NextResponse.json({ error: 'Cross-site request rejected.' }, { status: 403 });
+  }
+
+  return null;
+}
+
+/**
  * Constant-time check of the internal cron bearer token, so the CRON_SECRET
  * can't be recovered via response-timing. Used by the /api/themes and
  * /api/digest cron endpoints.

@@ -37,14 +37,26 @@ ChurnLens fills the gap: exit interviews + AI theme synthesis at indie-founder p
 
 ---
 
+### Auth flow
+
+`/login` is both signup and login: posting an email to `/api/auth/request` creates
+an org and an owner user the first time it sees that address, then emails a
+magic link either way. `/api/auth/verify` is the *only* route that ever mints
+a session — it sends a founder with no Stripe key yet to `/onboarding`,
+everyone else to wherever they were headed (or `/dashboard`). `/api/onboarding/connect`
+requires that session and only ever attaches a Stripe key to it; it can no
+longer create an org or accept an email on its own.
+
+---
+
 ## Project structure
 
 ```
 src/
 ├── app/
 │   ├── page.tsx                   # Landing page
-│   ├── onboarding/                # Connect a Stripe restricted key
-│   ├── login/                     # Passwordless magic-link login
+│   ├── onboarding/                # Connect a Stripe restricted key (session required)
+│   ├── login/                     # Passwordless magic-link login + signup
 │   ├── survey/[token]/            # Exit survey (WCAG AA)
 │   ├── dashboard/                 # Founder response dashboard
 │   ├── settings/                  # Survey config, disconnect
@@ -94,8 +106,9 @@ npm run dev
 
 ### Stripe webhook (local)
 
-Webhooks are per-org, so the forwarding URL needs the org's id. Connect an org
-through `/onboarding` first, then:
+Webhooks are per-org, so the forwarding URL needs the org's id. Log in at
+`/login` (which creates the org on first use) and connect through `/onboarding`,
+then:
 
 ```bash
 stripe listen --forward-to localhost:5000/api/webhooks/stripe/<orgId>

@@ -32,7 +32,7 @@ const PLANS = [
     limit: 'Up to 10 cancellations/mo',
     features: ['Stripe webhook', '3-question survey', 'Response dashboard'],
     cta: 'Start free',
-    href: '/onboarding',
+    href: '/login',
     highlight: false,
   },
   {
@@ -48,7 +48,7 @@ const PLANS = [
       'MRR impact tracking',
     ],
     cta: 'Start 14-day trial',
-    href: '/onboarding?plan=starter',
+    href: '/login?plan=starter',
     highlight: true,
   },
   {
@@ -64,7 +64,7 @@ const PLANS = [
       'Custom survey questions',
     ],
     cta: 'Start 14-day trial',
-    href: '/onboarding?plan=growth',
+    href: '/login?plan=growth',
     highlight: false,
   },
 ];
@@ -151,7 +151,7 @@ export default function LandingPage() {
 
           <div className="mt-12 flex flex-col items-start gap-5 sm:flex-row sm:items-center">
             <Link
-              href="/onboarding"
+              href="/login"
               className="px-10 py-4 rounded-full bg-teal-700 text-white font-extrabold uppercase tracking-widest text-sm shadow-[6px_6px_0px_0px_#134e4a] dark:shadow-[6px_6px_0px_0px_#5eead4] hover:shadow-none hover:translate-x-[6px] hover:translate-y-[6px] hover:bg-teal-800 transition-all"
             >
               Connect Stripe — it&apos;s free
@@ -327,7 +327,7 @@ export default function LandingPage() {
           you actually hear it.
         </p>
         <Link
-          href="/onboarding"
+          href="/login"
           className="mt-10 inline-block px-10 py-4 rounded-full bg-teal-700 text-white font-extrabold uppercase tracking-widest text-sm shadow-[6px_6px_0px_0px_#134e4a] dark:shadow-[6px_6px_0px_0px_#5eead4] hover:shadow-none hover:translate-x-[6px] hover:translate-y-[6px] hover:bg-teal-800 transition-all"
         >
           Connect Stripe for free

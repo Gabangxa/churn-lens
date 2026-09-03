@@ -198,6 +198,78 @@ async function migrate() {
     CREATE INDEX IF NOT EXISTS login_tokens_email ON login_tokens (email);
   `);
 
+  // Post-login destination for a magic link (e.g. "/onboarding?plan=starter"
+  // so a pricing-page click survives the signup/login round trip). Nullable:
+  // NULL means "decide at verify time" (dashboard, or onboarding if the org
+  // has no Stripe key yet). See src/app/api/auth/{request,verify}.
+  await pool.query(`
+    ALTER TABLE login_tokens ADD COLUMN IF NOT EXISTS redirect_to text;
+  `);
+
+  // From here on, /api/auth/request treats "a users row exists for lower(email)"
+  // as the account, and creates one for any email it has never seen — so two
+  // rows that differ only by case or stray whitespace would silently become
+  // two different accounts. Normalize what's already stored before the unique
+  // index below can enforce it going forward.
+  await pool.query(`
+    UPDATE users SET email = lower(trim(email)) WHERE email <> lower(trim(email));
+  `);
+
+  // Dedupe users by (lower) email before the unique index can be added, so an
+  // org already carrying two rows for the same address (the account-takeover
+  // bug this migration accompanies fixed the code path, but not existing data)
+  // doesn't fail the CREATE UNIQUE INDEX below.
+  //
+  // Keeps exactly one row per email: the row whose org has already registered
+  // a Stripe webhook (stripe_webhook_id IS NOT NULL) wins, tie-broken by the
+  // newest such row — that's the org actually in use. If no row for that email
+  // has a connected org, the oldest row wins instead, on the assumption that
+  // it's the original signup and everything newer is noise (including, in the
+  // specific attack this migration follows, an attacker's org — which SHOULD
+  // have a webhook if they got that far, but if not, "oldest" still favors the
+  // victim's real account over a fresher hostile one). A single CTE-driven
+  // DELETE keeps the decision atomic and deterministic; it is a no-op (deletes
+  // nothing) when every email already maps to one row.
+  const dedupeResult = await pool.query(`
+    WITH ranked AS (
+      SELECT
+        u.id,
+        u.email,
+        row_number() OVER (
+          PARTITION BY lower(trim(u.email))
+          ORDER BY
+            (o.stripe_webhook_id IS NOT NULL) DESC,
+            CASE WHEN o.stripe_webhook_id IS NOT NULL THEN u.created_at END DESC NULLS LAST,
+            u.created_at ASC,
+            u.id ASC
+        ) AS rn
+      FROM users u
+      JOIN organizations o ON o.id = u.org_id
+    ),
+    losers AS (
+      SELECT id, email FROM ranked WHERE rn > 1
+    )
+    DELETE FROM users WHERE id IN (SELECT id FROM losers)
+    RETURNING email;
+  `);
+  if (dedupeResult.rowCount > 0) {
+    const counts = new Map();
+    for (const row of dedupeResult.rows) {
+      counts.set(row.email, (counts.get(row.email) ?? 0) + 1);
+    }
+    const summary = [...counts.entries()].map(([email, n]) => `${email} (${n})`).join(', ');
+    console.warn(
+      `[migrate] Removed ${dedupeResult.rowCount} duplicate users.email row(s) before adding the unique index: ${summary}`,
+    );
+  }
+
+  // Enforces at the database what /api/auth/request now relies on: exactly one
+  // account per email. Safe to add now that the dedupe above guarantees no
+  // existing row violates it.
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_key ON users (lower(email));
+  `);
+
   console.log('Database migration complete');
   await pool.end();
 }
