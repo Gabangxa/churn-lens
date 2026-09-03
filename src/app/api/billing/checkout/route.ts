@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryOne } from '@/lib/db';
-import { requireOrgId } from '@/lib/auth';
+import { assertSameOrigin, requireOrgId } from '@/lib/auth';
 import { publicAppUrl } from '@/lib/app-url';
 import { getPolar } from '@/lib/polar';
 import { isPlan, type Plan } from '@/lib/plan';
@@ -20,6 +20,9 @@ function productIdForPlan(plan: Plan): string | undefined {
 }
 
 export async function GET(req: NextRequest) {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
   const authResult = requireOrgId(req);
   if ('error' in authResult) return authResult.error;
   const { orgId } = authResult;

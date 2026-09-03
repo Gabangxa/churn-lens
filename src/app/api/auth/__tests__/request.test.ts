@@ -111,6 +111,11 @@ describe('POST /api/auth/request — signup vs login', () => {
     expect(sendMock).toHaveBeenCalledWith(
       expect.objectContaining({ to: 'new-founder@example.com', subject: 'Your ChurnLens login link' }),
     );
+
+    // The whole point of the account-takeover fix: requesting a link — even
+    // one that creates the account — never itself mints a session. Only a
+    // click on the emailed link (/api/auth/verify) can do that.
+    expect(res.headers.get('set-cookie')).toBeNull();
   });
 
   it('reuses the existing org for a known email and never opens a transaction', async () => {
@@ -282,34 +287,129 @@ describe('POST /api/auth/request — input validation', () => {
 });
 
 describe('POST /api/auth/request — signup transaction failure', () => {
-  it('issues no login token when the signup transaction fails', async () => {
+  // Everything from the cleanup DELETE onward is wrapped in one try/catch (see
+  // the route): a DB or Resend failure here has nothing to do with whether the
+  // caller's email/IP is well-behaved, so it must not turn into a 500 that
+  // tells an attacker "this one got further than the last one." It logs and
+  // still answers { ok: true }, same as every other path through this route.
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  it('logs and still answers ok when the signup transaction fails for a reason other than a race', async () => {
     // withTransaction rolls back and rethrows (see lib/db.test.ts for the
-    // BEGIN/ROLLBACK proof); what matters here is that the route does not
-    // continue on to mint a token for an org that was never committed.
+    // BEGIN/ROLLBACK proof). A plain failure (not a unique-violation race) is
+    // not recoverable — no token should be issued for an org that was never
+    // committed — but it also must not surface to the caller as anything other
+    // than the same { ok: true } every other path returns.
     withTransactionMock.mockRejectedValue(new Error('insert failed'));
 
-    await expect(POST(requestBody({ email: 'new-founder@example.com' }))).rejects.toThrow(
-      'insert failed',
-    );
+    const res = await POST(requestBody({ email: 'new-founder@example.com' }));
 
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
     const tokenInsert = executeMock.mock.calls.find(([sql]) => sql.includes('INSERT INTO login_tokens'));
     expect(tokenInsert).toBeUndefined();
     expect(sendMock).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalled();
   });
 
-  it('does not send a login email when the token insert fails', async () => {
+  it('re-selects the racing row and still issues a token on a unique-violation (concurrent first signup)', async () => {
+    // Two requests for the same never-seen-before email can both read "no
+    // existing user" and both start a transaction; only one wins the
+    // users_email_lower_key unique index (scripts/migrate.js), and the loser's
+    // INSERT fails with Postgres error code 23505 after rolling back. That is
+    // not a real failure — the account exists, just not from this call's own
+    // transaction — so this re-selects it and carries on rather than losing
+    // the founder's login link to a double-click.
+    const uniqueViolation = Object.assign(new Error('duplicate key value'), { code: '23505' });
+    withTransactionMock.mockRejectedValue(uniqueViolation);
+    queryOneMock
+      .mockResolvedValueOnce(null) // first lookup: no existing user yet
+      .mockResolvedValueOnce({ org_id: EXISTING_ORG_ID }); // re-select after losing the race
+
+    const res = await POST(requestBody({ email: 'racing-founder@example.com' }));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    const tokenInsert = executeMock.mock.calls.find(([sql]) => sql.includes('INSERT INTO login_tokens'));
+    expect(tokenInsert).toBeDefined();
+    expect(tokenInsert![1][1]).toBe(EXISTING_ORG_ID); // org_id param — the winner's org
+    expect(sendMock).toHaveBeenCalled();
+    // Not the "something went wrong" path — a race isn't an error.
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it('logs and still answers ok when re-selecting after a unique-violation somehow finds no row', async () => {
+    const uniqueViolation = Object.assign(new Error('duplicate key value'), { code: '23505' });
+    withTransactionMock.mockRejectedValue(uniqueViolation);
+    queryOneMock
+      .mockResolvedValueOnce(null) // first lookup: no existing user
+      .mockResolvedValueOnce(null); // re-select still finds nothing — not the race we assumed
+
+    const res = await POST(requestBody({ email: 'founder@example.com' }));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(sendMock).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it('logs and still answers ok when the token insert fails', async () => {
     queryOneMock.mockResolvedValueOnce({ org_id: EXISTING_ORG_ID });
     executeMock.mockImplementation(async (sql: string) => {
       if (sql.includes('INSERT INTO login_tokens')) throw new Error('token insert failed');
       return 1;
     });
 
-    await expect(POST(requestBody({ email: 'founder@example.com' }))).rejects.toThrow(
-      'token insert failed',
-    );
+    const res = await POST(requestBody({ email: 'founder@example.com' }));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
     // A link whose token was never stored can only end in "expired" — it must
     // not reach the inbox and burn the per-email rate-limit budget.
     expect(sendMock).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/auth/request — global signup rate limit', () => {
+  it('creates no account and answers ok when the global signup bucket is exhausted', async () => {
+    queryOneMock.mockResolvedValueOnce(null); // no existing user — this is a signup attempt
+    checkRateLimitMock.mockImplementation((key: string) =>
+      key === 'signup' ? { allowed: false, retryAfterSec: 600 } : { allowed: true, retryAfterSec: 0 },
+    );
+
+    const res = await POST(requestBody({ email: 'mass-signup@example.com' }));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(withTransactionMock).not.toHaveBeenCalled();
+    const tokenInsert = executeMock.mock.calls.find(([sql]) => sql.includes('INSERT INTO login_tokens'));
+    expect(tokenInsert).toBeUndefined();
+    expect(sendMock).not.toHaveBeenCalled();
+  });
+
+  it('does not consult the signup bucket at all for a returning user (login, not signup)', async () => {
+    queryOneMock.mockResolvedValueOnce({ org_id: EXISTING_ORG_ID });
+
+    await POST(requestBody({ email: 'returning@example.com' }));
+
+    expect(checkRateLimitMock).not.toHaveBeenCalledWith('signup', expect.anything(), expect.anything());
+  });
+
+  it('checks the signup bucket by a fixed global key, not per-IP or per-email', async () => {
+    queryOneMock.mockResolvedValueOnce(null);
+
+    await POST(requestBody({ email: 'new-founder@example.com' }));
+
+    expect(checkRateLimitMock).toHaveBeenCalledWith('signup', 30, 600_000);
   });
 });
 

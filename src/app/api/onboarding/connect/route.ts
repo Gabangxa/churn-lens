@@ -19,23 +19,31 @@ export async function POST(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
 
+  const authResult = requireOrgId(req);
+  if ('error' in authResult) return authResult.error;
+  const { orgId } = authResult;
+
+  // Throttle webhook registration per IP, independent of the per-org session.
+  // Checked AFTER requireOrgId: this bucket is keyed by IP, and an anonymous
+  // caller who fails the session check must not be able to spend a founder's
+  // (or a shared-IP neighbor's) budget with requests that were always going
+  // to 401. requireOrgId itself does no I/O, so this costs nothing to defer.
+  const rl = checkRateLimit(`onboard:${clientIp(req)}`, 8, 600_000);
+  if (!rl.allowed) {
+    return NextResponse.json(
+      { error: 'Too many attempts. Please wait a minute and try again.' },
+      { status: 429, headers: { 'retry-after': String(rl.retryAfterSec) } },
+    );
+  }
+
+  let apiKey: unknown;
   try {
-    // Throttle webhook registration per IP, independent of the per-org session.
-    const rl = checkRateLimit(`onboard:${clientIp(req)}`, 8, 600_000);
-    if (!rl.allowed) {
-      return NextResponse.json(
-        { error: 'Too many attempts. Please wait a minute and try again.' },
-        { status: 429, headers: { 'retry-after': String(rl.retryAfterSec) } },
-      );
-    }
+    ({ apiKey } = await req.json());
+  } catch {
+    return NextResponse.json({ error: 'Invalid request body.' }, { status: 400 });
+  }
 
-    const authResult = requireOrgId(req);
-    if ('error' in authResult) return authResult.error;
-    const { orgId } = authResult;
-
-    const body = await req.json();
-    const { apiKey } = body;
-
+  try {
     if (!apiKey || typeof apiKey !== 'string') {
       return NextResponse.json({ error: 'API key is required.' }, { status: 400 });
     }

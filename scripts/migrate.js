@@ -209,66 +209,112 @@ async function migrate() {
   // From here on, /api/auth/request treats "a users row exists for lower(email)"
   // as the account, and creates one for any email it has never seen — so two
   // rows that differ only by case or stray whitespace would silently become
-  // two different accounts. Normalize what's already stored before the unique
-  // index below can enforce it going forward.
-  await pool.query(`
-    UPDATE users SET email = lower(trim(email)) WHERE email <> lower(trim(email));
-  `);
-
-  // Dedupe users by (lower) email before the unique index can be added, so an
-  // org already carrying two rows for the same address (the account-takeover
-  // bug this migration accompanies fixed the code path, but not existing data)
-  // doesn't fail the CREATE UNIQUE INDEX below.
+  // two different accounts. Normalize, dedupe, and add the unique index that
+  // enforces this going forward.
   //
-  // Keeps exactly one row per email: the row whose org has already registered
-  // a Stripe webhook (stripe_webhook_id IS NOT NULL) wins, tie-broken by the
-  // newest such row — that's the org actually in use. If no row for that email
-  // has a connected org, the oldest row wins instead, on the assumption that
-  // it's the original signup and everything newer is noise (including, in the
-  // specific attack this migration follows, an attacker's org — which SHOULD
-  // have a webhook if they got that far, but if not, "oldest" still favors the
-  // victim's real account over a fresher hostile one). A single CTE-driven
-  // DELETE keeps the decision atomic and deterministic; it is a no-op (deletes
-  // nothing) when every email already maps to one row.
-  const dedupeResult = await pool.query(`
-    WITH ranked AS (
-      SELECT
-        u.id,
-        u.email,
-        row_number() OVER (
-          PARTITION BY lower(trim(u.email))
-          ORDER BY
-            (o.stripe_webhook_id IS NOT NULL) DESC,
-            CASE WHEN o.stripe_webhook_id IS NOT NULL THEN u.created_at END DESC NULLS LAST,
-            u.created_at ASC,
-            u.id ASC
-        ) AS rn
-      FROM users u
-      JOIN organizations o ON o.id = u.org_id
-    ),
-    losers AS (
-      SELECT id, email FROM ranked WHERE rn > 1
-    )
-    DELETE FROM users WHERE id IN (SELECT id FROM losers)
-    RETURNING email;
-  `);
-  if (dedupeResult.rowCount > 0) {
-    const counts = new Map();
-    for (const row of dedupeResult.rows) {
-      counts.set(row.email, (counts.get(row.email) ?? 0) + 1);
-    }
-    const summary = [...counts.entries()].map(([email, n]) => `${email} (${n})`).join(', ');
-    console.warn(
-      `[migrate] Removed ${dedupeResult.rowCount} duplicate users.email row(s) before adding the unique index: ${summary}`,
-    );
-  }
+  // These three steps run on ONE dedicated connection inside BEGIN/COMMIT,
+  // not as three separate autocommitted statements. This script is Railway's
+  // pre-deploy command, which retries up to 5 times on failure: without a
+  // transaction, a failure between the DELETE and the CREATE UNIQUE INDEX
+  // would leave the dedupe already applied but the constraint not yet in
+  // place, and a retry would re-run the (by-then-idempotent) normalize UPDATE
+  // and a no-op DELETE without ever being able to tell "partially applied" from
+  // "not applied" apart. Wrapping all of it in one transaction means every
+  // retry starts from the same pre-migration state: either everything below
+  // lands, or none of it does.
+  const dedupeClient = await pool.connect();
+  try {
+    await dedupeClient.query('BEGIN');
 
-  // Enforces at the database what /api/auth/request now relies on: exactly one
-  // account per email. Safe to add now that the dedupe above guarantees no
-  // existing row violates it.
-  await pool.query(`
-    CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_key ON users (lower(email));
-  `);
+    await dedupeClient.query(`
+      UPDATE users SET email = lower(trim(email)) WHERE email <> lower(trim(email));
+    `);
+
+    // Recoverable-delete safety net: every row this migration is about to
+    // remove is copied here first, in case which-row-survived ever needs
+    // auditing or manual recovery. `LIKE users` copies columns only (not
+    // constraints or indexes) — this table must accept a row whose org was
+    // since deleted (users.org_id has ON DELETE CASCADE; the backup must
+    // outlive that) and must never itself enforce the uniqueness the dedupe
+    // exists to fix.
+    await dedupeClient.query(`
+      CREATE TABLE IF NOT EXISTS users_dedupe_backup (
+        LIKE users,
+        removed_at timestamptz NOT NULL DEFAULT now()
+      );
+    `);
+
+    // Decides, for every email with more than one row, which one survives.
+    // ON COMMIT DROP: scoped to this migration run, never left behind.
+    //
+    // The oldest row always wins (created_at ASC, id ASC as the final
+    // deterministic tiebreak) — full stop, no exception for which org has a
+    // Stripe webhook registered. An earlier version of this migration
+    // preferred the webhook-having org, which is backwards: in the exact
+    // account-takeover attack this migration follows, the ATTACKER is the one
+    // who successfully connected a key and registered a webhook, so that rule
+    // would have kept the attacker's row and deleted the victim's original
+    // signup. The oldest row has no such failure mode — it is, by
+    // construction, the account that existed before any attacker could have
+    // raced it.
+    //
+    // LEFT JOIN organizations, not an inner join: users.org_id currently has
+    // NOT NULL + ON DELETE CASCADE, so an inner join would not drop any row
+    // today — but this dedupe should not quietly depend on that FK staying
+    // exactly as strict as it is now. PARTITION BY lower(email) rather than
+    // lower(trim(email)): the normalize UPDATE just above already ran in this
+    // same transaction, so email is already trimmed and lowercased here.
+    await dedupeClient.query(`
+      CREATE TEMP TABLE users_dedupe_losers ON COMMIT DROP AS
+      SELECT id, org_id FROM (
+        SELECT
+          u.id,
+          u.org_id,
+          row_number() OVER (
+            PARTITION BY lower(u.email)
+            ORDER BY u.created_at ASC, u.id ASC
+          ) AS rn
+        FROM users u
+        LEFT JOIN organizations o ON o.id = u.org_id
+      ) ranked
+      WHERE rn > 1;
+    `);
+
+    await dedupeClient.query(`
+      INSERT INTO users_dedupe_backup
+      SELECT u.*, now() FROM users u WHERE u.id IN (SELECT id FROM users_dedupe_losers);
+    `);
+
+    const dedupeResult = await dedupeClient.query(`
+      DELETE FROM users WHERE id IN (SELECT id FROM users_dedupe_losers)
+      RETURNING org_id;
+    `);
+    if (dedupeResult.rowCount > 0) {
+      // Org ids only, never emails — this log reaches Railway's deploy log,
+      // and an email address is personal data under POPIA. Org ids identify
+      // which accounts to look at without naming anyone.
+      const orgIds = [...new Set(dedupeResult.rows.map((row) => row.org_id))];
+      console.warn(
+        `[migrate] Removed ${dedupeResult.rowCount} duplicate users.email row(s) (backed up in users_dedupe_backup) affecting org(s): ${orgIds.join(', ')}`,
+      );
+    }
+
+    // Enforces at the database what /api/auth/request now relies on: exactly
+    // one account per email. Safe to add now that the dedupe above guarantees
+    // no existing row violates it.
+    await dedupeClient.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_key ON users (lower(email));
+    `);
+
+    await dedupeClient.query('COMMIT');
+  } catch (err) {
+    await dedupeClient.query('ROLLBACK').catch((rollbackErr) => {
+      console.error('[migrate] Rollback of the users dedupe transaction failed:', rollbackErr);
+    });
+    throw err;
+  } finally {
+    dedupeClient.release();
+  }
 
   console.log('Database migration complete');
   await pool.end();

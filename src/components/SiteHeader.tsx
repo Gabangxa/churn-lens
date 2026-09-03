@@ -40,7 +40,7 @@ export default function SiteHeader({ active }: { active?: 'login' }) {
         <div className="flex items-center space-x-4">
           <ThemeToggle />
           <Link
-            href="/onboarding"
+            href="/login"
             className="px-6 py-2.5 rounded-full border-2 border-teal-900 dark:border-teal-100 text-teal-900 dark:text-teal-100 text-xs font-bold uppercase tracking-widest shadow-[4px_4px_0px_0px_#134e4a] dark:shadow-[4px_4px_0px_0px_#ccfbf1] hover:shadow-none hover:translate-x-[4px] hover:translate-y-[4px] hover:bg-teal-900 hover:text-white dark:hover:bg-teal-100 dark:hover:text-teal-950 transition-all active:scale-95"
           >
             Get started

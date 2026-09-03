@@ -223,7 +223,9 @@ export default function SettingsPage() {
         setError(data.error || 'Failed to disconnect.');
         return;
       }
-      router.push('/onboarding');
+      // No router.push here: the route always answers success with a 303 (the
+      // `res.redirected` branch above), so this point is unreachable on the
+      // happy path — the JSON branch below it only ever carries an error.
     } catch {
       setError('Network error. Please try again.');
     } finally {

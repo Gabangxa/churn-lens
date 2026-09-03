@@ -44,9 +44,23 @@ export function checkRateLimit(key: string, limit: number, windowMs: number): Ra
   return { allowed: true, retryAfterSec: 0 };
 }
 
-/** Best-effort client IP from proxy headers (first hop of X-Forwarded-For). */
+/**
+ * Best-effort client IP from proxy headers — the LAST hop of X-Forwarded-For,
+ * not the first.
+ *
+ * X-Forwarded-For is a comma-separated list each proxy APPENDS to; Railway's
+ * edge proxy is the last hop to touch the header before it reaches this
+ * process, so its append is the only entry here that isn't attacker-supplied.
+ * Every earlier entry is whatever the client (or an upstream proxy relaying
+ * the client's own header) chose to send — trusting the first hop let a single
+ * caller rotate through fake IPs (`X-Forwarded-For: 1.2.3.4`) to get a fresh
+ * rate-limit bucket on every request.
+ */
 export function clientIp(req: Request): string {
   const xff = req.headers.get('x-forwarded-for');
-  if (xff) return xff.split(',')[0].trim();
+  if (xff) {
+    const hops = xff.split(',').map((hop) => hop.trim()).filter(Boolean);
+    if (hops.length > 0) return hops[hops.length - 1];
+  }
   return req.headers.get('x-real-ip') ?? 'unknown';
 }

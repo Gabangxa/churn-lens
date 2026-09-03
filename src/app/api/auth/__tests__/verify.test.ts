@@ -181,18 +181,28 @@ describe('GET /api/auth/verify — token handling', () => {
   });
 });
 
-// CHARACTERIZATION, not an endorsement: verify re-uses redirect_to exactly as
-// stored and does not re-run the allow-list. Today the only writer is
-// /api/auth/request, which does allow-list it, so this is unreachable — but it
-// means the open-redirect guard exists in exactly one place. If verify ever
-// starts validating on read (it should), invert this test.
-describe('GET /api/auth/verify — redirect_to is trusted as stored', () => {
-  it('would follow an off-origin redirect_to if one ever reached the table', async () => {
+// verify re-validates redirect_to against the same allow-list
+// /api/auth/request wrote it under, rather than trusting the stored value.
+// Today request is the only writer and it already allow-lists on the way in,
+// so this is defense in depth — but a row this route trusted blindly would be
+// one bad migration, admin query, or future writer away from an open redirect
+// on the one route that also hands out a session.
+describe('GET /api/auth/verify — redirect_to is re-validated, not trusted as stored', () => {
+  it('falls back to /dashboard rather than following an off-origin redirect_to', async () => {
     queryOneMock.mockResolvedValueOnce({ org_id: ORG_ID, redirect_to: 'https://evil.example/' });
     queryOneMock.mockResolvedValueOnce({ stripe_api_key_enc: 'v1.encrypted' });
 
     const res = await GET(verifyRequest('good-token'));
 
-    expect(res.headers.get('location')).toBe('https://evil.example/');
+    expect(res.headers.get('location')).toBe(`${APP_URL}/dashboard`);
+  });
+
+  it('falls back to /onboarding (not the off-origin value) when the org also has no Stripe key', async () => {
+    queryOneMock.mockResolvedValueOnce({ org_id: ORG_ID, redirect_to: '//evil.example' });
+    queryOneMock.mockResolvedValueOnce({ stripe_api_key_enc: null });
+
+    const res = await GET(verifyRequest('good-token'));
+
+    expect(res.headers.get('location')).toBe(`${APP_URL}/onboarding`);
   });
 });

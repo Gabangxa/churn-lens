@@ -2,16 +2,12 @@
 
 import { useState, useEffect, FormEvent } from 'react';
 import SiteHeader from '@/components/SiteHeader';
+import { ALLOWED_NEXT_PATHS } from '@/lib/next-paths';
 
 // Signup and login are the same form now: /api/auth/request creates the org +
 // owner user the first time it sees an email, so there is no separate
 // "create account" step (and no separate endpoint an attacker could target
 // with a victim's email and their own Stripe key — see /api/onboarding/connect).
-
-// Must mirror the allowlist in src/app/api/auth/request/route.ts. Kept as a
-// literal set here (not imported) because that route module pulls in
-// next/server, db, and email helpers that have no business in a client bundle.
-const ALLOWED_NEXT_PATHS = new Set(['/dashboard', '/settings', '/onboarding']);
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');

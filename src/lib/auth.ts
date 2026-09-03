@@ -101,6 +101,12 @@ export function requireOrgId(req: NextRequest): { orgId: string } | { error: Nex
  * Call this FIRST in a route handler, before any other work — the whole point
  * is to refuse a forged request before it can do (or even schedule) anything.
  */
+// Logged at most once per process: a broken NEXT_PUBLIC_APP_URL is a deploy
+// misconfiguration, not a per-request event, and this route is hit on every
+// page load — without the flag a single bad deploy would spam the log at
+// request volume instead of saying it once.
+let warnedNoAllowedOriginsInProduction = false;
+
 export function assertSameOrigin(req: NextRequest): NextResponse | null {
   const origin = req.headers.get('origin');
 
@@ -118,6 +124,13 @@ export function assertSameOrigin(req: NextRequest): NextResponse | null {
   }
   if (process.env.NODE_ENV !== 'production') {
     allowedOrigins.add(req.nextUrl.origin);
+  }
+
+  if (allowedOrigins.size === 0 && process.env.NODE_ENV === 'production' && !warnedNoAllowedOriginsInProduction) {
+    warnedNoAllowedOriginsInProduction = true;
+    console.error(
+      'assertSameOrigin: NEXT_PUBLIC_APP_URL is missing or invalid in production — every request that carries an Origin or Sec-Fetch-Site header will be rejected until it is set.',
+    );
   }
 
   if (origin) {

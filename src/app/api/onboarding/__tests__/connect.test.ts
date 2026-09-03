@@ -183,13 +183,27 @@ describe('POST /api/onboarding/connect — happy path', () => {
     expect(res.status).toBe(422);
   });
 
-  it('is rate limited per IP', async () => {
+  it('is rate limited per IP, but only after the session is checked', async () => {
+    // Checked AFTER requireOrgId now: an unauthenticated stranger who was
+    // always going to get a 401 must not be able to burn a founder's (or a
+    // shared-IP neighbor's) connect budget just by hammering this route.
     checkRateLimitMock.mockReturnValue({ allowed: false, retryAfterSec: 42 });
 
     const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY }));
 
     expect(res.status).toBe(429);
-    expect(requireOrgIdMock).not.toHaveBeenCalled();
+    expect(requireOrgIdMock).toHaveBeenCalledTimes(1);
+    expect(queryOneMock).not.toHaveBeenCalled();
+  });
+
+  it('never consults the rate limiter at all for an unauthenticated request', async () => {
+    authFail();
+    checkRateLimitMock.mockReturnValue({ allowed: false, retryAfterSec: 42 });
+
+    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY }));
+
+    expect(res.status).toBe(401);
+    expect(checkRateLimitMock).not.toHaveBeenCalled();
   });
 });
 
@@ -305,12 +319,9 @@ describe('POST /api/onboarding/connect — the account-takeover attack', () => {
 });
 
 describe('POST /api/onboarding/connect — malformed body', () => {
-  it('answers 500 (not 400) for a body that is not JSON', async () => {
-    // CHARACTERIZATION: req.json() is inside the route's outer try, so a parse
-    // failure lands in the generic 500 handler. /api/auth/request returns 400
-    // for the same input. Not a security issue — a bad client is told nothing
-    // useful either way — but the two doors disagree.
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  it('answers 400 (not 500) for a body that is not JSON, same as /api/auth/request', async () => {
+    // req.json() now has its own try/catch, matching /api/auth/request, rather
+    // than falling into the generic 500 handler further down.
     const req = new NextRequest('http://localhost/api/onboarding/connect', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -319,8 +330,8 @@ describe('POST /api/onboarding/connect — malformed body', () => {
 
     const res = await POST(req);
 
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(400);
     expect(queryMock).not.toHaveBeenCalled();
-    errorSpy.mockRestore();
+    expect(queryOneMock).not.toHaveBeenCalled();
   });
 });

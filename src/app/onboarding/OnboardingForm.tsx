@@ -5,10 +5,6 @@ import { useState, FormEvent, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Wordmark from '@/components/Wordmark';
 
-// Audit fixes: ?plan= is now read and surfaced (plan chip); "Continue with
-// Stripe" is a real link to the OAuth start route; key field gets a show
-// toggle + "create a restricted key" deep link; "1 ——— 2 Done" indicator gone.
-//
 // Account-takeover fix: this form no longer collects an email or creates an
 // org/user. A session (from /api/auth/verify) is required to even reach this
 // page — see page.tsx, the server component that guards it — and the email

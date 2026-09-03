@@ -3,6 +3,7 @@ import { queryOne } from '@/lib/db';
 import { hashLoginToken } from '@/lib/crypto';
 import { setOrgCookie } from '@/lib/auth';
 import { redirectUrl } from '@/lib/app-url';
+import { sanitizeNext } from '@/lib/next-paths';
 
 /**
  * Consume a magic-link token and establish the session. The ONLY place a
@@ -37,13 +38,21 @@ export async function GET(req: NextRequest) {
     [row.org_id],
   );
 
+  // Re-validate redirect_to against the same allow-list /api/auth/request wrote
+  // it under, rather than trusting the stored value verbatim. Today request is
+  // the only writer and it already allow-lists on the way in, so this is
+  // defense in depth, not the primary guard — but a row this route trusts
+  // blindly is one bad migration, admin query, or future writer away from an
+  // open redirect on the one route that also hands out a session.
+  const validRedirectTo = sanitizeNext(row.redirect_to);
+
   // No key yet (brand-new signup, or a founder who never finished connecting)
   // means onboarding is where they belong regardless of what redirect_to says
   // — except redirect_to itself may BE an onboarding link carrying the plan a
   // pricing-page click chose, in which case it already is the destination.
   const destination = !org?.stripe_api_key_enc
-    ? (row.redirect_to?.startsWith('/onboarding') ? row.redirect_to : '/onboarding')
-    : (row.redirect_to ?? '/dashboard');
+    ? (validRedirectTo?.startsWith('/onboarding') ? validRedirectTo : '/onboarding')
+    : (validRedirectTo ?? '/dashboard');
 
   const response = NextResponse.redirect(redirectUrl(destination, req), { status: 303 });
   return setOrgCookie(response, row.org_id);
