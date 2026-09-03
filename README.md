@@ -125,6 +125,16 @@ Config-as-code lives in `railway.json` (Railpack build, DB migration as the pre-
 command, `/api/health` healthcheck). The weekly cron jobs run in-process via
 `src/instrumentation.ts` — no separate scheduler service needed.
 
+`instrumentation.ts` polls every 10 minutes (plus once ~30s after boot) rather than
+firing a one-shot timer at the exact due instant, so a redeploy or crash spanning
+Monday morning still catches up on the next poll instead of silently skipping the
+week. `cron_runs` (see `src/lib/cron.ts`) tracks each week's status: a week that
+crashed mid-run (`running` with no update in 2+ hours) or that finished `failed` is
+retried automatically, up to 5 attempts, after which the scheduler logs once and
+waits for a manual retry. `digest` additionally checks that `themes` has `succeeded`
+for the week before it claims a run, and `digest_sends` (org, week) rows stop a retry
+from re-emailing a founder who already got that week's mail.
+
 1. **New Project → Deploy from GitHub repo** → select this repo.
 2. **Add → Database → PostgreSQL.**
 3. On the web service, set **Variables** (Raw Editor):

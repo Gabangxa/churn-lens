@@ -332,6 +332,51 @@ async function migrate() {
     dedupeClient.release();
   }
 
+  // Cron reliability: cron_runs previously only ever recorded "claimed", so an
+  // exception mid-run left the row permanently claimed and that week could
+  // never be retried. status/finished_at/processed/failed/attempts/error let
+  // claimCronRun() (src/lib/cron.ts) tell a genuinely finished week apart from
+  // a failed or crashed-mid-run one, and re-open the latter for a retry.
+  // Default 'succeeded' is deliberate: rows written by the old code (and any
+  // row inserted before this migration's UPDATE-path exists) must read as
+  // done, not as retryable, or every historical week would replay on deploy.
+  await pool.query(`
+    ALTER TABLE cron_runs
+      ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'succeeded',
+      ADD COLUMN IF NOT EXISTS finished_at timestamptz,
+      ADD COLUMN IF NOT EXISTS processed integer NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS failed integer NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 1,
+      ADD COLUMN IF NOT EXISTS error text;
+  `);
+
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'cron_runs_status_check'
+      ) THEN
+        ALTER TABLE cron_runs
+          ADD CONSTRAINT cron_runs_status_check
+          CHECK (status IN ('running', 'succeeded', 'failed'));
+      END IF;
+    END $$;
+  `);
+
+  // Per-org, per-week send record so a re-run of a partially-failed digest
+  // (some orgs already emailed, others not) never re-emails a founder who
+  // already got this week's digest. The digest route inserts one row per
+  // successful send and skips any org that already has one for the week.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS digest_sends (
+      org_id uuid NOT NULL REFERENCES organizations ON DELETE CASCADE,
+      week_of date NOT NULL,
+      sent_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (org_id, week_of)
+    );
+  `);
+
   console.log('Database migration complete');
   await pool.end();
 }
