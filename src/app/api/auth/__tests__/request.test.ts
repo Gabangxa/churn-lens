@@ -338,10 +338,10 @@ describe('POST /api/auth/request — signup transaction failure', () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
-    const tokenInsert = executeMock.mock.calls.find(([sql]) => sql.includes('INSERT INTO login_tokens'));
-    expect(tokenInsert).toBeDefined();
-    expect(tokenInsert![1][1]).toBe(EXISTING_ORG_ID); // org_id param — the winner's org
-    expect(sendMock).toHaveBeenCalled();
+    const tokenInserts = executeMock.mock.calls.filter(([sql]) => sql.includes('INSERT INTO login_tokens'));
+    expect(tokenInserts).toHaveLength(1); // exactly one token, not one per race participant
+    expect(tokenInserts[0][1][1]).toBe(EXISTING_ORG_ID); // org_id param — the winner's org
+    expect(sendMock).toHaveBeenCalledTimes(1);
     // Not the "something went wrong" path — a race isn't an error.
     expect(errorSpy).not.toHaveBeenCalled();
   });

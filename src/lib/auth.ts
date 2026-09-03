@@ -70,6 +70,12 @@ export function requireOrgId(req: NextRequest): { orgId: string } | { error: Nex
   return { orgId };
 }
 
+// Logged at most once per process: a broken NEXT_PUBLIC_APP_URL is a deploy
+// misconfiguration, not a per-request event, and this route is hit on every
+// page load — without the flag a single bad deploy would spam the log at
+// request volume instead of saying it once.
+let warnedNoAllowedOriginsInProduction = false;
+
 /**
  * Rejects cross-site requests to a state-changing route (login CSRF, and
  * generally, session-riding requests).
@@ -101,12 +107,6 @@ export function requireOrgId(req: NextRequest): { orgId: string } | { error: Nex
  * Call this FIRST in a route handler, before any other work — the whole point
  * is to refuse a forged request before it can do (or even schedule) anything.
  */
-// Logged at most once per process: a broken NEXT_PUBLIC_APP_URL is a deploy
-// misconfiguration, not a per-request event, and this route is hit on every
-// page load — without the flag a single bad deploy would spam the log at
-// request volume instead of saying it once.
-let warnedNoAllowedOriginsInProduction = false;
-
 export function assertSameOrigin(req: NextRequest): NextResponse | null {
   const origin = req.headers.get('origin');
 

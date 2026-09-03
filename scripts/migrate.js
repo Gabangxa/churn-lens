@@ -231,16 +231,18 @@ async function migrate() {
     `);
 
     // Recoverable-delete safety net: every row this migration is about to
-    // remove is copied here first, in case which-row-survived ever needs
-    // auditing or manual recovery. `LIKE users` copies columns only (not
-    // constraints or indexes) — this table must accept a row whose org was
-    // since deleted (users.org_id has ON DELETE CASCADE; the backup must
-    // outlive that) and must never itself enforce the uniqueness the dedupe
-    // exists to fix.
+    // remove is snapshotted here first as jsonb, in case which-row-survived
+    // ever needs auditing or manual recovery. A jsonb snapshot rather than
+    // `LIKE users`: IF NOT EXISTS can never widen a table that already exists,
+    // so a column-for-column clone would break `INSERT ... SELECT u.*` the day
+    // users gains a column — only in production, where the table already
+    // exists at the old width. Retention: review and drop this table once the
+    // dedupe has been confirmed in production; it holds email addresses.
     await dedupeClient.query(`
       CREATE TABLE IF NOT EXISTS users_dedupe_backup (
-        LIKE users,
-        removed_at timestamptz NOT NULL DEFAULT now()
+        id uuid NOT NULL,
+        removed_at timestamptz NOT NULL DEFAULT now(),
+        row_data jsonb NOT NULL
       );
     `);
 
@@ -281,8 +283,22 @@ async function migrate() {
     `);
 
     await dedupeClient.query(`
-      INSERT INTO users_dedupe_backup
-      SELECT u.*, now() FROM users u WHERE u.id IN (SELECT id FROM users_dedupe_losers);
+      INSERT INTO users_dedupe_backup (id, row_data)
+      SELECT u.id, to_jsonb(u) FROM users u WHERE u.id IN (SELECT id FROM users_dedupe_losers);
+    `);
+
+    // A magic link requested just before this deploy still points at the
+    // losing org (login_tokens.org_id references organizations, not users), so
+    // clicking it after the deploy would land the founder in the org this
+    // migration just cut them off from — in the takeover scenario, the
+    // attacker's. Void unused tokens for orgs that are about to have no user.
+    await dedupeClient.query(`
+      DELETE FROM login_tokens
+      WHERE used_at IS NULL
+        AND org_id IN (SELECT org_id FROM users_dedupe_losers)
+        AND org_id NOT IN (
+          SELECT org_id FROM users WHERE id NOT IN (SELECT id FROM users_dedupe_losers)
+        );
     `);
 
     const dedupeResult = await dedupeClient.query(`
