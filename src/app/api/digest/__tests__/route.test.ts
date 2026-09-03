@@ -27,13 +27,20 @@ vi.mock('@/lib/auth', () => ({
   verifyCronSecret: (...args: unknown[]) => verifyCronSecretMock(...args),
 }));
 
+// MAX_ATTEMPTS is a plain value (not a closure deferring its lookup), so
+// building it via vi.hoisted() — rather than a normal top-level const read
+// directly inside the factory below — avoids a temporal-dead-zone
+// ReferenceError: vi.mock factories run when this file's imports are
+// evaluated, which happens before its own top-level const declarations do.
+const { MAX_ATTEMPTS } = vi.hoisted(() => ({ MAX_ATTEMPTS: 5 }));
 const claimCronRunMock = vi.fn();
-const cronRunStatusMock = vi.fn();
+const cronRunRecordMock = vi.fn();
 const finishCronRunMock = vi.fn();
 vi.mock('@/lib/cron', () => ({
   claimCronRun: (...args: unknown[]) => claimCronRunMock(...args),
-  cronRunStatus: (...args: unknown[]) => cronRunStatusMock(...args),
+  cronRunRecord: (...args: unknown[]) => cronRunRecordMock(...args),
   finishCronRun: (...args: unknown[]) => finishCronRunMock(...args),
+  MAX_ATTEMPTS,
 }));
 
 const WEEK_OF = '2026-03-09';
@@ -52,6 +59,15 @@ function digestRequest() {
     method: 'POST',
     headers: { authorization: 'Bearer secret' },
   });
+}
+
+/** A themes cron_runs record — succeeded by default (the terminal, happy case). */
+function themesRecord(overrides: { status?: 'succeeded' | 'failed' | 'running'; attempts?: number } = {}) {
+  return {
+    status: overrides.status ?? 'succeeded',
+    ranAt: new Date('2026-03-16T06:05:00Z'),
+    attempts: overrides.attempts ?? 1,
+  };
 }
 
 const ORG = { id: 'org-1', name: 'Acme' };
@@ -75,11 +91,11 @@ beforeEach(() => {
   resendSendMock.mockReset();
   verifyCronSecretMock.mockReset();
   claimCronRunMock.mockReset();
-  cronRunStatusMock.mockReset();
+  cronRunRecordMock.mockReset();
   finishCronRunMock.mockReset();
 
   verifyCronSecretMock.mockReturnValue(true);
-  cronRunStatusMock.mockResolvedValue('succeeded');
+  cronRunRecordMock.mockResolvedValue(themesRecord());
   claimCronRunMock.mockResolvedValue(true);
   finishCronRunMock.mockResolvedValue(undefined);
   resendSendMock.mockResolvedValue({ data: { id: 'email_1' }, error: null });
@@ -114,11 +130,11 @@ describe('POST /api/digest', () => {
     verifyCronSecretMock.mockReturnValue(false);
     const res = await POST(digestRequest());
     expect(res.status).toBe(401);
-    expect(cronRunStatusMock).not.toHaveBeenCalled();
+    expect(cronRunRecordMock).not.toHaveBeenCalled();
   });
 
-  it('defers without claiming when themes has not succeeded for this week', async () => {
-    cronRunStatusMock.mockResolvedValue('running');
+  it('defers without claiming when themes is still running', async () => {
+    cronRunRecordMock.mockResolvedValue(themesRecord({ status: 'running' }));
     const res = await POST(digestRequest());
     const body = await res.json();
 
@@ -126,8 +142,8 @@ describe('POST /api/digest', () => {
     expect(claimCronRunMock).not.toHaveBeenCalled();
   });
 
-  it('defers when themes has never run (status null)', async () => {
-    cronRunStatusMock.mockResolvedValue(null);
+  it('defers when themes has never run (record null)', async () => {
+    cronRunRecordMock.mockResolvedValue(null);
     const res = await POST(digestRequest());
     const body = await res.json();
 
@@ -209,6 +225,14 @@ describe('POST /api/digest', () => {
       failed: 0,
     });
   });
+
+  it('adds the plan filter to the org lookup, matching themes', async () => {
+    await POST(digestRequest());
+    const call = queryMock.mock.calls.find(([sql]) =>
+      (sql as string).includes('FROM organizations WHERE id = ANY'),
+    );
+    expect(call?.[0]).toContain("AND plan IN ('starter', 'growth')");
+  });
 });
 
 const ORG_2 = { id: 'org-2', name: 'Globex' };
@@ -245,8 +269,8 @@ function sentTo(): string[] {
 }
 
 describe('POST /api/digest — deferral gate', () => {
-  it('defers when themes failed for this week', async () => {
-    cronRunStatusMock.mockResolvedValue('failed');
+  it('defers while themes is failed but still under its attempts cap', async () => {
+    cronRunRecordMock.mockResolvedValue(themesRecord({ status: 'failed', attempts: MAX_ATTEMPTS - 1 }));
 
     const res = await POST(digestRequest());
     const body = await res.json();
@@ -260,10 +284,25 @@ describe('POST /api/digest — deferral gate', () => {
     expect(resendSendMock).not.toHaveBeenCalled();
   });
 
-  it.each(['running', 'failed', null] as const)(
-    'sends nothing and claims nothing when themes status is %s',
+  it('proceeds once themes has exhausted its retries, even though it never succeeded', async () => {
+    // themes gave up after MAX_ATTEMPTS failures (e.g. one poison org kept
+    // throwing); whatever theme rows exist are final. Digest must not wait
+    // forever on a 'succeeded' status that will never arrive, or every
+    // founder's digest — not just the poisoned org's — gets silenced.
+    cronRunRecordMock.mockResolvedValue(themesRecord({ status: 'failed', attempts: MAX_ATTEMPTS }));
+
+    const res = await POST(digestRequest());
+    const body = await res.json();
+
+    expect(body).not.toHaveProperty('deferred');
+    expect(claimCronRunMock).toHaveBeenCalledWith('digest', WEEK_OF);
+    expect(body).toEqual({ sent: 1, failed: 0, weekOf: WEEK_OF });
+  });
+
+  it.each(['running', null] as const)(
+    'sends nothing and claims nothing when themes record is %s',
     async (status) => {
-      cronRunStatusMock.mockResolvedValue(status);
+      cronRunRecordMock.mockResolvedValue(status === null ? null : themesRecord({ status }));
 
       const res = await POST(digestRequest());
 
@@ -274,10 +313,10 @@ describe('POST /api/digest — deferral gate', () => {
     },
   );
 
-  it('checks the themes status before claiming the digest run', async () => {
+  it('checks the themes run record before claiming the digest run', async () => {
     await POST(digestRequest());
-    expect(cronRunStatusMock).toHaveBeenCalledWith('themes', WEEK_OF);
-    expect(cronRunStatusMock.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(cronRunRecordMock).toHaveBeenCalledWith('themes', WEEK_OF);
+    expect(cronRunRecordMock.mock.invocationCallOrder[0]).toBeLessThan(
       claimCronRunMock.mock.invocationCallOrder[0],
     );
   });
@@ -367,17 +406,19 @@ describe('POST /api/digest — per-org isolation', () => {
     expect(call?.[1]).toEqual([ORG.id, WEEK_OF]);
   });
 
-  it('an org with no owner user is skipped without being counted as failed', async () => {
+  it('an org with no owner user is skipped without being counted as failed, but is logged', async () => {
     queryOneMock.mockImplementation(async (sql: string) => {
       if (sql.includes('FROM digest_sends')) return null;
       if (sql.includes('FROM users')) return null;
       return null;
     });
+    const warn = console.warn as unknown as ReturnType<typeof vi.fn>;
 
     const body = await (await POST(digestRequest())).json();
 
     expect(body).toEqual({ sent: 0, failed: 0, weekOf: WEEK_OF });
     expect(resendSendMock).not.toHaveBeenCalled();
+    expect(warn.mock.calls.flat().join(' ')).toContain(ORG.id);
     expect(finishCronRunMock).toHaveBeenCalledWith('digest', WEEK_OF, {
       status: 'succeeded',
       processed: 0,

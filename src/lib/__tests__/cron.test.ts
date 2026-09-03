@@ -13,10 +13,13 @@ import {
   claimCronRun,
   cronRunRecord,
   cronRunStatus,
+  decidePollAction,
   dueAt,
   finishCronRun,
   isDue,
   JOBS,
+  MAX_ATTEMPTS,
+  STALE_RUNNING_MS,
 } from '../cron';
 
 const THEMES_JOB = JOBS.find((j) => j.job === 'themes')!;
@@ -49,8 +52,14 @@ describe('claimCronRun', () => {
 
     expect(sql).toContain("ON CONFLICT (job, week_of) DO UPDATE");
     expect(sql).toContain("status = 'failed'");
-    expect(sql).toContain("status = 'running' AND cron_runs.ran_at < now() - interval '2 hours'");
-    expect(params).toEqual(['digest', '2026-03-09']);
+    // The stale-running threshold is passed as a parameter (STALE_RUNNING_MS)
+    // rather than baked into the SQL as a literal interval, so the scheduler's
+    // decidePollAction and the claim's own reclaim window can never drift out
+    // of sync with each other.
+    expect(sql).toContain(
+      "status = 'running' AND cron_runs.ran_at < now() - ($3 || ' milliseconds')::interval",
+    );
+    expect(params).toEqual(['digest', '2026-03-09', STALE_RUNNING_MS]);
   });
 });
 
@@ -269,5 +278,91 @@ describe('dueAt / isDue — week boundary', () => {
     // wait another 10 minutes.
     expect(JOBS.map((j) => j.job)).toEqual(['themes', 'digest']);
     expect(JOBS.map((j) => j.path)).toEqual(['/api/themes', '/api/digest']);
+  });
+});
+
+describe('decidePollAction', () => {
+  const NOW = new Date('2026-03-16T08:00:00Z');
+  const OPTS = { maxAttempts: MAX_ATTEMPTS, staleRunningMs: STALE_RUNNING_MS };
+  const HOUR_MS = 60 * 60 * 1000;
+  const MIN_MS = 60 * 1000;
+
+  it('calls a job that has never run (no record)', () => {
+    expect(decidePollAction(null, NOW, OPTS)).toBe('call');
+  });
+
+  it('skips a job whose week already succeeded, no matter how many attempts it took', () => {
+    // Succeeded is always terminal — checked before the attempts cap, so a
+    // week that needed several retries before finally succeeding is never
+    // mistaken for 'exhausted'.
+    expect(
+      decidePollAction({ status: 'succeeded', ranAt: NOW, attempts: MAX_ATTEMPTS }, NOW, OPTS),
+    ).toBe('skip');
+  });
+
+  describe('attempts cap — checked before the status branches', () => {
+    it('is exhausted at exactly maxAttempts, for a failed row', () => {
+      const record = { status: 'failed' as const, ranAt: new Date(NOW.getTime() - 100 * HOUR_MS), attempts: MAX_ATTEMPTS };
+      expect(decidePollAction(record, NOW, OPTS)).toBe('exhausted');
+    });
+
+    it('is exhausted at exactly maxAttempts, for a stale RUNNING row too', () => {
+      // This is the bug this cap-hoisting fixes: a job that crashes every time
+      // it's claimed never reaches finishCronRun, so it never becomes
+      // 'failed' — it just cycles through stale 'running' rows, attempts
+      // incrementing on each reclaim. The cap must stop this regardless of
+      // status.
+      const record = { status: 'running' as const, ranAt: new Date(NOW.getTime() - 100 * HOUR_MS), attempts: MAX_ATTEMPTS };
+      expect(decidePollAction(record, NOW, OPTS)).toBe('exhausted');
+    });
+
+    it('is NOT exhausted one attempt below the cap', () => {
+      const record = { status: 'failed' as const, ranAt: new Date(NOW.getTime() - 100 * HOUR_MS), attempts: MAX_ATTEMPTS - 1 };
+      expect(decidePollAction(record, NOW, OPTS)).toBe('call');
+    });
+  });
+
+  describe('stale-running reclaim', () => {
+    it('skips a running row younger than staleRunningMs', () => {
+      const record = { status: 'running' as const, ranAt: new Date(NOW.getTime() - (STALE_RUNNING_MS - MIN_MS)), attempts: 1 };
+      expect(decidePollAction(record, NOW, OPTS)).toBe('skip');
+    });
+
+    it('calls a running row exactly at the staleRunningMs boundary', () => {
+      const record = { status: 'running' as const, ranAt: new Date(NOW.getTime() - STALE_RUNNING_MS), attempts: 1 };
+      expect(decidePollAction(record, NOW, OPTS)).toBe('call');
+    });
+
+    it('calls a running row older than staleRunningMs', () => {
+      const record = { status: 'running' as const, ranAt: new Date(NOW.getTime() - (STALE_RUNNING_MS + MIN_MS)), attempts: 1 };
+      expect(decidePollAction(record, NOW, OPTS)).toBe('call');
+    });
+  });
+
+  describe('exponential backoff for a failed row', () => {
+    it.each([
+      { attempts: 1, backoffMs: 30 * MIN_MS },
+      { attempts: 2, backoffMs: 60 * MIN_MS },
+      { attempts: 3, backoffMs: 120 * MIN_MS },
+      { attempts: 4, backoffMs: 240 * MIN_MS },
+    ])('attempts=$attempts backs off $backoffMs ms (30min * 2^(attempts-1))', ({ attempts, backoffMs }) => {
+      const justUnder = { status: 'failed' as const, ranAt: new Date(NOW.getTime() - (backoffMs - MIN_MS)), attempts };
+      const atBoundary = { status: 'failed' as const, ranAt: new Date(NOW.getTime() - backoffMs), attempts };
+      expect(decidePollAction(justUnder, NOW, OPTS)).toBe('skip');
+      expect(decidePollAction(atBoundary, NOW, OPTS)).toBe('call');
+    });
+
+    it('never backs off longer than 8 hours, even for an attempts count whose uncapped formula would exceed it', () => {
+      // Un-hoisted attempts cap (a caller-supplied maxAttempts: 100, well
+      // above the real MAX_ATTEMPTS, so this isn't 'exhausted'): at
+      // attempts=10 the uncapped formula is 30min * 2^9 = 256h. It must still
+      // cap at 8h.
+      const relaxedOpts = { maxAttempts: 100, staleRunningMs: STALE_RUNNING_MS };
+      const EIGHT_HOURS_MS = 8 * HOUR_MS;
+      const justUnderCap = { status: 'failed' as const, ranAt: new Date(NOW.getTime() - (EIGHT_HOURS_MS - MIN_MS)), attempts: 10 };
+      const atCap = { status: 'failed' as const, ranAt: new Date(NOW.getTime() - EIGHT_HOURS_MS), attempts: 10 };
+      expect(decidePollAction(justUnderCap, NOW, relaxedOpts)).toBe('skip');
+      expect(decidePollAction(atCap, NOW, relaxedOpts)).toBe('call');
+    });
   });
 });

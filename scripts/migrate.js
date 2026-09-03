@@ -356,12 +356,24 @@ async function migrate() {
       IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conname = 'cron_runs_status_check'
+          AND conrelid = 'cron_runs'::regclass
       ) THEN
         ALTER TABLE cron_runs
           ADD CONSTRAINT cron_runs_status_check
           CHECK (status IN ('running', 'succeeded', 'failed'));
       END IF;
     END $$;
+  `);
+
+  // The ADD COLUMN above defaults new rows to 'succeeded' — needed so the
+  // backfill of pre-existing rows (written by the old claim-only code) reads
+  // as done rather than retryable. That default is wrong for any row inserted
+  // from here on: claimCronRun's INSERT always states status='running'
+  // explicitly, but a bare default of 'succeeded' is a trap for any other
+  // future INSERT into this table that forgets to. Idempotent — safe to run
+  // on every deploy.
+  await pool.query(`
+    ALTER TABLE cron_runs ALTER COLUMN status SET DEFAULT 'running';
   `);
 
   // Per-org, per-week send record so a re-run of a partially-failed digest

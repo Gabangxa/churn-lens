@@ -130,10 +130,26 @@ firing a one-shot timer at the exact due instant, so a redeploy or crash spannin
 Monday morning still catches up on the next poll instead of silently skipping the
 week. `cron_runs` (see `src/lib/cron.ts`) tracks each week's status: a week that
 crashed mid-run (`running` with no update in 2+ hours) or that finished `failed` is
-retried automatically, up to 5 attempts, after which the scheduler logs once and
-waits for a manual retry. `digest` additionally checks that `themes` has `succeeded`
-for the week before it claims a run, and `digest_sends` (org, week) rows stop a retry
-from re-emailing a founder who already got that week's mail.
+retried with exponential backoff (30min, 1h, 2h, 4h, capped at 8h), up to 5 attempts,
+after which the scheduler logs once and waits for a manual retry. `digest` proceeds
+once `themes` has reached a terminal state for the week — `succeeded`, or `failed`
+with its retries exhausted, so one poison org in themes can't silence every founder's
+digest — and `digest_sends` (org, week) rows stop a retry from re-emailing a founder
+who already got that week's mail.
+
+To manually retry a week that's given up (attempts exhausted, or you just don't want
+to wait for the next backoff window), reset it from a `psql` session against the
+Railway Postgres:
+
+```sql
+UPDATE cron_runs SET status = 'failed', attempts = 0 WHERE job = $1 AND week_of = $2;
+-- e.g. UPDATE cron_runs SET status = 'failed', attempts = 0 WHERE job = 'themes' AND week_of = '2026-03-09';
+```
+
+This resets `attempts` so decidePollAction (src/lib/cron.ts) no longer reports the
+week 'exhausted'; `ran_at` is left as-is, and by the time anyone runs this it's
+almost always well past even the 8h-capped backoff window, so the next poll (within
+10 minutes) reclaims and retries the week right away.
 
 1. **New Project → Deploy from GitHub repo** → select this repo.
 2. **Add → Database → PostgreSQL.**

@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { query } from '@/lib/db';
+import { query, withTransaction } from '@/lib/db';
 import { MAX_RESPONSES_PER_BATCH, clusterResponses } from '@/lib/openai';
 import { verifyCronSecret } from '@/lib/auth';
 import { reportingWeek } from '@/lib/week';
@@ -27,11 +27,10 @@ export async function POST(req: Request) {
   let processed = 0;
   let failed = 0;
 
-  // Everything from here on has claimed the run and MUST finish it — an
-  // unexpected throw that skipped finishCronRun would leave the row stuck at
-  // status='running' forever (the same failure mode this replaces, just one
-  // level up), so any exception that escapes the per-org loop is caught here,
-  // recorded as a failed run, and re-surfaced as a 500 rather than swallowed.
+  // Only the org-processing work lives in this try: an unexpected throw here
+  // means the claimed run never got a chance to record its real outcome, so
+  // it's caught and reported as failed. The success-path finishCronRun call
+  // below is deliberately OUTSIDE this try/catch — see the comment there.
   try {
     const orgs = await query<{ id: string }>(
       "SELECT id FROM organizations WHERE plan IN ('starter', 'growth')",
@@ -93,20 +92,11 @@ export async function POST(req: Request) {
 
         const totalMrr = mrrRows.reduce((sum, r) => sum + (r.mrr_lost ?? 0), 0);
 
-        for (const theme of themes) {
-          const mrrImpact = Math.round((theme.count / input.length) * totalMrr);
-          await query(
-            `INSERT INTO themes (org_id, week_of, label, response_count, representative_quotes, mrr_impact)
-             VALUES ($1, $2, $3, $4, $5, $6)
-             ON CONFLICT (org_id, week_of, label)
-             DO UPDATE SET response_count = $4, representative_quotes = $5, mrr_impact = $6`,
-            [org.id, weekOfStr, theme.label, theme.count, theme.quotes, mrrImpact],
-          );
-        }
-
         // Back-tag responses by matching quotes to row IDs — never update by open_text
         // directly as it risks matching the wrong row if two responses are identical.
         // Match on a normalized form since GPT frequently trims/pads verbatim quotes.
+        // This read doesn't need to be atomic with the writes below, only the writes
+        // need to land together, so it stays outside the transaction.
         const responseRows = await query<{ id: string; open_text: string | null }>(
           `SELECT id, open_text FROM survey_responses
            WHERE org_id = $1 AND surveyed_at >= $2 AND surveyed_at < $3 AND NOT is_test AND open_text IS NOT NULL`,
@@ -115,20 +105,38 @@ export async function POST(req: Request) {
 
         const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
 
-        for (const theme of themes) {
-          for (const quote of theme.quotes) {
-            const q = norm(quote);
-            const match = responseRows.find(
-              (r) => r.open_text && norm(r.open_text) === q,
+        // The theme inserts and their back-tag updates land together or not at
+        // all. Before this, each statement committed independently through the
+        // pool — a crash after theme 2 of 5 left the org half-written, and the
+        // skip-on-retry check above (`existing.length > 0`) then treated that
+        // half-written org as permanently done, since some theme row existed.
+        await withTransaction(async (client) => {
+          for (const theme of themes) {
+            const mrrImpact = Math.round((theme.count / input.length) * totalMrr);
+            await client.query(
+              `INSERT INTO themes (org_id, week_of, label, response_count, representative_quotes, mrr_impact)
+               VALUES ($1, $2, $3, $4, $5, $6)
+               ON CONFLICT (org_id, week_of, label)
+               DO UPDATE SET response_count = $4, representative_quotes = $5, mrr_impact = $6`,
+              [org.id, weekOfStr, theme.label, theme.count, theme.quotes, mrrImpact],
             );
-            if (match) {
-              await query(
-                `UPDATE survey_responses SET theme_tags = $1 WHERE id = $2`,
-                [[theme.label], match.id],
+          }
+
+          for (const theme of themes) {
+            for (const quote of theme.quotes) {
+              const q = norm(quote);
+              const match = responseRows.find(
+                (r) => r.open_text && norm(r.open_text) === q,
               );
+              if (match) {
+                await client.query(
+                  `UPDATE survey_responses SET theme_tags = $1 WHERE id = $2`,
+                  [[theme.label], match.id],
+                );
+              }
             }
           }
-        }
+        });
 
         processed++;
       } catch (err) {
@@ -138,14 +146,6 @@ export async function POST(req: Request) {
         failed++;
       }
     }
-
-    await finishCronRun('themes', weekOfStr, {
-      status: failed > 0 ? 'failed' : 'succeeded',
-      processed,
-      failed,
-    });
-
-    return NextResponse.json({ processed, failed, weekOf: weekOfStr });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`Themes: run failed for week ${weekOfStr}:`, err);
@@ -157,6 +157,21 @@ export async function POST(req: Request) {
     });
     return NextResponse.json({ error: message, weekOf: weekOfStr }, { status: 500 });
   }
+
+  // Deliberately outside the try/catch above: if this UPDATE itself throws (a
+  // transient DB blip right after the real work already finished), we don't
+  // want to catch it here and re-report the run as freshly 'failed' — the
+  // clustering already ran to completion. Let it surface as a raw 500;
+  // cron_runs stays 'running' and the next poll's stale-running reclaim (or a
+  // manual retry) picks it back up, without burning an attempt on what was
+  // only a bookkeeping failure.
+  await finishCronRun('themes', weekOfStr, {
+    status: failed > 0 ? 'failed' : 'succeeded',
+    processed,
+    failed,
+  });
+
+  return NextResponse.json({ processed, failed, weekOf: weekOfStr });
 }
 
 // Kept for manual triggering and any external scheduler that issues GET; the

@@ -3,11 +3,25 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // ─── Mocks ────────────────────────────────────────────────────────────────
 // No Postgres, no OpenAI in this environment: every boundary the route
 // touches is stubbed. `query` is multiplexed on the SQL text since the route
-// issues several different statements through the same helper.
-
+// issues several different statements through the same helper. The route's
+// theme-writing transaction is faked as "always commits, runs against the
+// same queryMock" — that's enough to exercise the business logic (what gets
+// written, what a per-org throw does to the counts); the transaction
+// mechanics themselves (BEGIN/COMMIT/ROLLBACK) belong to withTransaction's
+// own coverage, not this route's.
 const queryMock = vi.fn();
+const withTransactionMock = vi.fn(async (fn: (client: { query: typeof queryMock }) => Promise<unknown>) =>
+  fn({ query: queryMock }),
+);
 vi.mock('@/lib/db', () => ({
   query: (...args: unknown[]) => queryMock(...args),
+  // A direct `withTransaction: withTransactionMock` reference here would
+  // dereference the const at mock-factory-evaluation time — which vitest
+  // hoists above this file's own top-level declarations — and throw a
+  // temporal-dead-zone ReferenceError. Wrapping in a function defers that
+  // lookup until the route actually calls withTransaction(), by which point
+  // the const is long since initialized.
+  withTransaction: (fn: (client: { query: typeof queryMock }) => Promise<unknown>) => withTransactionMock(fn),
 }));
 
 const clusterResponsesMock = vi.fn();
