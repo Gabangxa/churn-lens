@@ -210,3 +210,294 @@ describe('POST /api/digest', () => {
     });
   });
 });
+
+const ORG_2 = { id: 'org-2', name: 'Globex' };
+const FOUNDER_2 = { email: 'founder@globex.com', name: 'Sam Second' };
+const THEME_ROW_2 = {
+  org_id: ORG_2.id,
+  label: 'Missing integrations',
+  response_count: 4,
+  representative_quotes: ['no zapier'],
+  mrr_impact: 90,
+};
+
+/** Two orgs, each with one theme and one owner, both un-sent for the week. */
+function twoOrgFixture() {
+  themesRows = [THEME_ROW, THEME_ROW_2];
+  queryMock.mockImplementation(async (sql: string) => {
+    if (sql.includes('FROM themes WHERE week_of')) return themesRows;
+    if (sql.includes('FROM organizations WHERE id = ANY')) return [ORG, ORG_2];
+    if (sql.includes('SELECT mrr_lost')) return [{ mrr_lost: 100 }];
+    return [];
+  });
+  queryOneMock.mockImplementation(async (sql: string, params: unknown[] = []) => {
+    const [orgId] = params as [string, string];
+    if (sql.includes('FROM digest_sends')) {
+      return alreadySentOrgIds.has(orgId) ? { org_id: orgId } : null;
+    }
+    if (sql.includes('FROM users')) return orgId === ORG.id ? FOUNDER : FOUNDER_2;
+    return null;
+  });
+}
+
+function sentTo(): string[] {
+  return resendSendMock.mock.calls.map(([arg]) => (arg as { to: string }).to);
+}
+
+describe('POST /api/digest — deferral gate', () => {
+  it('defers when themes failed for this week', async () => {
+    cronRunStatusMock.mockResolvedValue('failed');
+
+    const res = await POST(digestRequest());
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ deferred: 'themes_not_ready', weekOf: WEEK_OF });
+    expect(claimCronRunMock).not.toHaveBeenCalled();
+    // Deferring must not touch the digest run row at all — writing a status
+    // here would make the week look attempted and burn a retry.
+    expect(finishCronRunMock).not.toHaveBeenCalled();
+    expect(resendSendMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['running', 'failed', null] as const)(
+    'sends nothing and claims nothing when themes status is %s',
+    async (status) => {
+      cronRunStatusMock.mockResolvedValue(status);
+
+      const res = await POST(digestRequest());
+
+      expect((await res.json()).deferred).toBe('themes_not_ready');
+      expect(claimCronRunMock).not.toHaveBeenCalled();
+      expect(resendSendMock).not.toHaveBeenCalled();
+      expect(finishCronRunMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it('checks the themes status before claiming the digest run', async () => {
+    await POST(digestRequest());
+    expect(cronRunStatusMock).toHaveBeenCalledWith('themes', WEEK_OF);
+    expect(cronRunStatusMock.mock.invocationCallOrder[0]).toBeLessThan(
+      claimCronRunMock.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('emails nobody when the claim is lost', async () => {
+    claimCronRunMock.mockResolvedValue(false);
+    await POST(digestRequest());
+    expect(resendSendMock).not.toHaveBeenCalled();
+    expect(queryMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/digest — per-org isolation', () => {
+  it('one org’s DB error does not stop the next org from being emailed', async () => {
+    twoOrgFixture();
+    const base = queryOneMock.getMockImplementation()!;
+    queryOneMock.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      if (sql.includes('FROM users') && (params as string[])[0] === ORG.id) {
+        throw new Error('connection terminated');
+      }
+      return base(sql, params);
+    });
+
+    const res = await POST(digestRequest());
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ sent: 1, failed: 1, weekOf: WEEK_OF });
+    expect(sentTo()).toEqual([FOUNDER_2.email]);
+    expect(finishCronRunMock).toHaveBeenCalledWith('digest', WEEK_OF, {
+      status: 'failed',
+      processed: 1,
+      failed: 1,
+    });
+  });
+
+  it('a Resend failure for one org does not stop the next org from being emailed', async () => {
+    twoOrgFixture();
+    resendSendMock.mockResolvedValueOnce({
+      data: null,
+      error: { name: 'rate_limit_exceeded', message: 'slow down' },
+    });
+
+    const body = await (await POST(digestRequest())).json();
+
+    expect(body).toEqual({ sent: 1, failed: 1, weekOf: WEEK_OF });
+    expect(sentTo()).toEqual([FOUNDER.email, FOUNDER_2.email]);
+    // Only the org that actually received mail gets a send row, so the retry
+    // re-sends the failed one and skips the delivered one.
+    const sendRowOrgIds = executeMock.mock.calls
+      .filter(([sql]) => (sql as string).includes('INSERT INTO digest_sends'))
+      .map(([, params]) => (params as string[])[0]);
+    expect(sendRowOrgIds).toEqual([ORG_2.id]);
+  });
+
+  it('a Resend error records no send row at all', async () => {
+    resendSendMock.mockResolvedValue({
+      data: null,
+      error: { name: 'validation_error', message: 'bad address' },
+    });
+
+    await POST(digestRequest());
+
+    expect(executeMock).not.toHaveBeenCalled();
+  });
+
+  it('an org already in digest_sends is skipped while the other org is still emailed', async () => {
+    twoOrgFixture();
+    alreadySentOrgIds.add(ORG.id);
+
+    const body = await (await POST(digestRequest())).json();
+
+    expect(body).toEqual({ sent: 1, failed: 0, weekOf: WEEK_OF });
+    expect(sentTo()).toEqual([FOUNDER_2.email]);
+    expect(finishCronRunMock).toHaveBeenCalledWith('digest', WEEK_OF, {
+      status: 'succeeded',
+      processed: 1,
+      failed: 0,
+    });
+  });
+
+  it('the digest_sends lookup is scoped to (org, week)', async () => {
+    await POST(digestRequest());
+    const call = queryOneMock.mock.calls.find(([sql]) =>
+      (sql as string).includes('FROM digest_sends'),
+    );
+    expect(call?.[1]).toEqual([ORG.id, WEEK_OF]);
+  });
+
+  it('an org with no owner user is skipped without being counted as failed', async () => {
+    queryOneMock.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM digest_sends')) return null;
+      if (sql.includes('FROM users')) return null;
+      return null;
+    });
+
+    const body = await (await POST(digestRequest())).json();
+
+    expect(body).toEqual({ sent: 0, failed: 0, weekOf: WEEK_OF });
+    expect(resendSendMock).not.toHaveBeenCalled();
+    expect(finishCronRunMock).toHaveBeenCalledWith('digest', WEEK_OF, {
+      status: 'succeeded',
+      processed: 0,
+      failed: 0,
+    });
+  });
+});
+
+describe('POST /api/digest — run-level failures', () => {
+  it('finishes the run as failed AND returns 500 when the themes read throws', async () => {
+    queryMock.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM themes WHERE week_of')) throw new Error('connection terminated');
+      return [];
+    });
+
+    const res = await POST(digestRequest());
+    const body = await res.json();
+
+    expect(res.status).toBe(500);
+    expect(body).toEqual({ error: 'connection terminated', weekOf: WEEK_OF });
+    expect(finishCronRunMock).toHaveBeenCalledWith('digest', WEEK_OF, {
+      status: 'failed',
+      processed: 0,
+      failed: 0,
+      error: 'connection terminated',
+    });
+  });
+
+  it('records a non-Error throw as a string', async () => {
+    queryMock.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM themes WHERE week_of')) throw 'pool exhausted';
+      return [];
+    });
+
+    const res = await POST(digestRequest());
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toBe('pool exhausted');
+    expect(finishCronRunMock).toHaveBeenCalledWith(
+      'digest',
+      WEEK_OF,
+      expect.objectContaining({ status: 'failed', error: 'pool exhausted' }),
+    );
+  });
+
+  it('finishes the run exactly once on the happy path', async () => {
+    await POST(digestRequest());
+    expect(finishCronRunMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('looks orgs up by exactly the org ids that have themes this week', async () => {
+    twoOrgFixture();
+    await POST(digestRequest());
+
+    const call = queryMock.mock.calls.find(([sql]) =>
+      (sql as string).includes('FROM organizations WHERE id = ANY'),
+    );
+    expect(call?.[1]).toEqual([[ORG.id, ORG_2.id]]);
+  });
+});
+
+describe('POST /api/digest — email contents', () => {
+  it('addresses the founder from the configured sender and names the top theme', async () => {
+    await POST(digestRequest());
+
+    expect(resendSendMock).toHaveBeenCalledTimes(1);
+    const payload = resendSendMock.mock.calls[0][0] as {
+      from: string;
+      to: string;
+      subject: string;
+      text: string;
+    };
+    expect(payload.from).toBe('digest@churnlens.com');
+    expect(payload.to).toBe(FOUNDER.email);
+    expect(payload.subject).toBe('ChurnLens weekly: Too expensive + 3 cancellations');
+    expect(payload.text).toContain('Hey Jane,');
+    expect(payload.text).toContain(WEEK_OF);
+    expect(payload.text).toContain('3 cancellations');
+    expect(payload.text).toContain('$100 MRR lost');
+  });
+
+  it('never leaks another org’s themes into an org’s digest', async () => {
+    twoOrgFixture();
+    await POST(digestRequest());
+
+    const [first, second] = resendSendMock.mock.calls.map(([a]) => a as { to: string; text: string });
+    expect(first.to).toBe(FOUNDER.email);
+    expect(first.text).toContain(THEME_ROW.label);
+    expect(first.text).not.toContain(THEME_ROW_2.label);
+    expect(second.to).toBe(FOUNDER_2.email);
+    expect(second.text).toContain(THEME_ROW_2.label);
+    expect(second.text).not.toContain(THEME_ROW.label);
+  });
+
+  it('lists at most the top three themes', async () => {
+    themesRows = [1, 2, 3, 4].map((n) => ({
+      org_id: ORG.id,
+      label: `Theme ${n}`,
+      response_count: 10 - n,
+      representative_quotes: [`quote ${n}`],
+      mrr_impact: n * 10,
+    }));
+
+    await POST(digestRequest());
+
+    const text = (resendSendMock.mock.calls[0][0] as { text: string }).text;
+    expect(text).toContain('#1  Theme 1');
+    expect(text).toContain('#3  Theme 3');
+    expect(text).not.toContain('Theme 4');
+  });
+
+  it('falls back to "there" when the owner has no name', async () => {
+    queryOneMock.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM digest_sends')) return null;
+      if (sql.includes('FROM users')) return { email: FOUNDER.email, name: null };
+      return null;
+    });
+
+    await POST(digestRequest());
+
+    const text = (resendSendMock.mock.calls[0][0] as { text: string }).text;
+    expect(text).toContain('Hey there,');
+  });
+});
