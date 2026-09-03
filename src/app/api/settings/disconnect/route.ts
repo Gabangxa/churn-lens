@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { query, queryOne } from '@/lib/db';
-import { decryptApiKey } from '@/lib/crypto';
+import { queryOne } from '@/lib/db';
 import { assertSameOrigin, requireOrgId } from '@/lib/auth';
 import { redirectUrl } from '@/lib/app-url';
-import Stripe from 'stripe';
+import { disconnectStripe } from '@/lib/stripe-disconnect';
 
 export async function DELETE(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
@@ -13,11 +12,8 @@ export async function DELETE(req: NextRequest) {
   if ('error' in auth) return auth.error;
   const { orgId } = auth;
 
-  const org = await queryOne<{
-    stripe_api_key_enc: string | null;
-    stripe_webhook_id: string | null;
-  }>(
-    'SELECT stripe_api_key_enc, stripe_webhook_id FROM organizations WHERE id = $1',
+  const org = await queryOne<{ id: string }>(
+    'SELECT id FROM organizations WHERE id = $1',
     [orgId],
   );
 
@@ -25,27 +21,9 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ error: 'Organization not found.' }, { status: 404 });
   }
 
-  // Delete only the webhook endpoint ChurnLens registered — never touch others.
-  if (org.stripe_api_key_enc && org.stripe_webhook_id) {
-    try {
-      const apiKey = decryptApiKey(org.stripe_api_key_enc);
-      const stripeClient = new Stripe(apiKey, { apiVersion: '2024-04-10', typescript: true });
-      await stripeClient.webhookEndpoints.del(org.stripe_webhook_id);
-    } catch (err) {
-      // Log but don't block disconnect — the org record must be cleared regardless.
-      console.error('Failed to delete Stripe webhook endpoint:', err);
-    }
-  }
-
-  await query(
-    `UPDATE organizations
-     SET stripe_api_key_enc = NULL,
-         stripe_account_id = NULL,
-         stripe_webhook_id = NULL,
-         stripe_webhook_secret_enc = NULL
-     WHERE id = $1`,
-    [orgId],
-  );
+  // Shared with the purge job's hard-delete-on-account-deletion path — see
+  // src/lib/stripe-disconnect.ts.
+  await disconnectStripe(orgId);
 
   // Disconnecting Stripe is not logging out — the session survives, unlike the
   // old behavior which cleared the cookie here. Sessions are minted only by

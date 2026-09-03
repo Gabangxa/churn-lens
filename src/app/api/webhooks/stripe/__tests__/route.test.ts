@@ -25,8 +25,17 @@ vi.mock('@/lib/crypto', () => ({
 }));
 
 const sendSurveyEmailMock = vi.fn();
+// vi.mock's factory is hoisted above this file's own top-level declarations, so
+// the class it needs to export has to come from vi.hoisted rather than an
+// ordinary top-level class declaration (which throws "before initialization").
+// It has to be a real (not mocked) class either way: the route does
+// `err instanceof LegalFooterUnfilledError`, so the export must be `instanceof`-able.
+const { MockLegalFooterUnfilledError } = vi.hoisted(() => ({
+  MockLegalFooterUnfilledError: class extends Error {},
+}));
 vi.mock('@/lib/survey-email', () => ({
   sendSurveyEmail: (...args: unknown[]) => sendSurveyEmailMock(...args),
+  LegalFooterUnfilledError: MockLegalFooterUnfilledError,
 }));
 
 vi.mock('@/lib/survey-config', () => ({
@@ -665,6 +674,52 @@ describe('pre-send guards', () => {
     const res = await callPost();
     expect(await res.json()).toEqual({ received: true, skipped: 'free_tier_limit' });
     expect(sendSurveyEmailMock).not.toHaveBeenCalled();
+  });
+
+  it('skips an org with deletion_requested_at set, before touching Stripe at all', async () => {
+    queryOneMock.mockReset();
+    queryOneMock.mockResolvedValue(orgRow({ deletion_requested_at: '2026-08-01T00:00:00Z' }));
+
+    const res = await callPost();
+
+    expect(await res.json()).toEqual({ received: true, skipped: 'deletion_pending' });
+    expect(constructEventMock).not.toHaveBeenCalled();
+    expect(customersRetrieveMock).not.toHaveBeenCalled();
+    expect(sendSurveyEmailMock).not.toHaveBeenCalled();
+    expect(executeMock).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Legal footer guard ────────────────────────────────────────────────────
+
+describe('when sendSurveyEmail refuses because the legal footer is unfilled', () => {
+  it('returns 200 skipped, not a 500, so Stripe does not retry-storm the event', async () => {
+    sendSurveyEmailMock.mockRejectedValue(new MockLegalFooterUnfilledError('unfilled'));
+
+    const res = await callPost();
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ received: true, skipped: 'legal_footer_unfilled' });
+  });
+
+  it('leaves survey_email_sent_at unstamped so the stranded-send path can retry it later', async () => {
+    sendSurveyEmailMock.mockRejectedValue(new MockLegalFooterUnfilledError('unfilled'));
+
+    await callPost();
+
+    // Only the claiming INSERT ran — no follow-up UPDATE stamped sent_at.
+    expect(executeMock).toHaveBeenCalledTimes(1);
+    const [sql] = executeMock.mock.calls[0];
+    expect(sql).toMatch(/INSERT INTO survey_responses/);
+  });
+
+  it('names src/lib/legal.ts in the log so it is discoverable', async () => {
+    sendSurveyEmailMock.mockRejectedValue(new MockLegalFooterUnfilledError('unfilled'));
+
+    await callPost();
+
+    const logged = consoleErrorSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(logged).toContain('src/lib/legal.ts');
   });
 });
 

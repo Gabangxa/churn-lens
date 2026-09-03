@@ -16,9 +16,11 @@ import {
   dueAt,
   finishCronRun,
   isDue,
+  isPurgeDue,
   JOBS,
   MAX_ATTEMPTS,
   STALE_RUNNING_MS,
+  todayDateStr,
 } from '../cron';
 
 const THEMES_JOB = JOBS.find((j) => j.job === 'themes')!;
@@ -341,5 +343,40 @@ describe('decidePollAction', () => {
       expect(decidePollAction(justUnderCap, NOW, relaxedOpts)).toBe('skip');
       expect(decidePollAction(atCap, NOW, relaxedOpts)).toBe('call');
     });
+  });
+});
+
+describe('isPurgeDue', () => {
+  it('is not due at 02:59 UTC', () => {
+    expect(isPurgeDue(new Date('2026-03-16T02:59:00Z'))).toBe(false);
+  });
+
+  it('is due at 03:00 UTC', () => {
+    expect(isPurgeDue(new Date('2026-03-16T03:00:00Z'))).toBe(true);
+  });
+
+  it('is due any time after 03:00 UTC', () => {
+    expect(isPurgeDue(new Date('2026-03-16T23:59:00Z'))).toBe(true);
+  });
+
+  it('is not due before 03:00 UTC', () => {
+    expect(isPurgeDue(new Date('2026-03-16T00:00:00Z'))).toBe(false);
+  });
+
+  // Whether a day that's already succeeded is worth calling again is
+  // decidePollAction's job, not isPurgeDue's — isPurgeDue is purely a
+  // time-of-day gate so the scheduler can skip the cronRunRecord read
+  // entirely before 03:00 UTC. See the decidePollAction suite above for the
+  // succeeded/running/failed/attempts-cap behaviour, which applies to purge
+  // exactly the same way it does to the weekly jobs.
+});
+
+describe('todayDateStr', () => {
+  it('formats as YYYY-MM-DD in UTC', () => {
+    expect(todayDateStr(new Date('2026-03-16T23:59:00Z'))).toBe('2026-03-16');
+  });
+
+  it('does not roll over to the next day for a time still within UTC today', () => {
+    expect(todayDateStr(new Date('2026-03-16T00:00:00Z'))).toBe('2026-03-16');
   });
 });

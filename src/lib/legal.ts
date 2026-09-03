@@ -6,11 +6,18 @@
  * drives a visible DRAFT banner so a document with placeholders left in it can't
  * quietly look published.
  *
- * NOTE ON RETENTION: `SURVEY_RESPONSE_RETENTION` describes a commitment that is
- * NOT yet implemented — nothing in the codebase deletes survey_responses. Do not
- * publish these documents until a purge job and an account-deletion endpoint
- * exist, or the retention and erasure sections are false on their face.
+ * NOTE ON RETENTION AND DELETION: these are no longer aspirational. The daily
+ * purge job (src/app/api/purge) enforces `surveyResponseRetentionMonths` below
+ * against survey_responses and themes, and the account-deletion endpoint
+ * (src/app/api/settings/account/delete) sets `deletion_requested_at`, which the
+ * same job hard-deletes `deletionWindowDays` after. What remains before
+ * publishing is filling in the bracketed placeholders below (entity, address,
+ * jurisdiction, information officer) and a lawyer's review — not building the
+ * mechanism these documents describe.
  */
+
+const SURVEY_RESPONSE_RETENTION_MONTHS = 24;
+const DELETION_WINDOW_DAYS = 30;
 
 export const LEGAL = {
   /** Registered legal name, e.g. "ChurnLens Ltd". Not the product name. */
@@ -31,10 +38,24 @@ export const LEGAL = {
   /** Bump when a document changes materially; shown on every page. */
   lastUpdated: '[EFFECTIVE DATE]',
 
-  /** Intended retention for churned-customer survey data. NOT YET IMPLEMENTED. */
-  surveyResponseRetention: '[RETENTION PERIOD, e.g. 24 months]',
+  /**
+   * Retention for churned-customer survey data, in months. This is the number
+   * the purge job's SQL actually uses (`now() - (N || ' months')::interval`) —
+   * change it here, not in the derived label below.
+   */
+  surveyResponseRetentionMonths: SURVEY_RESPONSE_RETENTION_MONTHS,
+  /** Human-readable form of the above, e.g. "24 months". Kept on LEGAL so existing JSX (`LEGAL.surveyResponseRetention`) is unaffected by this split. */
+  surveyResponseRetention: `${SURVEY_RESPONSE_RETENTION_MONTHS} months`,
   /** Grace period between account deletion request and irreversible purge. */
   deletionWindow: '30 days',
+  /** The above, as a number, for the purge job's SQL. */
+  deletionWindowDays: DELETION_WINDOW_DAYS,
+
+  /** POPIA s17 requires a designated Information Officer to be named. */
+  informationOfficer: '[INFORMATION OFFICER NAME]',
+  /** POPIA's supervisory authority — the equivalent of the UK ICO or an EU DPA. */
+  regulatorName: 'Information Regulator (South Africa)',
+  regulatorUrl: 'https://inforegulator.org.za',
 } as const;
 
 /**
@@ -100,4 +121,15 @@ export const DPA_SUB_PROCESSORS = SUB_PROCESSORS.filter((sp) => sp.processesCust
  */
 export function hasUnfilledPlaceholders(): boolean {
   return Object.values(LEGAL).some((v) => typeof v === 'string' && v.includes('['));
+}
+
+/**
+ * True once the specific fields CAN-SPAM requires in the survey email footer
+ * are filled in. Deliberately narrower than `hasUnfilledPlaceholders()`: a
+ * missing `jurisdiction` or `courts` value should show the /legal draft
+ * banner, but must not block a real survey email — those fields never appear
+ * in it. Only `entity` and `postalAddress` do.
+ */
+export function legalFooterReady(): boolean {
+  return !LEGAL.entity.includes('[') && !LEGAL.postalAddress.includes('[');
 }

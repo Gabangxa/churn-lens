@@ -60,6 +60,11 @@ export default function TermsPage() {
           You must be at least 18 and must not be barred from receiving our services under
           applicable law.
         </p>
+        <p>
+          You can delete your account at any time from Settings. Deletion disconnects Stripe
+          and stops surveys immediately, and is final — your data is permanently erased — 30
+          days after you request it.
+        </p>
       </Section>
 
       <Section heading="4. Your data stays yours">
@@ -138,7 +143,9 @@ export default function TermsPage() {
             <>
               You have a lawful basis to contact your former customers for this purpose, and
               have carried out any assessment your jurisdiction requires (for example a
-              legitimate interests assessment under UK or EU data protection law).
+              legitimate interests assessment under UK or EU data protection law, or the
+              equivalent justification under POPIA if you or your customers are in South
+              Africa).
             </>,
             <>
               Your own privacy notice tells your customers that their data may be shared with

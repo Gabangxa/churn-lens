@@ -24,6 +24,11 @@ export default function PrivacyPolicyPage() {
           </a>
           .
         </p>
+        <p>
+          ChurnLens is subject to South Africa&apos;s Protection of Personal Information Act
+          (POPIA). Our designated Information Officer is {LEGAL.informationOfficer}, reachable at
+          the address above.
+        </p>
       </Section>
 
       <Section heading="2. Who this policy is for">
@@ -135,6 +140,15 @@ export default function PrivacyPolicyPage() {
             </>,
           ]}
         />
+        <p>
+          Under POPIA, our justification for processing our own customers&apos; account data is
+          section 11(1)(b) (performance of our contract with them) and section 11(1)(f) (our
+          legitimate interests in operating and securing the service). For churned customers,
+          the business that connected its Stripe account to ChurnLens is the &quot;responsible
+          party&quot; under POPIA — it decides that surveys are sent and what they ask — and we
+          are its &quot;operator&quot;, processing that data only on its instructions. This
+          mirrors the controller/processor split described in section 2 above.
+        </p>
       </Section>
 
       <Section heading="6. Who we share data with">
@@ -197,27 +211,43 @@ export default function PrivacyPolicyPage() {
           Standard Contractual Clauses, as incorporated into our agreements with each
           provider.
         </p>
+        <p>
+          Where the transfer instead concerns personal data subject to POPIA, it relies on
+          section 72(1)(a): each of the sub-processors listed in section 6 is bound by a
+          written agreement obliging it to provide a level of protection to that data that is
+          at least equivalent to what POPIA itself requires.
+        </p>
       </Section>
 
       <Section heading="8. How long we keep it">
+        <p>
+          Retention here is not a policy we intend to honour — it is what a job running in our
+          infrastructure actually does, every day, without a human triggering it.
+        </p>
         <List
           items={[
             <>
-              <strong>Customer account data</strong> — for as long as the account is open,
-              then deleted within {LEGAL.deletionWindow} of account closure.
+              <strong>Customer account data</strong> — for as long as the account is open. A
+              founder can request deletion at any time from Settings; we disconnect Stripe and
+              stop surveys immediately, and a daily job permanently erases the account{' '}
+              {LEGAL.deletionWindow} later, once {LEGAL.deletionWindowDays} days have passed
+              since the request.
             </>,
             <>
-              <strong>Survey responses</strong> — retained for{' '}
-              {LEGAL.surveyResponseRetention} from collection, or until the business that
-              collected them closes their account or asks us to delete them, whichever comes
-              first.
+              <strong>Survey responses</strong> — a daily job deletes any survey response older
+              than {LEGAL.surveyResponseRetention} from collection. A response is also deleted
+              sooner if the business that collected it closes its account (see above) or asks us
+              to delete it directly.
             </>,
             <>
-              <strong>Opt-out records</strong> — kept indefinitely. We have to remember that
-              you opted out in order to keep honouring it.
+              <strong>Opt-out records</strong> — kept indefinitely, including past the deletion
+              of the account that generated them. We have to remember that you opted out in
+              order to keep honouring it, for as long as anyone might otherwise try to survey
+              you again.
             </>,
             <>
-              <strong>Sign-in tokens</strong> — deleted shortly after they expire.
+              <strong>Sign-in tokens</strong> — deleted by the same daily job shortly after they
+              expire.
             </>,
           ]}
         />
@@ -258,7 +288,9 @@ export default function PrivacyPolicyPage() {
         <p>
           Depending on where you live, you may have the right to access, correct, delete,
           port, or restrict processing of your personal data, and to object to processing
-          based on legitimate interests.
+          based on legitimate interests. Under POPIA section 11(3), you specifically have the
+          right to object, on reasonable grounds, to processing of your personal data, and to
+          object at any time to processing for the purpose of direct marketing.
         </p>
         <Callout>
           <p className="mb-3">
@@ -277,7 +309,17 @@ export default function PrivacyPolicyPage() {
         <p>
           If you are a ChurnLens customer, email {LEGAL.privacyEmail} and we will respond
           within one month. You also have the right to complain to your local data protection
-          authority.
+          authority, or, for matters we are responsible for under POPIA, to lodge a complaint
+          with the{' '}
+          <a
+            href={LEGAL.regulatorUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="font-bold text-pink-500 dark:text-pink-400 hover:underline"
+          >
+            {LEGAL.regulatorName}
+          </a>
+          .
         </p>
       </Section>
 

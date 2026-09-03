@@ -389,6 +389,47 @@ async function migrate() {
     );
   `);
 
+  // Account deletion (POPIA/GDPR erasure). NULL means "not requested". Set by
+  // POST /api/settings/account/delete; read and enforced by the daily purge
+  // job (src/app/api/purge), which hard-deletes the org once this is more
+  // than LEGAL.deletionWindowDays old.
+  await pool.query(`
+    ALTER TABLE organizations
+      ADD COLUMN IF NOT EXISTS deletion_requested_at timestamptz;
+  `);
+
+  // The daily purge job deletes survey_responses by created_at against a
+  // 24-month retention window — without this index that's a full-table scan
+  // every single day, and the table only grows.
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS survey_responses_created_at ON survey_responses (created_at);
+  `);
+
+  // Opt-out records must survive org deletion: the privacy policy (s8) and DPA
+  // (s9) promise the suppression list is retained even after an account is
+  // erased, so a customer who unsubscribed can never be re-surveyed. unsubscribes
+  // was created with an implicit ON DELETE CASCADE to organizations, which would
+  // silently take the suppression list down with the org the purge job deletes.
+  // The constraint name is looked up rather than assumed — Postgres's
+  // auto-generated name is deterministic today, but guessing it is exactly the
+  // kind of thing that quietly no-ops after an unrelated schema change.
+  await pool.query(`
+    DO $$
+    DECLARE
+      fk_name text;
+    BEGIN
+      SELECT conname INTO fk_name
+      FROM pg_constraint
+      WHERE conrelid = 'unsubscribes'::regclass
+        AND contype = 'f'
+        AND confrelid = 'organizations'::regclass;
+
+      IF fk_name IS NOT NULL THEN
+        EXECUTE format('ALTER TABLE unsubscribes DROP CONSTRAINT %I', fk_name);
+      END IF;
+    END $$;
+  `);
+
   console.log('Database migration complete');
   await pool.end();
 }

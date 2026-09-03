@@ -32,6 +32,16 @@ export default function DpaPage() {
             it allocates real obligations to you.
           </p>
         </Callout>
+        <p>
+          Where the personal data concerned is subject to South Africa&apos;s Protection of
+          Personal Information Act (POPIA), this Agreement is also the written contract that
+          POPIA section 21 requires between a &quot;responsible party&quot; and an
+          &quot;operator&quot; before the latter may process personal data on the former&apos;s
+          behalf. Throughout this document, &quot;Controller&quot; and &quot;responsible
+          party&quot; are used interchangeably, as are &quot;Processor&quot; and
+          &quot;operator&quot; — the same allocation of responsibility, under two different
+          statutes.
+        </p>
       </Section>
 
       <Section heading="2. Subject matter and details of processing">
@@ -174,6 +184,15 @@ export default function DpaPage() {
           then you may request a copy in a commonly used machine-readable format.
         </p>
         <p>
+          This is not aspirational: requesting account deletion from Settings triggers our
+          account-deletion endpoint, which disconnects Stripe and stops surveys immediately and
+          records the request; a daily purge job then permanently erases the account and its
+          data once {LEGAL.deletionWindow} have passed. The same purge job independently
+          enforces the survey-response retention period described in our Privacy Policy
+          (section 8), so responses are deleted on a schedule regardless of whether or when you
+          close your account.
+        </p>
+        <p>
           Opt-out records are the sole exception: we retain the minimum needed — the account
           identifier and the email address that opted out — so that the suppression continues
           to be honoured. Retaining this is itself a legal requirement and is in the data
@@ -199,6 +218,12 @@ export default function DpaPage() {
           Standard Contractual Clauses, the UK International Data Transfer Addendum, or
           another lawful transfer mechanism, as incorporated into our agreements with each
           sub-processor.
+        </p>
+        <p>
+          Where the data transferred is instead subject to POPIA, the transfer relies on
+          section 72(1)(a): each sub-processor listed in section 6 is bound by a written
+          agreement requiring it to provide a level of protection materially equivalent to
+          POPIA&apos;s own requirements.
         </p>
       </Section>
 

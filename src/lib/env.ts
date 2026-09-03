@@ -4,6 +4,8 @@
  * not on the first request that happens to hit the missing var.
  */
 
+import { legalFooterReady } from './legal';
+
 const REQUIRED: Record<string, string> = {
   DATABASE_URL: 'PostgreSQL connection string',
   ENCRYPTION_KEY: '64-character hex string (32 bytes) for AES-256 and HMAC signing',
@@ -29,6 +31,17 @@ export function validateEnv(): void {
   if (!/^[0-9a-fA-F]{64}$/.test(key)) {
     throw new Error(
       'ENCRYPTION_KEY must be exactly 64 hex characters (32 bytes). Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"',
+    );
+  }
+
+  // Warned, not thrown: a production deploy with legal.ts still unfilled must
+  // still start (surveys keep working; sendSurveyEmail's own guard is what
+  // actually blocks a real send), but nobody should have to discover this by
+  // noticing the webhook silently skipping every cancellation.
+  if (process.env.NODE_ENV === 'production' && !legalFooterReady()) {
+    console.error(
+      '[env] src/lib/legal.ts still has an unfilled placeholder in LEGAL.entity or ' +
+        'LEGAL.postalAddress — production survey emails will be blocked until both are filled in.',
     );
   }
 }

@@ -5,6 +5,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Wordmark from '@/components/Wordmark';
 import ThemeToggle from '@/components/ThemeToggle';
+import { LEGAL } from '@/lib/legal';
 
 // Audit fixes: dirty-state save bar (unsaved edits are visible); test-send
 // moved below the form with "uses saved settings" note; disconnect moved to a
@@ -20,12 +21,24 @@ type ReasonRow = { id: number; value: string };
 
 type SurveyConfigField = 'displayName' | 'logoUrl' | 'customReasons';
 
+function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  });
+}
+
 export default function SettingsPage() {
   const router = useRouter();
   const [connected, setConnected] = useState<boolean | null>(null);
   const [disconnecting, setDisconnecting] = useState(false);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [deletionRequestedAt, setDeletionRequestedAt] = useState<string | null>(null);
+  const [confirmDeleteAccount, setConfirmDeleteAccount] = useState(false);
+  const [deletingAccount, setDeletingAccount] = useState(false);
+  const [deleteAccountError, setDeleteAccountError] = useState<string | null>(null);
   const [sendingTest, setSendingTest] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [billingNotice, setBillingNotice] = useState<
@@ -78,6 +91,7 @@ export default function SettingsPage() {
         }
         const data = await res.json();
         setConnected(data.connected ?? false);
+        setDeletionRequestedAt(data.deletionRequestedAt ?? null);
       } catch {
         setConnected(false);
       }
@@ -233,6 +247,27 @@ export default function SettingsPage() {
     }
   }
 
+  async function handleDeleteAccount() {
+    setDeleteAccountError(null);
+    setDeletingAccount(true);
+    try {
+      const res = await fetch('/api/settings/account/delete', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        setDeleteAccountError(data.error || 'Failed to delete account.');
+        return;
+      }
+      // Deletion is requested and the session cookie is already cleared server
+      // side — send the browser home rather than to a settings page for an
+      // account that (from this browser's perspective) is no longer signed in.
+      window.location.assign('/');
+    } catch {
+      setDeleteAccountError('Network error. Please try again.');
+    } finally {
+      setDeletingAccount(false);
+    }
+  }
+
   async function handleSendTest() {
     setTestResult(null);
     setSendingTest(true);
@@ -299,6 +334,19 @@ export default function SettingsPage() {
         <h1 className="mb-10 text-4xl font-extrabold font-display tracking-tight text-zinc-900 dark:text-white transition-colors duration-500">
           Settings
         </h1>
+
+        {deletionRequestedAt && (
+          <div className="mb-8 rounded-2xl border-2 border-rose-400/60 bg-rose-400/10 px-5 py-3 text-sm font-bold text-rose-800 dark:text-rose-300">
+            Account deletion requested on {formatDate(deletionRequestedAt)}. Data is erased on{' '}
+            {formatDate(
+              new Date(
+                new Date(deletionRequestedAt).getTime() +
+                  LEGAL.deletionWindowDays * 24 * 60 * 60 * 1000,
+              ).toISOString(),
+            )}
+            . Email {LEGAL.privacyEmail} to cancel.
+          </div>
+        )}
 
         {/* ── Survey customization ── */}
         <div className="card">
@@ -642,6 +690,64 @@ export default function SettingsPage() {
           >
             Manage billing
           </a>
+        </div>
+
+        {/* ── Account deletion (danger zone, same two-step inline confirm as Stripe Disconnect) ── */}
+        <div className="card mt-6">
+          <h2 className="mb-1 text-2xl font-bold font-display text-zinc-900 dark:text-white transition-colors duration-500">
+            Account
+          </h2>
+          <p className="mb-6 text-sm font-medium text-muted">
+            Permanently delete your ChurnLens account.
+          </p>
+
+          {deleteAccountError && (
+            <p className="mb-4 rounded-2xl border-2 border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-sm font-bold text-rose-700 dark:text-rose-400">
+              {deleteAccountError}
+            </p>
+          )}
+
+          <div className="rounded-2xl border-2 border-rose-300 dark:border-rose-500/40 bg-rose-50 dark:bg-rose-500/10 p-4">
+            {!confirmDeleteAccount ? (
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="m-0 text-sm font-medium text-rose-800 dark:text-rose-300">
+                  <strong>Danger zone.</strong> Disconnects Stripe and stops surveys immediately.
+                  All data — except opt-out records — is erased {LEGAL.deletionWindowDays} days
+                  after you request it.
+                </p>
+                <button
+                  onClick={() => setConfirmDeleteAccount(true)}
+                  disabled={!!deletionRequestedAt}
+                  className="rounded-full border-2 border-rose-500 px-5 py-2 text-xs font-extrabold uppercase tracking-widest text-rose-700 dark:text-rose-400 hover:bg-rose-500 hover:text-white dark:hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {deletionRequestedAt ? 'Deletion requested' : 'Delete account…'}
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="m-0 text-sm font-bold text-rose-800 dark:text-rose-300">
+                  This can&apos;t be undone after {LEGAL.deletionWindowDays} days. Delete your
+                  account?
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setConfirmDeleteAccount(false)}
+                    disabled={deletingAccount}
+                    className="rounded-full border-2 border-zinc-300 dark:border-zinc-600 px-4 py-2 text-xs font-extrabold uppercase tracking-widest text-zinc-600 dark:text-zinc-300 hover:border-zinc-500 transition-colors"
+                  >
+                    Keep it
+                  </button>
+                  <button
+                    onClick={handleDeleteAccount}
+                    disabled={deletingAccount}
+                    className="rounded-full bg-rose-600 px-4 py-2 text-xs font-extrabold uppercase tracking-widest text-white hover:bg-rose-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {deletingAccount ? 'Deleting…' : 'Yes, delete my account'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </main>
     </div>

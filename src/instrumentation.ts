@@ -5,9 +5,11 @@
  * internal scheduler so no external cron service or npm scheduler
  * package is required.
  *
- * Schedules (all UTC), each due for the whole week that follows it:
- *   - Monday 06:00 — /api/themes  (AI theme clustering)
- *   - Monday 07:00 — /api/digest  (weekly founder email)
+ * Schedules (all UTC):
+ *   - Monday 06:00 — /api/themes  (AI theme clustering), due for the whole
+ *     reporting week that follows it
+ *   - Monday 07:00 — /api/digest  (weekly founder email), same
+ *   - daily, after 03:00 — /api/purge (retention purge / account erasure)
  *
  * This polls every 10 minutes rather than scheduling a one-shot timer for
  * the exact instant a job is due. A one-shot timer computed at boot silently
@@ -15,8 +17,8 @@
  * timer that would have fired never gets created. Polling means any boot (or
  * any 10-minute tick) within the week can notice the job never ran and catch
  * it up. `cron_runs` (src/lib/cron.ts) is still the source of truth for
- * whether a week is done, failed, or crashed mid-run — this loop only
- * decides when it's worth asking the endpoint to check.
+ * whether a week (or day, for purge) is done, failed, or crashed mid-run —
+ * this loop only decides when it's worth asking the endpoint to check.
  *
  * NOTE (intentional, not a bug): a week that's still in progress when the
  * *next* reporting week rolls over (the following Monday) is abandoned —
@@ -31,8 +33,16 @@ export async function register() {
   validateEnv();
 
   const { reportingWeek } = await import('./lib/week');
-  const { JOBS, isDue, cronRunRecord, decidePollAction, MAX_ATTEMPTS, STALE_RUNNING_MS } =
-    await import('./lib/cron');
+  const {
+    JOBS,
+    isDue,
+    isPurgeDue,
+    todayDateStr,
+    cronRunRecord,
+    decidePollAction,
+    MAX_ATTEMPTS,
+    STALE_RUNNING_MS,
+  } = await import('./lib/cron');
 
   // validateEnv() above throws if either is unset, so by the time we get here
   // in a real boot they are guaranteed present — the `!` just tells
@@ -124,6 +134,39 @@ export async function register() {
         console.error(`[cron] evaluating ${job.job} failed:`, err);
       }
     }
+
+    // Daily purge — one more evaluation in the same per-job try/catch shape as
+    // the weekly jobs above, just keyed by calendar date instead of reporting
+    // week. isPurgeDue is checked first and is a pure time-of-day gate with no
+    // DB dependency, so a poll before 03:00 UTC never touches cron_runs for
+    // this job at all; once it's true, decidePollAction makes the actual
+    // call/skip/exhausted decision from the same attempts cap and
+    // stale-running window the weekly jobs use.
+    try {
+      if (isPurgeDue(now)) {
+        const dateStr = todayDateStr(now);
+        const record = await cronRunRecord('purge', dateStr);
+        const action = decidePollAction(record, now, {
+          maxAttempts: MAX_ATTEMPTS,
+          staleRunningMs: STALE_RUNNING_MS,
+        });
+
+        if (action === 'exhausted') {
+          const key = `purge:${dateStr}`;
+          if (!exhaustedLogged.has(key)) {
+            exhaustedLogged.add(key);
+            console.error(
+              `[cron] purge for ${dateStr} has failed ${record?.attempts ?? MAX_ATTEMPTS} ` +
+                `times — giving up until it's manually retried.`,
+            );
+          }
+        } else if (action === 'call') {
+          await callCronEndpoint('/api/purge', dateStr);
+        }
+      }
+    } catch (err) {
+      console.error('[cron] evaluating purge failed:', err);
+    }
   }
 
   // Give the app a moment to finish booting (DB pool, etc.) before the first
@@ -141,7 +184,8 @@ export async function register() {
   firstPoll.unref();
 
   console.log(
-    '[cron] Scheduler registered — polling every 10 min for themes (due Mon 06:00 UTC) ' +
-      'and digest (due Mon 07:00 UTC), with catch-up and retry via cron_runs.',
+    '[cron] Scheduler registered — polling every 10 min for themes (due Mon 06:00 UTC), ' +
+      'digest (due Mon 07:00 UTC), and purge (due daily after 03:00 UTC), with catch-up ' +
+      'and retry via cron_runs.',
   );
 }

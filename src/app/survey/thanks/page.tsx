@@ -1,3 +1,5 @@
+import Link from 'next/link';
+
 export default function SurveyThanksPage() {
   return (
     <div className="flex flex-1 flex-col items-center justify-center px-6 py-16 text-center">
@@ -25,6 +27,11 @@ export default function SurveyThanksPage() {
         </h1>
         <p className="mt-4 text-base font-medium text-muted leading-relaxed">
           Your response goes directly to the founder. It genuinely helps shape what gets built next.
+        </p>
+        <p className="mt-8 text-xs font-medium text-muted">
+          <Link href="/legal/privacy" className="hover:text-zinc-900 dark:hover:text-zinc-100 hover:underline">
+            Privacy
+          </Link>
         </p>
       </div>
     </div>

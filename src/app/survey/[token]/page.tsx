@@ -15,6 +15,7 @@
  * sufficient color contrast, focus indicators, no color-only cues.
  */
 
+import Link from 'next/link';
 import { verifySurveyToken } from '@/lib/crypto';
 import { BUILTIN_CANCELLATION_REASONS, loadSurveyConfig } from '@/lib/survey-config';
 
@@ -164,6 +165,12 @@ export default async function SurveyPage({ params }: { params: { token: string }
             </p>
           </form>
         </div>
+
+        <p className="mt-8 text-center text-xs font-medium text-muted">
+          <Link href="/legal/privacy" className="hover:text-zinc-900 dark:hover:text-zinc-100 hover:underline">
+            Privacy
+          </Link>
+        </p>
       </div>
     </div>
   );

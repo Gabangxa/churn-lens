@@ -34,6 +34,7 @@ function requestBody() {
     temperature: number;
     response_format: { type: string };
     messages: { role: string; content: string }[];
+    store: boolean;
   };
 }
 
@@ -133,6 +134,15 @@ describe('clusterResponses — untrusted text is isolated from the instructions'
     expect(body.model).toBe('gpt-4o-mini');
     expect(body.temperature).toBe(0.2);
     expect(body.response_format).toEqual({ type: 'json_object' });
+  });
+
+  it('opts the request out of OpenAI\'s default 30-day retention', async () => {
+    // This is a churned customer's free-text answer, processed on someone
+    // else's instructions — it should not sit in a sub-processor's retention
+    // any longer than necessary just because we forgot to say so.
+    await clusterResponses([{ text: 'too pricey', reason: 'Other' }]);
+
+    expect(requestBody().store).toBe(false);
   });
 
   it('throws before calling OpenAI when the API key is missing', async () => {

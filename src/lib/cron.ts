@@ -175,3 +175,31 @@ export function decidePollAction(
   const backoffMs = Math.min(THIRTY_MIN_MS * 2 ** (record.attempts - 1), EIGHT_HOURS_MS);
   return elapsedMs >= backoffMs ? 'call' : 'skip';
 }
+
+/**
+ * Hour (UTC) after which the daily purge job (src/app/api/purge) may run for
+ * "today". Distinct from JOBS/dueAt above: those are weekly, keyed by the
+ * reporting week's Monday; purge is daily, keyed by the calendar date it runs
+ * on (`cron_runs.week_of` holds a plain date for this job, not a Monday —
+ * see the route for why that's still the right column to reuse).
+ */
+export const PURGE_HOUR_UTC = 3;
+
+/**
+ * Whether it's even worth asking cron_runs about the purge job yet: purely a
+ * time-of-day gate, with no DB dependency, so the scheduler can skip the
+ * cronRunRecord read entirely before 03:00 UTC instead of querying every 10
+ * minutes for a job that can't be due yet. Once this is true, the *actual*
+ * call/skip/exhausted decision — attempts cap, stale-running, succeeded — is
+ * decidePollAction's job, same as the weekly jobs; this function doesn't
+ * duplicate any of that.
+ */
+export function isPurgeDue(now: Date): boolean {
+  return now.getUTCHours() >= PURGE_HOUR_UTC;
+}
+
+/** Today's date (UTC) as YYYY-MM-DD — the `week_of` key the purge job claims under. */
+export function todayDateStr(now: Date = new Date()): string {
+  return now.toISOString().slice(0, 10);
+}
+

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import Stripe from 'stripe';
 import { queryOne, queryCount, execute } from '@/lib/db';
 import { decryptApiKey, signSurveyToken } from '@/lib/crypto';
-import { sendSurveyEmail } from '@/lib/survey-email';
+import { sendSurveyEmail, LegalFooterUnfilledError } from '@/lib/survey-email';
 import { loadSurveyConfig } from '@/lib/survey-config';
 
 // Stripe Customer Portal cancellation reasons → our survey categories.
@@ -118,14 +118,23 @@ export async function POST(
     plan: string;
     stripe_api_key_enc: string | null;
     stripe_webhook_secret_enc: string | null;
+    deletion_requested_at: string | null;
   }>(
-    `SELECT id, plan, stripe_api_key_enc, stripe_webhook_secret_enc
+    `SELECT id, plan, stripe_api_key_enc, stripe_webhook_secret_enc, deletion_requested_at
      FROM organizations WHERE id = $1`,
     [orgId],
   );
 
   if (!org || !org.stripe_webhook_secret_enc) {
     return NextResponse.json({ error: 'Unknown organization' }, { status: 404 });
+  }
+
+  // Deletion requested: stop collecting new PII for an account on its way out.
+  // Checked before the customer is even retrieved from Stripe — the whole
+  // point is that no further personal data is fetched or stored once erasure
+  // has been requested, not just that no email goes out.
+  if (org.deletion_requested_at) {
+    return NextResponse.json({ received: true, skipped: 'deletion_pending' });
   }
 
   const webhookSecret = decryptApiKey(org.stripe_webhook_secret_enc);
@@ -374,6 +383,21 @@ export async function POST(
       displayName: config.displayName,
     });
   } catch (err) {
+    if (err instanceof LegalFooterUnfilledError) {
+      // Not a delivery failure — a deploy that shouldn't be sending real
+      // survey emails yet. Named loudly at the one file a human has to edit,
+      // and 200 so Stripe does not retry-storm this event every few minutes
+      // until someone notices. The row's survey_email_sent_at stays NULL
+      // (nothing above stamped it), so the existing stranded-send path picks
+      // it up and sends it for real once src/lib/legal.ts is filled in.
+      console.error(
+        `Survey email blocked for org ${org.id}, subscription ${subscription.id}: ` +
+          'src/lib/legal.ts still has unfilled placeholders required for the CAN-SPAM footer ' +
+          '(LEGAL.entity / LEGAL.postalAddress). Fill them in before this deploys real traffic.',
+      );
+      return NextResponse.json({ received: true, skipped: 'legal_footer_unfilled' });
+    }
+
     // The attempt was already counted by the claim, so there is no bookkeeping
     // to do here — which is the point: a send that dies without returning at all
     // (provider stall, platform timeout) has consumed its attempt just the same.

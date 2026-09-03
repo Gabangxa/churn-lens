@@ -8,8 +8,12 @@ export async function GET(req: NextRequest) {
   const { orgId } = auth;
 
   try {
-    const org = await queryOne<{ stripe_api_key_enc: string | null; stripe_account_id: string | null }>(
-      'SELECT stripe_api_key_enc, stripe_account_id FROM organizations WHERE id = $1',
+    const org = await queryOne<{
+      stripe_api_key_enc: string | null;
+      stripe_account_id: string | null;
+      deletion_requested_at: string | null;
+    }>(
+      'SELECT stripe_api_key_enc, stripe_account_id, deletion_requested_at FROM organizations WHERE id = $1',
       [orgId],
     );
 
@@ -18,7 +22,7 @@ export async function GET(req: NextRequest) {
     }
 
     const connected = !!(org.stripe_api_key_enc || org.stripe_account_id);
-    return NextResponse.json({ connected });
+    return NextResponse.json({ connected, deletionRequestedAt: org.deletion_requested_at });
   } catch {
     return NextResponse.json({ connected: false });
   }
