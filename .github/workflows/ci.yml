@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+    branches: [test, main]
+  pull_request:
+
+# Nothing here writes to the repo or publishes anything.
+permissions:
+  contents: read
+
+# A newer push to the same branch makes the in-flight run irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Fake, fixed, and identical to e2e/env.ts. Every one of these is required by
+  # src/lib/env.ts at boot; none of them reaches a real service.
+  ENCRYPTION_KEY: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+  RESEND_API_KEY: 're_e2e_fake_key_sends_always_fail'
+  CRON_SECRET: 'e2e-cron-secret-not-a-real-one'
+  OPENAI_API_KEY: 'sk-e2e-fake-key'
+  # 5100, not 5000: `next dev` owns 5000 and the suite must never adopt one.
+  # Inlined into the build AND checked by assertSameOrigin at runtime, so the
+  # build and the server have to agree on it.
+  NEXT_PUBLIC_APP_URL: 'http://localhost:5100'
+  TEST_DATABASE_URL: 'postgresql://postgres:pw@127.0.0.1:55432/churnlens_test'
+
+jobs:
+  checks:
+    name: types, lint, unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # A service container, not Docker-in-Docker: the runner already has a
+    # Docker daemon, and `services:` gets health-gating for free. scripts/
+    # e2e-db.sh is the local equivalent and is not used here.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pw
+          POSTGRES_DB: churnlens_test
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npx next lint
+
+      # TEST_DATABASE_URL is set, so the DB-gated purge suite
+      # (src/app/api/purge/__tests__/route.db.test.ts) RUNS here rather than
+      # skipping — the retention and erasure SQL is exactly the code that must
+      # not be verified only against mocks.
+      - name: Migrate the test database
+        run: node scripts/migrate.js
+        env:
+          # scripts/migrate.js reads DATABASE_URL and nothing else.
+          DATABASE_URL: ${{ env.TEST_DATABASE_URL }}
+
+      - name: Unit tests
+        run: npx vitest run
+
+  e2e:
+    name: end-to-end
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pw
+          POSTGRES_DB: churnlens_test
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      # NEXT_PUBLIC_APP_URL (workflow env, above) is inlined at build time, and
+      # assertSameOrigin allow-lists exactly that origin in production — build
+      # it wrong and every same-origin POST in the suite 403s.
+      - name: Build
+        run: npm run build
+
+      # playwright.config.ts starts `next start` itself (webServer) and waits on
+      # /api/health, THEN runs e2e/global-setup.ts, which migrates and truncates
+      # the database. That ordering is fine because the health route does no DB
+      # work, so the server survives having the schema recreated under it.
+      - name: Run Playwright
+        run: npx playwright test
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7

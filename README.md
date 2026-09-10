@@ -119,6 +119,88 @@ collected at onboarding and stored encrypted, so there is nothing to set here.
 
 ---
 
+## End-to-end tests
+
+Unit tests (`npm test`, vitest) cover route handlers against mocks. The Playwright
+suite in `e2e/` covers the flows those mocks cannot: a real Chromium against a real
+production build against a real PostgreSQL.
+
+### Prerequisites
+
+Docker, for the throwaway database:
+
+```bash
+npm run e2e:db up      # postgres:16-alpine on 127.0.0.1:55432, db churnlens_test
+```
+
+Then build the app the way the suite runs it — `NEXT_PUBLIC_APP_URL` is inlined at
+build time and, in production, is the entire origin allow-list `assertSameOrigin`
+checks against:
+
+```bash
+NEXT_PUBLIC_APP_URL=http://localhost:5100 npx next build
+npm run e2e            # or: npm run e2e:ui
+npm run e2e:db down    # when you're done
+```
+
+The suite runs on port **5100**, not the 5000 `npm run dev` uses: `reuseExistingServer`
+would otherwise adopt a running dev server and point a suite that truncates everything
+it touches at your real `.env` database.
+
+Playwright starts `npx next start -p 5100` itself and waits on `/api/health` **first**,
+and only then runs `e2e/global-setup.ts` — which refuses to continue unless
+`TEST_DATABASE_URL` is a local database whose name contains "test"
+(`assertThrowawayDatabase`), fails fast with instructions if it is unreachable, runs
+`scripts/migrate.js` against it, and truncates every application table. Recreating the
+schema under a running server is safe because `/api/health` does no DB work. Each run
+therefore starts clean, and a second run cannot inherit the first one's rows.
+**`TEST_DATABASE_URL` is truncated on every run. Never point it at a database you
+care about.** The whole environment (fake keys included) is defined once in
+`e2e/env.ts`, which also sets `E2E_DISABLE_SCHEDULER=1` so the in-process cron
+scheduler cannot race the cron spec.
+
+### What it covers
+
+| Spec | Flow |
+|------|------|
+| `e2e/landing.spec.ts` | Marketing links: no anchor points at the session-gated `/onboarding`, pricing CTAs carry `?plan=`, header CTA goes to `/login` |
+| `e2e/auth.spec.ts` | Signup through the real form (email normalization, plan carried into `redirect_to`, no session yet), magic-link verification, replayed and expired links, signed-out redirects to `/login?next=…` |
+| `e2e/csrf.spec.ts` | `assertSameOrigin` wired in front of connect / login / checkout, and an off-site `next` dropped rather than stored |
+| `e2e/onboarding.spec.ts` | Key-only form behind a session (no email field — that was the account-takeover hole) and the `rk_` validation error |
+| `e2e/account.spec.ts` | Delete account from Settings: two-step confirm, Stripe columns cleared, session ended |
+| `e2e/cron.spec.ts` | `CRON_SECRET` gate on all three jobs; the purge job's retention, erasure, abandoned-signup and orphaned-opt-out rules against real rows; themes + digest recorded as succeeded |
+| `e2e/legal.spec.ts` | Privacy / Terms / DPA render with the draft banner, POPIA specifics, unsubscribe page's privacy link |
+
+Sign-in is seeded (a `login_tokens` row written directly, then the link is clicked)
+rather than requested through `/api/auth/request`, because that route is the one
+place a real user's inbox is involved and it is rate limited.
+
+### The rate-limit constraint
+
+`/api/auth/request` allows **5 requests per IP per 10 minutes**, and the limiter is
+in-memory: it resets only when the server process restarts, not between runs. The
+suite therefore makes exactly **two** real calls to it (the signup form in
+`auth.spec.ts`, the open-redirect check in `csrf.spec.ts`) — keep it that way when
+adding specs.
+
+Repeat runs against a reused server would still hit that ceiling on the third run, so
+every request the suite makes carries a per-run random `x-forwarded-for` (see
+`E2E_CLIENT_IP` in `e2e/env.ts`); `clientIp()` reads the last hop of that header, so
+each run gets its own bucket. Per-email buckets are handled by `uniqueEmail()`.
+
+### In CI
+
+`.github/workflows/ci.yml` runs on pushes to `test`/`main` and on pull requests:
+
+- **checks** — `npm ci`, `tsc --noEmit`, `next lint`, `vitest run` against a
+  `postgres:16` service container, so the DB-gated purge suite actually runs
+  instead of skipping.
+- **e2e** — same service, `playwright install --with-deps chromium`, `npm run build`
+  with `NEXT_PUBLIC_APP_URL=http://localhost:5100`, `playwright test`, and the HTML
+  report uploaded as an artifact on failure.
+
+---
+
 ## Deploy to Railway
 
 Config-as-code lives in `railway.json` (Railpack build, DB migration as the pre-deploy

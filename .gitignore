@@ -33,3 +33,7 @@ next-env.d.ts
 
 # MCP browser tooling output
 .playwright-mcp/
+
+# Playwright end-to-end output
+playwright-report/
+test-results/

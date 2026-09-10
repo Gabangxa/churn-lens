@@ -13,7 +13,10 @@
     "typecheck": "tsc --noEmit",
     "db:migrate": "node scripts/migrate.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "e2e": "playwright test",
+    "e2e:ui": "playwright test --ui",
+    "e2e:db": "bash scripts/e2e-db.sh"
   },
   "dependencies": {
     "@polar-sh/sdk": "^0.49.0",
@@ -29,6 +32,7 @@
     "tailwind-merge": "^2.6.1"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "@types/node": "^20.19.37",
     "@types/react": "^18.3.28",
     "@types/react-dom": "^18.3.7",

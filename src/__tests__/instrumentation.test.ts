@@ -123,6 +123,31 @@ describe('register — guards', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('validates env but schedules nothing when E2E_DISABLE_SCHEDULER=1', async () => {
+    // The end-to-end suite sets this on the server it boots: the poll loop
+    // would otherwise race its cron spec for the same cron_runs claims. A
+    // misconfigured server must still refuse to boot, so validateEnv has to
+    // have run before the early return.
+    vi.stubEnv('E2E_DISABLE_SCHEDULER', '1');
+
+    await bootAndPoll();
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 3);
+
+    expect(validateEnvMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(cronRunRecordMock).not.toHaveBeenCalled();
+  });
+
+  it('leaves the scheduler on for any other value of E2E_DISABLE_SCHEDULER', async () => {
+    // Only the exact string '1' disables it — a stray "0"/"false"/"true" in a
+    // deploy's variables must not silently stop the weekly jobs.
+    vi.stubEnv('E2E_DISABLE_SCHEDULER', 'false');
+
+    await bootAndPoll();
+
+    expect(fetchMock).toHaveBeenCalled();
+  });
+
   // There used to be a runtime "NEXT_PUBLIC_APP_URL or CRON_SECRET not set"
   // guard here with its own warning + early return. It was dead code: both
   // vars are in validateEnv's REQUIRED set (src/lib/env.ts), so a real boot

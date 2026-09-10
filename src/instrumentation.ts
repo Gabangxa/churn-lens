@@ -32,6 +32,17 @@ export async function register() {
   const { validateEnv } = await import('./lib/env');
   validateEnv();
 
+  // Escape hatch for the end-to-end suite (e2e/env.ts sets this on the server
+  // it boots). The poll loop fires themes, digest and purge ~30s after boot
+  // and every 10 minutes after, which on a reused server lands mid-run and
+  // races the cron spec for the same cron_runs claims and rows. Deliberately
+  // AFTER validateEnv: a misconfigured server must still fail to boot, flag or
+  // no flag. Never set in production — nothing would run the weekly jobs.
+  if (process.env.E2E_DISABLE_SCHEDULER === '1') {
+    console.log('[cron] scheduler disabled by E2E_DISABLE_SCHEDULER');
+    return;
+  }
+
   const { reportingWeek } = await import('./lib/week');
   const {
     JOBS,

@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import { Pool } from 'pg';
+// Shared with the Playwright suite's global setup (e2e/global-setup.ts), which
+// truncates the same database. The module is dependency-free on purpose, so
+// importing it here pulls no Playwright into vitest.
+import { assertThrowawayDatabase } from '../../../../../e2e/helpers/throwaway-db';
 
 /**
  * Purge SQL against a real PostgreSQL.
@@ -166,10 +170,54 @@ async function surviving(table: string): Promise<string[]> {
   return rows.map((r) => r.v as string);
 }
 
+/**
+ * The guard itself runs whether or not a test database is configured — it is
+ * the thing that decides whether the destructive suite below may run at all,
+ * so it must not be gated on the same variable it is validating.
+ */
+describe('assertThrowawayDatabase', () => {
+  it('accepts the documented throwaway URL', () => {
+    expect(() =>
+      assertThrowawayDatabase('postgresql://postgres:pw@127.0.0.1:55432/churnlens_test'),
+    ).not.toThrow();
+    expect(() =>
+      assertThrowawayDatabase('postgresql://postgres:pw@localhost:55432/churnlens_test'),
+    ).not.toThrow();
+  });
+
+  it('refuses a remote host even when the database is named like a test one', () => {
+    expect(() =>
+      assertThrowawayDatabase('postgresql://user:pw@db.railway.internal:5432/churnlens_test'),
+    ).toThrow(/db\.railway\.internal/);
+  });
+
+  it('refuses a local database whose name does not say test', () => {
+    expect(() =>
+      assertThrowawayDatabase('postgresql://postgres:pw@127.0.0.1:5432/churnlens'),
+    ).toThrow(/does not contain "test"/);
+  });
+
+  it('names both problems when a URL is neither local nor a test database', () => {
+    const reject = () =>
+      assertThrowawayDatabase('postgresql://user:pw@prod.example.com:5432/churnlens');
+    expect(reject).toThrow(/is not local/);
+    expect(reject).toThrow(/does not contain "test"/);
+    expect(reject).toThrow(/prod\.example\.com/);
+  });
+
+  it('rejects a value that is not a URL at all', () => {
+    expect(() => assertThrowawayDatabase('churnlens_test')).toThrow(/not a valid URL/);
+  });
+});
+
 const suite = TEST_DATABASE_URL ? describe : describe.skip;
 
 suite('POST /api/purge against a real database', () => {
   beforeAll(async () => {
+    // Before the first connection, let alone the TRUNCATE in beforeEach: this
+    // suite wipes organizations and drives a route that hard-deletes them.
+    assertThrowawayDatabase(TEST_DATABASE_URL!);
+
     dbState.pool = new Pool({ connectionString: TEST_DATABASE_URL, ssl: false });
     const { rows } = await pool().query(
       `SELECT 1 FROM information_schema.columns
