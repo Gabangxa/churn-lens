@@ -254,6 +254,32 @@ almost always well past even the 8h-capped backoff window, so the next poll (wit
 DB TLS is handled automatically: no SSL over Railway's `*.railway.internal` private network
 (override with `DATABASE_SSL=require`), verified TLS elsewhere when `DATABASE_CA_CERT` is set.
 
+### Local monitor
+
+`scripts/monitor.js` is a founder-only dashboard: app health, scheduler/cron pipeline
+state (per-job status, attempts, due/action), activity counts (orgs, logins, surveys,
+digest sends, unsubscribes), and a near-live tail of Railway's logs (fetched every 15 s; the CLI does not stream when piped).
+
+```bash
+railway run npm run monitor
+# then open http://127.0.0.1:5199
+```
+
+Requires the `railway` CLI installed, logged in, and linked to this service — `railway run`
+injects `CRON_SECRET` and `RAILWAY_PUBLIC_DOMAIN` for you. Against a local `next start`
+instead:
+
+```bash
+MONITOR_TARGET_URL=http://localhost:5100 CRON_SECRET=... npm run monitor
+```
+
+`MONITOR_PORT` moves the local page off 5199. (5100 is also the Playwright suite's server
+port — don't point the monitor there while `npm run e2e` is running.)
+
+It reads `GET /api/admin/status`, which is `CRON_SECRET`-gated like `/api/admin/plan` — so
+the monitor holds a secret that can also trigger cron routes. Founder use only; it binds to
+`127.0.0.1` and the secret never reaches the browser.
+
 ---
 
 ## Pricing

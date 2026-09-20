@@ -12,6 +12,7 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "db:migrate": "node scripts/migrate.js",
+    "monitor": "node scripts/monitor.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "e2e": "playwright test",
