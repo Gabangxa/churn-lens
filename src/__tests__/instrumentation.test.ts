@@ -20,6 +20,7 @@ vi.mock('../lib/cron', async (importOriginal) => {
 });
 
 import { register } from '../instrumentation';
+import { getSchedulerState, resetSchedulerState } from '../lib/scheduler-state';
 
 const FIRST_POLL_MS = 30 * 1000;
 const POLL_INTERVAL_MS = 10 * 60 * 1000;
@@ -69,6 +70,7 @@ function stubWeeklyRecord(record: Rec, purge?: Rec) {
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(MONDAY_0800);
+  resetSchedulerState();
 
   validateEnvMock.mockReset();
   validateEnvMock.mockImplementation(() => {});
@@ -507,5 +509,85 @@ describe('register — purge', () => {
         process.on('unhandledRejection', listener as (reason: unknown) => void);
       }
     }
+  });
+});
+
+describe('register — scheduler-state (read by /api/admin/status)', () => {
+  it('reports enabled with a clean first poll', async () => {
+    await bootAndPoll();
+
+    expect(getSchedulerState()).toMatchObject({
+      enabled: true,
+      startedAt: MONDAY_0800.toISOString(),
+      lastPollAt: new Date(MONDAY_0800.getTime() + FIRST_POLL_MS).toISOString(),
+      lastPollError: null,
+    });
+  });
+
+  it('surfaces a per-job failure as lastPollError without stopping the poll', async () => {
+    cronRunRecordMock.mockImplementation(async (job: string) => {
+      if (job === 'themes') throw new Error('connection terminated');
+      return PURGE_INERT;
+    });
+
+    await bootAndPoll();
+
+    expect(getSchedulerState().lastPollError).toContain('connection terminated');
+    expect(getSchedulerState().lastPollAt).not.toBeNull();
+  });
+
+  it('surfaces a cron route answering non-2xx, which the poll loop otherwise only logs', async () => {
+    // The failure mode that matters most: the route is unreachable or broken
+    // on every tick (a 404 after a bad deploy, say). No cron_runs row is ever
+    // written, so the pipeline table alone looks like "about to run".
+    fetchMock.mockResolvedValue({ ok: false, status: 404, json: async () => ({}), text: async () => 'nope' });
+
+    await bootAndPoll();
+
+    expect(getSchedulerState().lastPollError).toBe('/api/digest returned 404');
+  });
+
+  it('surfaces a cron route call that throws (timeout, connection refused)', async () => {
+    fetchMock.mockRejectedValue(new Error('fetch failed'));
+
+    await bootAndPoll();
+
+    expect(getSchedulerState().lastPollError).toBe('fetch failed');
+  });
+
+  it('stays disabled when E2E_DISABLE_SCHEDULER=1', async () => {
+    vi.stubEnv('E2E_DISABLE_SCHEDULER', '1');
+
+    await bootAndPoll();
+
+    expect(getSchedulerState().enabled).toBe(false);
+  });
+
+  it('stays disabled outside the nodejs runtime and when env validation fails', async () => {
+    vi.stubEnv('NEXT_RUNTIME', 'edge');
+    await bootAndPoll();
+    expect(getSchedulerState().enabled).toBe(false);
+
+    vi.stubEnv('NEXT_RUNTIME', 'nodejs');
+    validateEnvMock.mockImplementation(() => {
+      throw new Error('Missing required environment variables');
+    });
+    await expect(register()).rejects.toThrow('Missing required environment variables');
+    expect(getSchedulerState().enabled).toBe(false);
+  });
+
+  it('clears a stale error on the next clean poll', async () => {
+    cronRunRecordMock.mockImplementationOnce(async () => {
+      throw new Error('transient');
+    });
+
+    await bootAndPoll();
+    expect(getSchedulerState().lastPollError).toContain('transient');
+    const firstPollAt = getSchedulerState().lastPollAt;
+
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+
+    expect(getSchedulerState().lastPollError).toBeNull();
+    expect(getSchedulerState().lastPollAt).not.toBe(firstPollAt);
   });
 });

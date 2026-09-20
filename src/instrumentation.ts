@@ -44,6 +44,7 @@ export async function register() {
   }
 
   const { reportingWeek } = await import('./lib/week');
+  const { markSchedulerStarted, markPoll } = await import('./lib/scheduler-state');
   const {
     JOBS,
     isDue,
@@ -71,7 +72,13 @@ export async function register() {
   const exhaustedLogged = new Set<string>();
   const deferredLogged = new Set<string>();
 
-  async function callCronEndpoint(path: string, weekOfStr: string) {
+  /**
+   * POST a cron route. Returns the failure (non-2xx, timeout, network) as an
+   * Error instead of only logging it, so pollOnce can surface it through
+   * scheduler-state; a route that 404s or 500s every tick must not leave
+   * /api/admin/status reporting a clean last poll. Returns null on success.
+   */
+  async function callCronEndpoint(path: string, weekOfStr: string): Promise<Error | null> {
     try {
       const res = await fetch(`${appUrl}${path}`, {
         method: 'POST',
@@ -81,8 +88,9 @@ export async function register() {
         signal: AbortSignal.timeout(15 * 60 * 1000),
       });
       if (!res.ok) {
-        console.error(`[cron] ${path} returned ${res.status}:`, await res.text());
-        return;
+        const text = await res.text();
+        console.error(`[cron] ${path} returned ${res.status}:`, text);
+        return new Error(`${path} returned ${res.status}`);
       }
       const json: unknown = await res.json();
 
@@ -91,18 +99,24 @@ export async function register() {
       // worth a fresh log line every 10 minutes once we've said it once.
       if (json && typeof json === 'object' && (json as { deferred?: string }).deferred === 'themes_not_ready') {
         const key = `${path}:${weekOfStr}`;
-        if (deferredLogged.has(key)) return;
+        if (deferredLogged.has(key)) return null;
         deferredLogged.add(key);
       }
 
       console.log(`[cron] ${path} →`, json);
+      return null;
     } catch (err) {
       console.error(`[cron] ${path} failed:`, err);
+      return err instanceof Error ? err : new Error(String(err));
     }
   }
 
   async function pollOnce() {
     const now = new Date();
+    // The last error this poll saw, surfaced through scheduler-state for
+    // /api/admin/status. Per-job catches below already log and carry on; this
+    // only remembers that something went wrong, not which job.
+    let pollError: unknown = null;
     // Intentional: `reportingWeek(now)` always resolves to the CURRENT
     // reporting week, so a week still in progress (retrying, or genuinely
     // never claimed) is abandoned the moment the next Monday rolls over —
@@ -140,9 +154,10 @@ export async function register() {
 
         // action === 'call': never run, a stale crashed 'running' row, or a
         // 'failed' row whose backoff window has elapsed.
-        await callCronEndpoint(job.path, weekOfStr);
+        pollError = (await callCronEndpoint(job.path, weekOfStr)) ?? pollError;
       } catch (err) {
         console.error(`[cron] evaluating ${job.job} failed:`, err);
+        pollError = err;
       }
     }
 
@@ -172,12 +187,15 @@ export async function register() {
             );
           }
         } else if (action === 'call') {
-          await callCronEndpoint('/api/purge', dateStr);
+          pollError = (await callCronEndpoint('/api/purge', dateStr)) ?? pollError;
         }
       }
     } catch (err) {
       console.error('[cron] evaluating purge failed:', err);
+      pollError = err;
     }
+
+    markPoll(pollError);
   }
 
   // Give the app a moment to finish booting (DB pool, etc.) before the first
@@ -186,14 +204,21 @@ export async function register() {
   // void call is the last line of defense — pollOnce already catches per-job,
   // but nothing should ever turn a poll tick into an unhandled rejection.
   const firstPoll = setTimeout(() => {
-    void pollOnce().catch((err) => console.error('[cron] poll failed:', err));
+    void pollOnce().catch((err) => {
+      console.error('[cron] poll failed:', err);
+      markPoll(err);
+    });
     const interval = setInterval(() => {
-      void pollOnce().catch((err) => console.error('[cron] poll failed:', err));
+      void pollOnce().catch((err) => {
+        console.error('[cron] poll failed:', err);
+        markPoll(err);
+      });
     }, POLL_INTERVAL_MS);
     interval.unref();
   }, FIRST_POLL_DELAY_MS);
   firstPoll.unref();
 
+  markSchedulerStarted();
   console.log(
     '[cron] Scheduler registered — polling every 10 min for themes (due Mon 06:00 UTC), ' +
       'digest (due Mon 07:00 UTC), and purge (due daily after 03:00 UTC), with catch-up ' +
