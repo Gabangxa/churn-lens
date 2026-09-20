@@ -66,10 +66,11 @@ jobs:
       - name: Lint
         run: npx next lint
 
-      # TEST_DATABASE_URL is set, so the DB-gated purge suite
-      # (src/app/api/purge/__tests__/route.db.test.ts) RUNS here rather than
-      # skipping — the retention and erasure SQL is exactly the code that must
-      # not be verified only against mocks.
+      # TEST_DATABASE_URL is set, so the DB-gated *.db.test.ts suites (purge,
+      # admin/status) RUN here rather than skipping — retention/erasure SQL and
+      # the monitor's aggregate queries are exactly the code that must not be
+      # verified only against mocks. vitest.config.ts serialises files when
+      # this variable is set because those suites TRUNCATE the same database.
       - name: Migrate the test database
         run: node scripts/migrate.js
         env:

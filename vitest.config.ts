@@ -9,6 +9,11 @@ export default defineConfig({
     // e2e/ holds Playwright specs — same `test`/`expect` names, a completely
     // different runner. Vitest picking them up fails at import, not at assert.
     exclude: ['**/node_modules/**', '**/.claude/**', 'e2e/**'],
+    // The *.db.test.ts suites each TRUNCATE the shared TEST_DATABASE_URL
+    // between tests; run in parallel they wipe each other's fixtures mid-test.
+    // Serialise files only when that database is in play so the default
+    // (mocked) run keeps its parallelism.
+    fileParallelism: !process.env.TEST_DATABASE_URL,
   },
   resolve: {
     alias: {
