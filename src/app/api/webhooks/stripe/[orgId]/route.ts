@@ -5,6 +5,8 @@ import { decryptApiKey, signSurveyToken } from '@/lib/crypto';
 import { sendSurveyEmail, LegalFooterUnfilledError } from '@/lib/survey-email';
 import { legalFooterReady } from '@/lib/legal';
 import { loadSurveyConfig } from '@/lib/survey-config';
+import { FREE_TIER_MONTHLY_SURVEYS } from '@/lib/plan';
+import { countFreeTierSurveys } from '@/lib/survey-status';
 
 // Stripe Customer Portal cancellation reasons → our survey categories.
 // When the portal already asked, we record the answer directly and skip the
@@ -182,19 +184,11 @@ export async function POST(
   };
 
   if (org.plan === 'free') {
-    const startOfMonth = new Date();
-    startOfMonth.setDate(1);
-    startOfMonth.setHours(0, 0, 0, 0);
+    // Shared with the dashboard's status line, so the founder sees the cap
+    // exactly when this starts enforcing it.
+    const count = await countFreeTierSurveys(org.id);
 
-    // Free tier caps surveys *sent* per month, so count by created_at. Counting
-    // by surveyed_at (responses) let free orgs send unlimited surveys since most
-    // customers never respond.
-    const count = await queryCount(
-      'SELECT COUNT(*) FROM survey_responses WHERE org_id = $1 AND created_at >= $2 AND NOT is_test',
-      [org.id, startOfMonth.toISOString()],
-    );
-
-    if (count >= 10) {
+    if (count >= FREE_TIER_MONTHLY_SURVEYS) {
       return NextResponse.json({ received: true, skipped: 'free_tier_limit' });
     }
   }
