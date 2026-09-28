@@ -213,9 +213,11 @@ export default function PrivacyPolicyPage() {
         </p>
         <p>
           Where the transfer instead concerns personal data subject to POPIA, it relies on
-          section 72(1)(a): each of the sub-processors listed in section 6 is bound by a
-          written agreement obliging it to provide a level of protection to that data that is
-          at least equivalent to what POPIA itself requires.
+          section 72(1)(a): each of the providers listed in section 6 is bound by a written
+          data processing agreement which, in our assessment, provides an adequate level of
+          protection — upholding principles for reasonable processing substantially similar to
+          POPIA&apos;s conditions for lawful processing, including restrictions on onward
+          transfer.
         </p>
       </Section>
 

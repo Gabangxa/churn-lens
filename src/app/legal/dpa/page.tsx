@@ -4,7 +4,8 @@ import { LEGAL, DPA_SUB_PROCESSORS } from '@/lib/legal';
 
 export const metadata = {
   title: 'Data Processing Agreement — ChurnLens',
-  description: 'The Article 28 processor terms between ChurnLens and its customers.',
+  description:
+    'The operator terms POPIA section 21 requires, and processor terms under GDPR Article 28, between ChurnLens and its customers.',
 };
 
 export default function DpaPage() {
@@ -52,7 +53,9 @@ export default function DpaPage() {
             <><strong>Nature and purpose</strong> — collecting, storing, transmitting, analysing and reporting cancellation feedback.</>,
             <>
               <strong>Categories of data subject</strong> — your former customers whose
-              subscriptions have been cancelled, and your own personnel who use the service.
+              subscriptions have been cancelled. Your own account details (the people who sign
+              in to ChurnLens) are not covered here: we handle those as controller, under our
+              Privacy Policy.
             </>,
             <>
               <strong>Categories of personal data</strong> — name, email address, subscription
@@ -60,14 +63,17 @@ export default function DpaPage() {
               opt-out status.
             </>,
             <>
-              <strong>Special category data</strong> — none. The service is not designed for
-              it and you must not submit it.
+              <strong>Special personal information</strong> (special category data) — none
+              requested. The service is not designed for it, and you must not configure survey
+              questions or reasons that ask for it. Free-text answers are written by your
+              customers and may incidentally contain it; we process any such content only as
+              part of the service described here.
             </>,
           ]}
         />
       </Section>
 
-      <Section heading="3. Processing only on documented instructions">
+      <Section heading="3. Instructions, and your obligations as responsible party">
         <p>
           We process personal data only on your documented instructions, including for
           international transfers, unless required otherwise by law — in which case we will
@@ -79,9 +85,47 @@ export default function DpaPage() {
           We will tell you if, in our opinion, an instruction infringes applicable data
           protection law.
         </p>
+        <p>As Controller (responsible party), you are responsible for:</p>
+        <List
+          items={[
+            <>
+              Having a lawful basis to have your former customers contacted for feedback (a
+              justification under POPIA section 11, or its equivalent where you operate).
+            </>,
+            <>
+              Telling your customers, in your own privacy notice, that their details may be
+              shared with a service provider for post-cancellation feedback (POPIA section 18).
+            </>,
+            <>
+              Not instructing us to contact anyone who has objected, opted out, or asked not to
+              be contacted.
+            </>,
+            <>
+              Keeping survey content non-promotional, as the Terms of Service require.
+            </>,
+            <>
+              Responding to your customers&apos; requests to exercise their rights, and making any
+              notifications to a regulator or to affected individuals that the law requires of
+              you. We assist with both as set out in sections 7 and 8.
+            </>,
+          ]}
+        />
+        <p>
+          Section 7 of the{' '}
+          <Link href="/legal/terms" className="font-bold text-pink-500 dark:text-pink-400 hover:underline">
+            Terms of Service
+          </Link>{' '}
+          sets out these responsibilities in full.
+        </p>
       </Section>
 
       <Section heading="4. Confidentiality">
+        <p>
+          We treat personal data processed on your behalf as confidential and do not disclose
+          it, unless the law requires us to or it is necessary for the proper performance of
+          the service, including disclosure to the sub-processors listed in section 6 (POPIA
+          section 20).
+        </p>
         <p>
           We ensure that anyone authorised to process personal data is bound by an
           appropriate duty of confidentiality, and that access is limited to those who need
@@ -102,6 +146,11 @@ export default function DpaPage() {
             <>Rate limiting on authentication and other sensitive endpoints.</>,
           ]}
         />
+        <p>
+          As POPIA section 19 requires, we identify reasonably foreseeable internal and
+          external risks to the personal data we hold, maintain safeguards against them, and
+          review and update those safeguards regularly, including in response to new risks.
+        </p>
         <p>
           We may update these measures provided the level of protection is not materially
           reduced.
@@ -142,7 +191,8 @@ export default function DpaPage() {
         </div>
         <p>
           We will give at least 30 days&apos; notice before adding or replacing a
-          sub-processor. If you reasonably object on data protection grounds within that
+          sub-processor, by email to your account&apos;s owner address and by updating the
+          table above. If you reasonably object on data protection grounds within that
           period, you may terminate the affected service and receive a pro-rata refund of any
           prepaid fees.
         </p>
@@ -165,10 +215,16 @@ export default function DpaPage() {
 
       <Section heading="8. Breach notification and impact assessments">
         <p>
-          We will notify you without undue delay, and in any event within 48 hours, after
-          becoming aware of a personal data breach affecting your data, and provide the
+          We will notify you immediately, and in any event within 48 hours, where there are
+          reasonable grounds to believe that personal data processed on your behalf has been
+          accessed or acquired by an unauthorised person (POPIA section 21(2)), or on becoming
+          aware of any other personal data breach affecting your data. We will provide the
           information reasonably available to help you meet your own notification
-          obligations.
+          obligations, including under POPIA section 22.
+        </p>
+        <p>
+          Notifications go to your account&apos;s owner email address. Our Information Officer,{' '}
+          {LEGAL.informationOfficer}, is your contact for them at {LEGAL.privacyEmail}.
         </p>
         <p>
           We will provide reasonable assistance with data protection impact assessments and
@@ -181,7 +237,14 @@ export default function DpaPage() {
         <p>
           On termination of your account, we will delete all personal data processed on your
           behalf within {LEGAL.deletionWindow}, unless retention is required by law. Before
-          then you may request a copy in a commonly used machine-readable format.
+          then you may request a copy in a commonly used machine-readable format by emailing{' '}
+          {LEGAL.privacyEmail}.
+        </p>
+        <p>
+          Residual copies held by sub-processors (for example, email delivery logs, or inputs
+          retained for a limited period for abuse monitoring) and copies in infrastructure
+          backups are deleted on those providers&apos; own retention schedules. They are not used
+          for any purpose in the meantime.
         </p>
         <p>
           This is not aspirational: requesting account deletion from Settings triggers our
@@ -223,9 +286,11 @@ export default function DpaPage() {
         </p>
         <p>
           Where the data transferred is instead subject to POPIA, the transfer relies on
-          section 72(1)(a): each sub-processor listed in section 6 is bound by a written
-          agreement requiring it to provide a level of protection materially equivalent to
-          POPIA&apos;s own requirements.
+          section 72(1)(a): each sub-processor listed in section 6 is bound by a written data
+          processing agreement which, in our assessment, provides an adequate level of
+          protection — upholding principles for reasonable processing substantially similar to
+          POPIA&apos;s conditions for lawful processing, including restrictions on onward
+          transfer.
         </p>
       </Section>
 
