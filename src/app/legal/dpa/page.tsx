@@ -96,7 +96,7 @@ export default function DpaPage() {
             <>Encryption of stored credentials at rest using AES-256-GCM.</>,
             <>Encryption in transit using TLS.</>,
             <>Authentication tokens stored only as one-way hashes, single-use and short-lived.</>,
-            <>Cryptographically signed session cookies and survey links, with enforced expiry.</>,
+            <>Cryptographically signed session cookies, and signed survey links that expire after 7 days.</>,
             <>Verification of the authenticity of inbound webhook events.</>,
             <>Logical separation of each Controller&apos;s data, with access scoped by account identifier.</>,
             <>Rate limiting on authentication and other sensitive endpoints.</>,

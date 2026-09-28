@@ -160,8 +160,8 @@ export default async function SurveyPage({ params }: { params: { token: string }
             </div>
 
             <p className="text-center text-xs font-medium text-muted">
-              Your response is only shared with the product team. We
-              won&apos;t contact you.
+              Your answers are shared with {founderCopy}. Written answers may be
+              processed by an AI service on their behalf to group feedback into themes.
             </p>
           </form>
         </div>
