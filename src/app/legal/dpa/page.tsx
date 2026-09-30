@@ -256,7 +256,7 @@ export default function DpaPage() {
           close your account.
         </p>
         <p>
-          Opt-out records are the sole exception: we retain the minimum needed — the account
+          Opt-out records follow their own rule: we retain the minimum needed — the account
           identifier and the email address that opted out — for as long as your account with us
           exists, so that the suppression continues to be honoured while it can still apply.
           Once your account is closed, the corresponding opt-out records are deleted along with
