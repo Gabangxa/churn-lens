@@ -23,9 +23,24 @@ function sslConfig() {
   return { rejectUnauthorized: false };
 }
 
+// lock_timeout: this script is Railway's preDeploy command, so it runs against
+// the live database while the old build is still serving. ALTER TABLE takes an
+// ACCESS EXCLUSIVE lock before it checks IF NOT EXISTS, so every deploy queues
+// for one on organizations and friends — and while that request waits, every
+// later read and write of the table waits behind it. One stray open
+// transaction would otherwise stall all live traffic for as long as it stayed
+// open. With a timeout the statement gives up, the script exits non-zero, the
+// deploy fails, the old build keeps serving, and the queue drains; every step
+// here is idempotent, so redeploying once the lock is free just finishes the
+// job. 5s is far above any lock wait our own short request transactions cause.
+// Per connection (libpq `options`), so the dedupe transaction's dedicated
+// client gets it too. A `?options=` in DATABASE_URL would replace it —
+// node-postgres lets the URL win — so do not put one there.
+// scripts/__tests__/migrate.db.test.ts holds a lock and proves all of this.
 const pool = new Pool({
   connectionString: dbUrl || undefined,
   ssl: sslConfig(),
+  options: '-c lock_timeout=5s',
 });
 
 async function migrate() {
@@ -562,5 +577,15 @@ async function migrate() {
 
 migrate().catch((err) => {
   console.error('Migration failed:', err);
+  if (err && err.code === '55P03') {
+    // lock_not_available: the lock_timeout above fired. Said plainly because
+    // this lands in Railway's deploy log, read by whoever wonders why the
+    // deploy failed when the schema did not change.
+    console.error(
+      '[migrate] Gave up waiting for a table lock: another session held it past lock_timeout. ' +
+        'Every step is idempotent and none is half-applied; on Railway the previous build is still serving. Look for a long-open ' +
+        "transaction (pg_stat_activity, state 'idle in transaction'), end it, then redeploy.",
+    );
+  }
   process.exit(1);
 });
