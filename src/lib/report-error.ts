@@ -734,6 +734,58 @@ export function reportError(context: string, err: unknown, meta: ErrorMeta = {})
   }
 }
 
+/**
+ * SQLSTATEs Postgres raises when a value bound into a query is malformed for
+ * the type it is cast or stored as: a non-uuid where a uuid goes (22P02), a
+ * NUL or bad byte in text (22021), a NUL escape in jsonb (22P05), a string
+ * too long for varchar(n) (22001), a number out of range (22003), a garbled
+ * date (22007, 22008). Where a request supplied the value, that is the
+ * caller's bad input — 400 territory — and alerting on it lets anyone with a
+ * form or a URL page the operator at will.
+ *
+ * Deliberately not the whole data-exception class 22: division by zero,
+ * invalid regular expressions and the like come from our own SQL or stored
+ * data, never from a request's value, and keep alerting.
+ */
+const BAD_INPUT_SQLSTATES = new Set(['22P02', '22021', '22P05', '22001', '22003', '22007', '22008']);
+
+/**
+ * True for a Postgres error caused by a malformed bound value (see
+ * BAD_INPUT_SQLSTATES). Only meaningful where the value came from the
+ * request; a cron job that hits one has a bug or bad stored data and should
+ * report it. Duck-typed on `code` rather than `instanceof pg.DatabaseError`:
+ * this module is reached by the Edge compile of instrumentation.ts, where pg
+ * cannot be imported, and no non-Postgres error carries a 5-character
+ * SQLSTATE in `code` (Node uses 'ECONNREFUSED', Stripe 'resource_missing').
+ */
+export function isBadInputDbError(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === 'string' && BAD_INPUT_SQLSTATES.has(code);
+}
+
+/**
+ * Log a request rejected for bad input (isBadInputDbError) as ONE warn line —
+ * scrubbed like everything else here, since Postgres quotes the rejected
+ * value — without recording it as a failure or emailing anyone. Visible in
+ * Railway and the monitor's tail, invisible to the alert budget. Never throws.
+ */
+export function warnBadInput(context: string, err: unknown, meta: ErrorMeta = {}): void {
+  try {
+    const described = describeError(err);
+    const code = (err as { code?: unknown } | null)?.code;
+    logLine('warn', context, `rejected request input: ${scrub(described.message, MAX_MESSAGE_CHARS)}`, {
+      name: scrub(described.name, 200),
+      code: typeof code === 'string' ? code : null,
+      environment: currentEnvironment(),
+      meta: scrubMeta(meta),
+    });
+  } catch (internal) {
+    const reason = internal instanceof Error ? scrub(internal.message, 500) : 'non-Error thrown';
+    logLine('error', 'report-error', `warnBadInput failed while logging ${context}: ${reason}`);
+  }
+}
+
 /** A copy — callers must not be able to mutate the live buffer. */
 export function getErrorReportSnapshot(): ErrorReportSnapshot {
   const state = slot();
