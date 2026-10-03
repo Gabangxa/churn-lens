@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { assertSameOrigin, clearOrgCookie, requireOrgId, revokeAllSessions } from '@/lib/auth';
 import { redirectUrl } from '@/lib/app-url';
 import { reportError } from '@/lib/report-error';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 /**
  * Log out: end the org's sessions on every device, clear this browser's
@@ -20,7 +21,7 @@ import { reportError } from '@/lib/report-error';
  * this catches even though SameSite alone would not. That matters more now
  * that a forged logout would sign the founder out on every device.
  */
-export async function POST(req: NextRequest) {
+async function logout(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
 
@@ -59,3 +60,5 @@ export async function POST(req: NextRequest) {
   const response = NextResponse.redirect(redirectUrl('/', req), { status: 303 });
   return clearOrgCookie(response);
 }
+
+export const POST = withErrorReporting('auth.logout', logout);

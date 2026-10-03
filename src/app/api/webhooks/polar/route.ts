@@ -6,6 +6,7 @@ import { getPolarWebhookSecret } from '@/lib/polar';
 import { entitlementForStatus, planForProduct } from '@/lib/plan';
 import { lockOrganization, recomputeOrgPlan } from '@/lib/org-plan';
 import { reportError } from '@/lib/report-error';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 /**
  * Polar billing webhook — ChurnLens's own subscriptions.
@@ -77,10 +78,18 @@ function readSubscription(data: Record<string, unknown>): SubscriptionFacts | nu
 
 type Applied = { kind: 'applied'; plan: string } | { kind: 'stale' } | { kind: 'unknown_org' };
 
-export async function POST(req: Request) {
+async function handlePolarWebhook(req: Request) {
   // Signature verification needs the exact bytes Polar signed, so the body must
   // be read raw — parsing it first would reserialize and break the signature.
-  const rawBody = Buffer.from(await req.arrayBuffer());
+  // A sender that hangs up mid-body makes the read throw ('aborted'): nothing
+  // of ours failed and there is nothing to verify, so it is a 400 here rather
+  // than an escaped throw that withErrorReporting would alert on.
+  let rawBody: Buffer;
+  try {
+    rawBody = Buffer.from(await req.arrayBuffer());
+  } catch {
+    return NextResponse.json({ error: 'Could not read the request body' }, { status: 400 });
+  }
 
   const headers: Record<string, string> = {};
   req.headers.forEach((value, key) => {
@@ -244,3 +253,5 @@ export async function POST(req: Request) {
   );
   return NextResponse.json({ received: true, orgId, plan: result.plan });
 }
+
+export const POST = withErrorReporting('webhook.polar', handlePolarWebhook);

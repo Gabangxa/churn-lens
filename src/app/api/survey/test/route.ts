@@ -7,13 +7,14 @@ import { checkRateLimit } from '@/lib/ratelimit';
 import { sendSurveyEmail } from '@/lib/survey-email';
 import { loadSurveyPresentation } from '@/lib/survey-config';
 import { reportError } from '@/lib/report-error';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 /**
  * Send the founder a test exit survey at their own email — exercises the
  * real email → survey → dashboard loop. The response row is flagged is_test
  * so it never counts toward stats, themes, digests, or the free-tier cap.
  */
-export async function POST(req: NextRequest) {
+async function sendTestSurvey(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
 
@@ -113,3 +114,5 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json({ success: true, sentTo: owner.email });
 }
+
+export const POST = withErrorReporting('survey.test', sendTestSurvey);

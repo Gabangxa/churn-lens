@@ -3,6 +3,7 @@ import { withTransaction } from '@/lib/db';
 import { verifyCronSecret } from '@/lib/auth';
 import { PLANS, isPlan } from '@/lib/plan';
 import { lockOrganization, recomputeOrgPlan, type CompPlan, type RecomputedPlan } from '@/lib/org-plan';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 /**
  * Comp an organization onto a paid plan, or take the comp away.
@@ -29,7 +30,7 @@ import { lockOrganization, recomputeOrgPlan, type CompPlan, type RecomputedPlan 
 /** organizations.id. Anything else is an operator typo, and Postgres would throw on the cast. */
 const ORG_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export async function POST(req: Request) {
+async function setCompPlan(req: Request) {
   if (!verifyCronSecret(req.headers.get('authorization'))) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
@@ -78,3 +79,5 @@ export async function POST(req: Request) {
   console.log(`Comp for org ${orgId} set to ${compPlan ?? 'none'} via admin route; plan is now ${result.plan}`);
   return NextResponse.json({ orgId, compPlan, plan: result.plan });
 }
+
+export const POST = withErrorReporting('admin.plan', setCompPlan);

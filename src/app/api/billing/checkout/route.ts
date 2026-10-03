@@ -5,6 +5,7 @@ import { publicAppUrl } from '@/lib/app-url';
 import { getPolar } from '@/lib/polar';
 import { isPlan, type Plan } from '@/lib/plan';
 import { reportError } from '@/lib/report-error';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 /**
  * Start a Polar checkout for the signed-in org and redirect the founder to it.
@@ -20,7 +21,7 @@ function productIdForPlan(plan: Plan): string | undefined {
   return undefined;
 }
 
-export async function GET(req: NextRequest) {
+async function startCheckout(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
 
@@ -87,3 +88,5 @@ export async function GET(req: NextRequest) {
     );
   }
 }
+
+export const GET = withErrorReporting('billing.checkout', startCheckout);

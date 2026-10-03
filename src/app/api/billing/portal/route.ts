@@ -6,6 +6,7 @@ import { publicAppUrl, redirectUrl } from '@/lib/app-url';
 import { getPolar, isPolarConfigured } from '@/lib/polar';
 import { checkRateLimit } from '@/lib/ratelimit';
 import { reportError } from '@/lib/report-error';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 /**
  * Send the signed-in founder into Polar's hosted customer portal.
@@ -30,7 +31,7 @@ import { reportError } from '@/lib/report-error';
  * founder on its email one-time-code form — which is why this route needs no
  * fallback of its own.
  */
-export async function GET(req: NextRequest) {
+async function openBillingPortal(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
 
@@ -180,3 +181,5 @@ export async function GET(req: NextRequest) {
     return NextResponse.redirect(new URL('/settings?billing=error', appUrl), { status: 303 });
   }
 }
+
+export const GET = withErrorReporting('billing.portal', openBillingPortal);

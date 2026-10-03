@@ -9,6 +9,7 @@ import { cacheStripeBusinessName, fetchStripeBusinessName } from '@/lib/stripe-b
 import { FREE_TIER_MONTHLY_SURVEYS } from '@/lib/plan';
 import { countFreeTierSurveys } from '@/lib/survey-status';
 import { reportError } from '@/lib/report-error';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 // Stripe Customer Portal cancellation reasons → our survey categories.
 // When the portal already asked, we record the answer directly and skip the
@@ -170,13 +171,21 @@ function monthlyCentsForItem(item: SubscriptionItemForMrr): number {
   return (unitAmount * quantity) / (monthsPerInterval * intervalCount);
 }
 
-export async function POST(
+async function handleStripeWebhook(
   req: NextRequest,
   { params }: { params: { orgId: string } },
 ) {
   const { orgId } = params;
 
-  const rawBody = Buffer.from(await req.arrayBuffer());
+  // A sender that hangs up mid-body makes the read throw ('aborted'): nothing
+  // of ours failed and there is nothing to verify, so it is a 400 here rather
+  // than an escaped throw that withErrorReporting would alert on.
+  let rawBody: Buffer;
+  try {
+    rawBody = Buffer.from(await req.arrayBuffer());
+  } catch {
+    return NextResponse.json({ error: 'Could not read the request body' }, { status: 400 });
+  }
   const signature = req.headers.get('stripe-signature');
 
   if (!signature) {
@@ -679,3 +688,5 @@ export async function POST(
 
   return NextResponse.json({ received: true });
 }
+
+export const POST = withErrorReporting('webhook.stripe', handleStripeWebhook);

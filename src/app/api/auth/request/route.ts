@@ -7,6 +7,7 @@ import { checkRateLimit, clientIp } from '@/lib/ratelimit';
 import { assertSameOrigin } from '@/lib/auth';
 import { sanitizeNext } from '@/lib/next-paths';
 import { reportError } from '@/lib/report-error';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 const TOKEN_TTL_MS = 15 * 60 * 1000;
 
@@ -62,7 +63,7 @@ function isPlausibleEmail(email: string): boolean {
  * bucket (mass account creation); each of the first two breaches returns
  * immediately, before any account is created or looked up.
  */
-export async function POST(req: NextRequest) {
+async function requestLoginLink(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
 
@@ -212,3 +213,5 @@ happen.
 
   return NextResponse.json({ ok: true });
 }
+
+export const POST = withErrorReporting('auth.login-request', requestLoginLink);

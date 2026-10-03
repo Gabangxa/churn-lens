@@ -4,6 +4,7 @@ import { assertSameOrigin, setOrgCookie } from '@/lib/auth';
 import { redirectUrl } from '@/lib/app-url';
 import { sanitizeNext } from '@/lib/next-paths';
 import { consumeLoginToken } from '@/lib/login-token';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 /**
  * Magic-link sign-in, in two steps: the link in the email (GET) only forwards
@@ -33,7 +34,7 @@ function failedSignIn(req: NextRequest): NextResponse {
  * scanner may fetch it any number of times (Next answers HEAD with this same
  * handler) and the founder can still sign in afterwards.
  */
-export async function GET(req: NextRequest) {
+async function openMagicLink(req: NextRequest) {
   const token = req.nextUrl.searchParams.get('token');
   if (!token) return failedSignIn(req);
   return NextResponse.redirect(
@@ -53,7 +54,7 @@ export async function GET(req: NextRequest) {
  * login-CSRF attack itself, and it must be refused before the token is so
  * much as looked up (leaving the link usable by its owner).
  */
-export async function POST(req: NextRequest) {
+async function confirmSignIn(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
 
@@ -142,3 +143,6 @@ function destinationAfterSignIn(
   }
   return redirectTo ?? '/dashboard';
 }
+
+export const GET = withErrorReporting('auth.verify', openMagicLink);
+export const POST = withErrorReporting('auth.verify', confirmSignIn);

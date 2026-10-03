@@ -4,6 +4,7 @@ import { assertSameOrigin, requireOrgId, clearOrgCookie } from '@/lib/auth';
 import { currentLegalDocsVersion } from '@/lib/legal-version';
 import { recordLegalAcceptance } from '@/lib/legal-acceptance';
 import { reportError } from '@/lib/report-error';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 /**
  * Records the signed-in org's acceptance of the current Terms of Service and
@@ -20,7 +21,7 @@ import { reportError } from '@/lib/report-error';
  * third-party page must not be able to agree to anything on a signed-in
  * founder's behalf.
  */
-export async function POST(req: NextRequest) {
+async function acceptLegalDocs(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
 
@@ -86,3 +87,5 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Internal server error.' }, { status: 500 });
   }
 }
+
+export const POST = withErrorReporting('legal.accept', acceptLegalDocs);

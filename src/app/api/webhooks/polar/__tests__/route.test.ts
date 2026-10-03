@@ -69,6 +69,29 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('POST /api/webhooks/polar — a body that never arrives', () => {
+  it('answers 400 and reports nothing when the sender hangs up mid-body', async () => {
+    // What undici's body read throws when the client aborts. Escaping the
+    // handler, it would reach withErrorReporting and alert the operator.
+    const aborted = new ReadableStream({
+      start(controller) {
+        controller.error(new Error('aborted'));
+      },
+    });
+    const req = new Request('http://localhost/api/webhooks/polar', {
+      method: 'POST',
+      body: aborted,
+      duplex: 'half',
+    } as RequestInit);
+
+    const res = await POST(req);
+
+    expect(res.status).toBe(400);
+    expect(withTransactionMock).not.toHaveBeenCalled();
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+  });
+});
+
 describe('POST /api/webhooks/polar — signature and configuration', () => {
   it('returns 403 on a bad signature, writes nothing and reports nothing — anyone can send one', async () => {
     const res = await post(subscriptionEvent('subscription.active'), 'polar_whs_wrong');

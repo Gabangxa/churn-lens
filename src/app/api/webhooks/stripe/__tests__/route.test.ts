@@ -211,6 +211,30 @@ afterEach(() => {
 // so the arithmetic is exercised through POST and read off the INSERT's
 // mrr_lost parameter — which is the value customers actually see.
 
+describe('a body that never arrives', () => {
+  it('answers 400 and reports nothing when the sender hangs up mid-body', async () => {
+    // What undici's body read throws when the client aborts. Escaping the
+    // handler, it would reach withErrorReporting and alert the operator.
+    const aborted = new ReadableStream({
+      start(controller) {
+        controller.error(new Error('aborted'));
+      },
+    });
+    const req = new NextRequest(`http://localhost/api/webhooks/stripe/${ORG_ID}`, {
+      method: 'POST',
+      headers: { 'stripe-signature': 'sig_test' },
+      body: aborted,
+      duplex: 'half',
+    } as ConstructorParameters<typeof NextRequest>[1]);
+
+    const res = await POST(req, { params: { orgId: ORG_ID } });
+
+    expect(res.status).toBe(400);
+    expect(queryOneMock).not.toHaveBeenCalled();
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+  });
+});
+
 describe('mrr_lost normalization', () => {
   it('records a $50/month plan as 50', async () => {
     expect(await mrrLostFor([item(5000)])).toBe(50);

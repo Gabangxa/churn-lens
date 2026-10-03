@@ -9,6 +9,7 @@ import { ResourceNotFound } from '@polar-sh/sdk/models/errors/resourcenotfound.j
 import { getPolar } from '@/lib/polar';
 import { LEGAL } from '@/lib/legal';
 import { reportError } from '@/lib/report-error';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 /**
  * Founder-initiated account deletion (POPIA/GDPR erasure right).
@@ -21,7 +22,7 @@ import { reportError } from '@/lib/report-error';
  * by accident, or changes their mind, can email support before anything here
  * becomes irreversible. This route never deletes a row.
  */
-export async function POST(req: NextRequest) {
+async function requestAccountDeletion(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
 
@@ -213,3 +214,5 @@ function describePolarFailure(call: string, err: unknown): unknown {
   }
   return err;
 }
+
+export const POST = withErrorReporting('settings.account-delete', requestAccountDeletion);

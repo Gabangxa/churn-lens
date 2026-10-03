@@ -8,6 +8,7 @@ import { reportError } from '@/lib/report-error';
 import { fetchStripeBusinessName } from '@/lib/stripe-business-name';
 import { currentLegalDocsVersion } from '@/lib/legal-version';
 import { recordLegalAcceptance } from '@/lib/legal-acceptance';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 /** The Stripe calls this route makes, as named in operator reports. */
 type StripeStep = 'stripe_key_check' | 'stripe_webhook_lookup' | 'stripe_webhook';
@@ -110,7 +111,7 @@ async function deleteEndpointBestEffort(
  * no endpoint in its account and mode — is an org no cancellation can ever be
  * surveyed for, which the dashboard used to call "sending automatically".
  */
-export async function POST(req: NextRequest) {
+async function connectStripe(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
 
@@ -369,3 +370,5 @@ function sessionGoneResponse(): NextResponse {
   );
   return clearOrgCookie(response);
 }
+
+export const POST = withErrorReporting('onboarding.connect', connectStripe);
