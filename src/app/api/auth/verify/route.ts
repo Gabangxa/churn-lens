@@ -70,9 +70,9 @@ export async function POST(req: NextRequest) {
   // regardless of whether anyone ever used them. RETURNING the connection
   // columns in the same statement saves a second round trip for the
   // destination below.
-  const org = await queryOne<{ stripe_api_key_enc: string | null; stripe_webhook_id: string | null }>(
+  const org = await queryOne<StripeConnectionColumns>(
     `UPDATE organizations SET last_login_at = now() WHERE id = $1
-     RETURNING stripe_api_key_enc, stripe_webhook_id`,
+     RETURNING stripe_api_key_enc, stripe_webhook_id, stripe_webhook_secret_enc`,
     [consumed.orgId],
   );
 
@@ -98,18 +98,29 @@ async function readSubmittedToken(req: NextRequest): Promise<string | null> {
   return typeof token === 'string' && token !== '' ? token : null;
 }
 
+/** The organizations columns that say whether Stripe is fully connected. */
+interface StripeConnectionColumns {
+  stripe_api_key_enc: string | null;
+  stripe_webhook_id: string | null;
+  stripe_webhook_secret_enc: string | null;
+}
+
 /**
  * Where a founder goes once signed in.
  *
  * Onboarding until the org is actually connected — a Stripe key stored AND
- * ChurnLens's webhook registered on that account — whatever redirect_to says.
- * No key means a brand-new signup; a key with no webhook means connect failed
- * half-way (the key is saved before the webhook is registered, and a Stripe
- * error on the latter leaves it there), so Stripe never calls us. Either way
- * no survey goes out until connect is finished, and onboarding is the page
- * that finishes it. The exception is a redirect_to that is itself an
- * onboarding link carrying the plan a pricing-page click chose: that already
- * is the destination.
+ * ChurnLens's webhook registered on that account, with the signing secret the
+ * webhook verifies its events with — whatever redirect_to says. No key means
+ * a brand-new signup; a key with no endpoint is what a connect that failed
+ * half-way used to leave behind (it saved the key before registering the
+ * webhook), so Stripe never calls us. Either way no survey goes out until
+ * connect is finished, and onboarding is the page that finishes it. The
+ * exception is a redirect_to that is itself an onboarding link carrying the
+ * plan a pricing-page click chose: that already is the destination.
+ *
+ * The same test as the dashboard's "Stripe setup is incomplete" line
+ * (stripeWebhookRegistered in src/app/dashboard/page.tsx), so sign-in and the
+ * dashboard never disagree about whether an org is connected.
  *
  * redirect_to is re-validated against the same allow-list /api/auth/request
  * wrote it under rather than trusted as stored. Request is the only writer
@@ -121,12 +132,12 @@ async function readSubmittedToken(req: NextRequest): Promise<string | null> {
  * connected; the session minted for it fails its next check anyway.
  */
 function destinationAfterSignIn(
-  org: { stripe_api_key_enc: string | null; stripe_webhook_id: string | null } | null,
+  org: StripeConnectionColumns | null,
   storedRedirectTo: string | null,
 ): string {
   const redirectTo = sanitizeNext(storedRedirectTo);
-  const connected = !!(org?.stripe_api_key_enc && org.stripe_webhook_id);
-  if (!connected) {
+  const fullyConnected = !!(org?.stripe_api_key_enc && org.stripe_webhook_id && org.stripe_webhook_secret_enc);
+  if (!fullyConnected) {
     return redirectTo?.startsWith('/onboarding') ? redirectTo : '/onboarding';
   }
   return redirectTo ?? '/dashboard';

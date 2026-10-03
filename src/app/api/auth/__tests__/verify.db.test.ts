@@ -53,13 +53,15 @@ interface SeedOrgOptions {
   key?: boolean;
   /** organizations.stripe_webhook_id set — connect finished registering the webhook. */
   webhook?: boolean;
+  /** organizations.stripe_webhook_secret_enc set; defaults to `webhook`, as connect writes both. */
+  webhookSecret?: boolean;
 }
 
-async function seedOrg({ key = false, webhook = false }: SeedOrgOptions = {}): Promise<string> {
+async function seedOrg({ key = false, webhook = false, webhookSecret = webhook }: SeedOrgOptions = {}): Promise<string> {
   const { rows } = await pool().query<{ id: string }>(
-    `INSERT INTO organizations (name, stripe_api_key_enc, stripe_webhook_id)
-     VALUES ('Org', $1, $2) RETURNING id`,
-    [key ? 'enc' : null, webhook ? 'we_test' : null],
+    `INSERT INTO organizations (name, stripe_api_key_enc, stripe_webhook_id, stripe_webhook_secret_enc)
+     VALUES ('Org', $1, $2, $3) RETURNING id`,
+    [key ? 'enc' : null, webhook ? 'we_test' : null, webhookSecret ? 'enc-secret' : null],
   );
   return rows[0].id;
 }
@@ -390,6 +392,7 @@ suite('magic-link sign-in against a real database', () => {
 
     const keyless = {};
     const keyNoWebhook = { key: true };
+    const webhookNoSecret = { key: true, webhook: true, webhookSecret: false };
     const connected = { key: true, webhook: true };
 
     it.each([
@@ -404,6 +407,9 @@ suite('magic-link sign-in against a real database', () => {
       ['a key-but-no-webhook org whose redirect_to is /dashboard', keyNoWebhook, '/dashboard', '/onboarding'],
       ['a key-but-no-webhook org whose redirect_to is /settings', keyNoWebhook, '/settings', '/onboarding'],
       ['a key-but-no-webhook org carrying a plan', keyNoWebhook, '/onboarding?plan=starter', '/onboarding?plan=starter'],
+      // An endpoint id with no signing secret cannot verify any event either;
+      // the dashboard calls it "setup incomplete", so sign-in agrees.
+      ['a webhook-id-but-no-secret org whose redirect_to is /dashboard', webhookNoSecret, '/dashboard', '/onboarding'],
       ['a connected org with no redirect_to', connected, null, '/dashboard'],
       ['a connected org whose redirect_to is /settings', connected, '/settings', '/settings'],
     ])('sends %s to its destination', async (_label, org, redirectTo, expected) => {
