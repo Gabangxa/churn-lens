@@ -17,10 +17,14 @@ test.describe('account deletion', () => {
 
   test('a founder can delete their account from settings and is signed out', async ({ page }) => {
     const email = uniqueEmail('delete');
+    // Key only, no webhook: disconnectStripe then has no endpoint to delete,
+    // so deletion never tries to decrypt the placeholder key. Sign-in sends a
+    // half-connected org to onboarding, so Settings is opened directly.
     const { orgId } = await seedOrg({ email, withStripeKey: true });
 
-    await loginAs(page, { orgId, email, redirectTo: '/settings' });
-    await page.waitForURL((url) => url.pathname === '/settings');
+    await loginAs(page, { orgId, email });
+    await page.waitForURL((url) => url.pathname === '/onboarding');
+    await page.goto('/settings');
 
     const accountCard = page.getByRole('heading', { name: 'Account' });
     await expect(accountCard).toBeVisible();

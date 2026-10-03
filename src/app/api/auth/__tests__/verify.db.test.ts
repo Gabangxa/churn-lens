@@ -389,6 +389,7 @@ suite('magic-link sign-in against a real database', () => {
     }
 
     const keyless = {};
+    const keyNoWebhook = { key: true };
     const connected = { key: true, webhook: true };
 
     it.each([
@@ -396,6 +397,13 @@ suite('magic-link sign-in against a real database', () => {
       ['a keyless org whose redirect_to is /settings', keyless, '/settings', '/onboarding'],
       ['a keyless org whose redirect_to is /dashboard', keyless, '/dashboard', '/onboarding'],
       ['a keyless org carrying a plan', keyless, '/onboarding?plan=growth', '/onboarding?plan=growth'],
+      // A stored key with no webhook is a connect that failed half-way: Stripe
+      // will never call us, so no survey goes out. Onboarding is where the
+      // founder can finish it.
+      ['a key-but-no-webhook org with no redirect_to', keyNoWebhook, null, '/onboarding'],
+      ['a key-but-no-webhook org whose redirect_to is /dashboard', keyNoWebhook, '/dashboard', '/onboarding'],
+      ['a key-but-no-webhook org whose redirect_to is /settings', keyNoWebhook, '/settings', '/onboarding'],
+      ['a key-but-no-webhook org carrying a plan', keyNoWebhook, '/onboarding?plan=starter', '/onboarding?plan=starter'],
       ['a connected org with no redirect_to', connected, null, '/dashboard'],
       ['a connected org whose redirect_to is /settings', connected, '/settings', '/settings'],
     ])('sends %s to its destination', async (_label, org, redirectTo, expected) => {

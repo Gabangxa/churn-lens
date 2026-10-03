@@ -67,11 +67,12 @@ export async function POST(req: NextRequest) {
   // abandoned-signup rule (src/app/api/purge) depends on last_login_at
   // surviving as long as this org keeps being used, distinct from
   // login_tokens rows, which the same job deletes a day after they expire
-  // regardless of whether anyone ever used them. RETURNING the key in the
-  // same statement saves a second round trip for the destination below.
-  const org = await queryOne<{ stripe_api_key_enc: string | null }>(
+  // regardless of whether anyone ever used them. RETURNING the connection
+  // columns in the same statement saves a second round trip for the
+  // destination below.
+  const org = await queryOne<{ stripe_api_key_enc: string | null; stripe_webhook_id: string | null }>(
     `UPDATE organizations SET last_login_at = now() WHERE id = $1
-     RETURNING stripe_api_key_enc`,
+     RETURNING stripe_api_key_enc, stripe_webhook_id`,
     [consumed.orgId],
   );
 
@@ -100,10 +101,15 @@ async function readSubmittedToken(req: NextRequest): Promise<string | null> {
 /**
  * Where a founder goes once signed in.
  *
- * No Stripe key yet (brand-new signup, or a founder who never finished
- * connecting) means onboarding, whatever redirect_to says — except that
- * redirect_to may itself BE an onboarding link carrying the plan a
- * pricing-page click chose, in which case it already is the destination.
+ * Onboarding until the org is actually connected — a Stripe key stored AND
+ * ChurnLens's webhook registered on that account — whatever redirect_to says.
+ * No key means a brand-new signup; a key with no webhook means connect failed
+ * half-way (the key is saved before the webhook is registered, and a Stripe
+ * error on the latter leaves it there), so Stripe never calls us. Either way
+ * no survey goes out until connect is finished, and onboarding is the page
+ * that finishes it. The exception is a redirect_to that is itself an
+ * onboarding link carrying the plan a pricing-page click chose: that already
+ * is the destination.
  *
  * redirect_to is re-validated against the same allow-list /api/auth/request
  * wrote it under rather than trusted as stored. Request is the only writer
@@ -111,15 +117,16 @@ async function readSubmittedToken(req: NextRequest): Promise<string | null> {
  * route trusted blindly would be one bad migration, admin query or future
  * writer away from an open redirect on the one route that hands out a session.
  *
- * A missing org row (deleted out from under a live token) is treated as
- * keyless; the session minted for it fails its next check anyway.
+ * A missing org row (deleted out from under a live token) is treated as not
+ * connected; the session minted for it fails its next check anyway.
  */
 function destinationAfterSignIn(
-  org: { stripe_api_key_enc: string | null } | null,
+  org: { stripe_api_key_enc: string | null; stripe_webhook_id: string | null } | null,
   storedRedirectTo: string | null,
 ): string {
   const redirectTo = sanitizeNext(storedRedirectTo);
-  if (!org?.stripe_api_key_enc) {
+  const connected = !!(org?.stripe_api_key_enc && org.stripe_webhook_id);
+  if (!connected) {
     return redirectTo?.startsWith('/onboarding') ? redirectTo : '/onboarding';
   }
   return redirectTo ?? '/dashboard';

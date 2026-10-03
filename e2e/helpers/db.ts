@@ -68,26 +68,42 @@ export interface SeedOrgOptions {
   email: string;
   name?: string;
   /**
-   * Give the org a Stripe connection. The value is an opaque non-null string,
-   * NOT real ciphertext: nothing in the flows under test decrypts it (only
-   * disconnectStripe does, and only when stripe_webhook_id is also set, which
-   * this helper never sets). Everything else — the verify route's
-   * onboarding-vs-dashboard decision, /api/settings/status, the dashboard's
-   * status line, the purge job's abandoned-signup rule — tests the column for
-   * NULL. Keeping it opaque also means no test can accidentally reach Stripe.
+   * Store a Stripe key. The value is an opaque non-null string, NOT real
+   * ciphertext: nothing in the flows under test decrypts it (only
+   * disconnectStripe does, and only when stripe_webhook_id is also set — see
+   * withStripeWebhook). Everything else — /api/settings/status, the
+   * dashboard's status line, the purge job's abandoned-signup rule — tests the
+   * column for NULL. Keeping it opaque also means no test can accidentally
+   * reach Stripe.
+   *
+   * On its own this is a HALF-connected org (connect saved the key, then
+   * failed to register the webhook), which sign-in sends to /onboarding
+   * whatever redirect_to says. Add withStripeWebhook for a connected org.
    */
   withStripeKey?: boolean;
+  /**
+   * Also record a registered webhook (opaque id), completing the connection:
+   * sign-in then honours redirect_to and defaults to /dashboard. Requires
+   * withStripeKey. Do not use it in a flow that disconnects Stripe (account
+   * deletion, Settings disconnect): disconnectStripe would try to decrypt the
+   * placeholder key to delete the endpoint, fail, and report an error.
+   */
+  withStripeWebhook?: boolean;
   createdAt?: Date;
   deletionRequestedAt?: Date;
   lastLoginAt?: Date;
 }
 
 export async function seedOrg(options: SeedOrgOptions): Promise<{ orgId: string }> {
+  if (options.withStripeWebhook && !options.withStripeKey) {
+    // No real org is in that state: connect stores the key before it registers the webhook.
+    throw new Error('seedOrg: withStripeWebhook requires withStripeKey');
+  }
   const orgId = randomUUID();
   await query(
     `INSERT INTO organizations
-       (id, name, created_at, last_login_at, deletion_requested_at, stripe_api_key_enc)
-     VALUES ($1, $2, COALESCE($3::timestamptz, now()), $4, $5, $6)`,
+       (id, name, created_at, last_login_at, deletion_requested_at, stripe_api_key_enc, stripe_webhook_id)
+     VALUES ($1, $2, COALESCE($3::timestamptz, now()), $4, $5, $6, $7)`,
     [
       orgId,
       options.name ?? 'E2E Organization',
@@ -95,6 +111,7 @@ export async function seedOrg(options: SeedOrgOptions): Promise<{ orgId: string 
       options.lastLoginAt ?? null,
       options.deletionRequestedAt ?? null,
       options.withStripeKey ? 'e2e-placeholder-not-real-ciphertext' : null,
+      options.withStripeWebhook ? 'we_e2e_placeholder_not_registered' : null,
     ],
   );
   await query(

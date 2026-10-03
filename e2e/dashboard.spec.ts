@@ -18,7 +18,7 @@ test.describe('dashboard status', () => {
 
   test('a connected org is told the truth about whether surveys are sending', async ({ page }) => {
     const email = uniqueEmail('status');
-    const { orgId } = await seedOrg({ email, withStripeKey: true });
+    const { orgId } = await seedOrg({ email, withStripeKey: true, withStripeWebhook: true });
 
     await loginAs(page, { orgId, email, redirectTo: '/dashboard' });
     await page.waitForURL((url) => url.pathname === '/dashboard');
@@ -37,7 +37,7 @@ test.describe('dashboard status', () => {
 
   test('an org whose Stripe key was rejected is told to reconnect', async ({ page }) => {
     const email = uniqueEmail('keyrejected');
-    const { orgId } = await seedOrg({ email, withStripeKey: true });
+    const { orgId } = await seedOrg({ email, withStripeKey: true, withStripeWebhook: true });
     // What the Stripe webhook records when Stripe answers 401/403 for the stored key.
     await query('UPDATE organizations SET stripe_key_invalid_at = now() WHERE id = $1', [orgId]);
 
@@ -55,7 +55,7 @@ test.describe('dashboard status', () => {
 
   test('a free org with responses is not promised AI themes', async ({ page }) => {
     const email = uniqueEmail('freethemes');
-    const { orgId } = await seedOrg({ email, withStripeKey: true });
+    const { orgId } = await seedOrg({ email, withStripeKey: true, withStripeWebhook: true });
     await seedSurveyResponse(orgId, { customerEmail: 'churned@example.com', createdAt: daysAgo(1) });
 
     await loginAs(page, { orgId, email, redirectTo: '/dashboard' });
@@ -69,7 +69,7 @@ test.describe('dashboard status', () => {
     // seedOrg leaves both legal_accepted_* columns NULL — exactly the state of
     // every org that connected before acceptance was recorded.
     const email = uniqueEmail('legalaccept');
-    const { orgId } = await seedOrg({ email, withStripeKey: true });
+    const { orgId } = await seedOrg({ email, withStripeKey: true, withStripeWebhook: true });
 
     await loginAs(page, { orgId, email, redirectTo: '/dashboard' });
     await page.waitForURL((url) => url.pathname === '/dashboard');

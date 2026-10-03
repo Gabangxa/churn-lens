@@ -210,12 +210,24 @@ test.describe('authentication', () => {
     await page.waitForURL(atLoginWithNext('/settings'));
   });
 
-  test('a magic link for an org that has a Stripe key honours redirect_to', async ({ page }) => {
+  test('a magic link for a connected org honours redirect_to', async ({ page }) => {
     const email = uniqueEmail('connected');
-    const { orgId } = await seedOrg({ email, withStripeKey: true });
+    const { orgId } = await seedOrg({ email, withStripeKey: true, withStripeWebhook: true });
 
     await loginAs(page, { orgId, email, redirectTo: '/settings' });
 
     await page.waitForURL((url) => url.pathname === '/settings');
+  });
+
+  test('a magic link for an org with a key but no registered webhook lands on onboarding', async ({ page }) => {
+    // Connect saved the key, then failed to register the webhook: Stripe will
+    // never tell us about a cancellation, so no survey goes out. The dashboard
+    // it asked for cannot fix that; onboarding can.
+    const email = uniqueEmail('halfconnected');
+    const { orgId } = await seedOrg({ email, withStripeKey: true });
+
+    await loginAs(page, { orgId, email, redirectTo: '/dashboard' });
+
+    await page.waitForURL((url) => url.pathname === '/onboarding');
   });
 });
