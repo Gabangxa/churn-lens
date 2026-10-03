@@ -626,9 +626,19 @@ suite('POST /api/webhooks/polar against a real database', () => {
 
       await deliver(org, SUB_A, active(aug(5)));
 
-      // The pointer stays put here too: free is only what an older build last
-      // wrote, not proof that the unledgered subscription has ended.
-      expect(await billing(org)).toMatchObject({ plan: 'starter', polar_subscription_id: LEGACY.id });
+      // A hold at free protects nothing, so the pointer moves to the new
+      // subscription as it would for any org.
+      expect(await billing(org)).toMatchObject({ plan: 'starter', polar_subscription_id: SUB_A.id });
+      expect(getErrorReportSnapshot().totalReported).toBe(0);
+    });
+
+    it('drops an ex-subscriber back to free when their new subscription ends, without a hold', async () => {
+      const org = await seedUnledgeredOrg('free');
+
+      await deliver(org, SUB_A, active(aug(5)));
+      await deliver(org, SUB_A, revoked(aug(20)));
+
+      expect(await billing(org)).toMatchObject({ plan: 'free', polar_subscription_id: SUB_A.id });
       expect(getErrorReportSnapshot().totalReported).toBe(0);
     });
   });

@@ -74,7 +74,9 @@ export interface RecomputedPlan {
  * but the pointer stays on the unledgered subscription even then: the pointer
  * is the only record that the hold applies, so moving it to the subscription
  * that raised the plan would let that one's revoke drop an org that may still
- * be paying to free, with nothing reported. The hold ends once an event for
+ * be paying to free, with nothing reported. An org on free is the exception
+ * to the exception: there is nothing to protect, so the pointer moves as
+ * usual. The hold ends once an event for
  * that subscription is recorded (the ledger upsert inserts any event for an
  * id it has no row for), its row is added by hand, or an operator clears the
  * pointer for a subscription known to have ended (README, "Deploying
@@ -127,8 +129,12 @@ export async function recomputeOrgPlan(client: PoolClient, orgId: string): Promi
   }
 
   const plan = derived;
-  // Unledgered: kept where it is (see above), even though the plan may rise.
-  const nextPointer = unledgered ? pointer : (best?.subscriptionId ?? rows[0]?.id ?? null);
+  // Unledgered: kept where it is (see above), even though the plan may rise —
+  // unless the org is on free. A hold at free protects nothing, and keeping the
+  // pointer there would later hold an ex-subscriber at whatever tier their new
+  // subscription granted after that subscription ended.
+  const keepUnledgeredPointer = unledgered && currentPlan !== 'free';
+  const nextPointer = keepUnledgeredPointer ? pointer : (best?.subscriptionId ?? rows[0]?.id ?? null);
 
   const updated = await client.query<{ polar_subscription_id: string | null }>(
     `UPDATE organizations
