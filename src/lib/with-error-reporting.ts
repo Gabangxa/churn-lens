@@ -2,7 +2,13 @@ import { NextResponse } from 'next/server';
 import { isDynamicServerError } from 'next/dist/client/components/hooks-server-context';
 import { isNextRouterError } from 'next/dist/client/components/is-next-router-error';
 import { isStaticGenBailoutError } from 'next/dist/client/components/static-generation-bailout';
-import { isBadInputDbError, reportError, warnBadInput, type ErrorMeta } from '@/lib/report-error';
+import {
+  ALREADY_REPORTED_HEADER,
+  isBadInputDbError,
+  reportError,
+  warnBadInput,
+  type ErrorMeta,
+} from '@/lib/report-error';
 
 /**
  * Wrap an App Router route handler so an exception that escapes it is
@@ -30,7 +36,9 @@ import { isBadInputDbError, reportError, warnBadInput, type ErrorMeta } from '@/
  *     alert — otherwise anyone with a URL could page the operator at will.
  *   - Anything else is reported with step 'unhandled', the HTTP method and
  *     the route params (ids, and cheap: the body is not re-read), and answered
- *     with a generic 500. Webhook senders (Stripe, Polar) still retry a 5xx.
+ *     with a generic 500 marked ALREADY_REPORTED_HEADER, so the cron scheduler
+ *     does not report it a second time. Webhook senders (Stripe, Polar) still
+ *     retry a 5xx.
  *
  * A handler that catches its own failure, reports it and returns a response
  * is left alone: only a throw reaches this, so nothing is reported twice.
@@ -55,7 +63,10 @@ export function withErrorReporting<Req extends Request, Rest extends unknown[], 
         return NextResponse.json({ error: 'Invalid request' }, { status: 400 });
       }
       reportError(context, err, { step: 'unhandled', ...meta });
-      return NextResponse.json({ error: 'Internal error' }, { status: 500 });
+      return NextResponse.json(
+        { error: 'Internal error' },
+        { status: 500, headers: { [ALREADY_REPORTED_HEADER]: '1' } },
+      );
     }
   };
 }

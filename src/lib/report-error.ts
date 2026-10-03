@@ -705,6 +705,13 @@ function maybeAlert(
 }
 
 /**
+ * Set to '1' on a 500 whose failure the route has already reported, so a
+ * caller that reports failed responses itself (the cron scheduler in
+ * src/instrumentation.ts) knows not to report the same failure again.
+ */
+export const ALREADY_REPORTED_HEADER = 'x-churnlens-reported';
+
+/**
  * Report a genuine failure. `context` is a stable dotted label for the code
  * path ("cron.themes", "survey.submit"); `meta` carries ids only.
  */

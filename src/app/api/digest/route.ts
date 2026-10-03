@@ -4,7 +4,7 @@ import { getResend, FROM_EMAIL } from '@/lib/resend';
 import { verifyCronSecret } from '@/lib/auth';
 import { reportingWeek } from '@/lib/week';
 import { claimCronRun, cronRunRecord, finishCronRun, MAX_ATTEMPTS, STALE_RUNNING_MS } from '@/lib/cron';
-import { reportError } from '@/lib/report-error';
+import { ALREADY_REPORTED_HEADER, reportError } from '@/lib/report-error';
 import { withErrorReporting } from '@/lib/with-error-reporting';
 
 interface ThemeRow {
@@ -215,7 +215,11 @@ Manage preferences: ${settingsUrl}`;
       failed,
       error: message,
     });
-    return NextResponse.json({ error: message, weekOf: weekOfStr }, { status: 500 });
+    // Reported just above; the mark keeps the scheduler from reporting it again.
+    return NextResponse.json(
+      { error: message, weekOf: weekOfStr },
+      { status: 500, headers: { [ALREADY_REPORTED_HEADER]: '1' } },
+    );
   }
 
   if (!themes.length) {

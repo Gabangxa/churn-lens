@@ -40,7 +40,7 @@ export async function register() {
   // modules like `crypto`; `next build` fails otherwise.) See
   // installProcessErrorHandlers for why this never changes whether the
   // process survives an uncaught exception.
-  const { installProcessErrorHandlers, reportError } = await import('./lib/report-error');
+  const { ALREADY_REPORTED_HEADER, installProcessErrorHandlers, reportError } = await import('./lib/report-error');
   installProcessErrorHandlers();
 
   // Escape hatch for the end-to-end suite (e2e/env.ts sets this on the server
@@ -100,6 +100,16 @@ export async function register() {
       });
       if (!res.ok) {
         const failure = new Error(`${path} returned ${res.status}`);
+        // The route already reported this failure, with the real error and
+        // its stack (withErrorReporting, or a cron route's own catch), and
+        // marked its 500 to say so: reporting the response too would alert
+        // twice for one failure. Only a 500 is trusted with the mark, since a
+        // 404 or a proxy's 502/503/504 never came from a route that reported.
+        // Still a failed call for scheduler-state, and still logged.
+        if (res.status === 500 && res.headers.get(ALREADY_REPORTED_HEADER) === '1') {
+          console.error(`[cron] ${path} returned 500; the route reported the failure`);
+          return failure;
+        }
         // The body says why (the route's own { error } JSON, or a proxy's
         // HTML page), so the report carries it. Whole: reportError bounds the
         // message itself, AFTER redacting, and drops an address its own cut

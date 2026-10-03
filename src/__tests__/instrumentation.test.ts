@@ -19,7 +19,20 @@ vi.mock('../lib/cron', async (importOriginal) => {
   return { ...actual, cronRunRecord: (...args: unknown[]) => cronRunRecordMock(...args) };
 });
 
+// The "reported once" tests below run the real /api/themes handler behind
+// the stubbed fetch; this is its database. Nothing else here reaches it
+// (cronRunRecord is stubbed above), so the default is to fail loudly.
+const dbQueryMock = vi.fn();
+const dbExecuteMock = vi.fn();
+vi.mock('@/lib/db', () => ({
+  query: (...args: unknown[]) => dbQueryMock(...args),
+  queryOne: (...args: unknown[]) => dbQueryMock(...args),
+  execute: (...args: unknown[]) => dbExecuteMock(...args),
+  withTransaction: () => Promise.reject(new Error('withTransaction is not expected in this suite')),
+}));
+
 import { register } from '../instrumentation';
+import { POST as runThemesRoute } from '../app/api/themes/route';
 import { getSchedulerState, resetSchedulerState } from '../lib/scheduler-state';
 // Real, not mocked: these tests assert on what reportError recorded. ALERT_EMAIL
 // is pinned empty for every suite (vitest.config.ts), so nothing is emailed.
@@ -81,6 +94,9 @@ beforeEach(() => {
   validateEnvMock.mockImplementation(() => {});
   cronRunRecordMock.mockReset();
   stubWeeklyRecord(null);
+
+  dbQueryMock.mockReset().mockRejectedValue(new Error('database is not expected in this test'));
+  dbExecuteMock.mockReset().mockRejectedValue(new Error('database is not expected in this test'));
 
   fetchMock = vi.fn().mockResolvedValue(okResponse());
   vi.stubGlobal('fetch', fetchMock);
@@ -640,6 +656,7 @@ describe('register — error reporting (src/lib/report-error.ts)', () => {
     fetchMock.mockResolvedValue({
       ok: false,
       status: 500,
+      headers: new Headers(),
       json: async () => ({}),
       text: async () => '{"error":"connection terminated","weekOf":"2026-03-09"}',
     });
@@ -662,7 +679,7 @@ describe('register — error reporting (src/lib/report-error.ts)', () => {
     // address and went out verbatim.
     const body = JSON.stringify({ error: `${'x'.repeat(480)} jane.doe@customer.example could not be saved` });
     expect(body.indexOf('jane.doe@')).toBe(491);
-    fetchMock.mockResolvedValue({ ok: false, status: 500, json: async () => ({}), text: async () => body });
+    fetchMock.mockResolvedValue({ ok: false, status: 500, headers: new Headers(), json: async () => ({}), text: async () => body });
     const errorLog = vi.mocked(console.error);
 
     await bootAndPoll();
@@ -728,6 +745,80 @@ describe('register — error reporting (src/lib/report-error.ts)', () => {
       [`digest for week ${WEEK_OF} has failed 5 times — giving up until it's manually retried.`, { job: 'digest', weekOf: WEEK_OF }],
       [`themes for week ${WEEK_OF} has failed 5 times — giving up until it's manually retried.`, { job: 'themes', weekOf: WEEK_OF }],
     ]);
+  });
+
+  describe('a cron route that reported its own failure', () => {
+    // Between 06:00 and 07:00 only themes is due (purge is inert), so the one
+    // call the poll makes reaches the real /api/themes handler.
+    beforeEach(() => {
+      vi.setSystemTime(new Date('2026-03-16T06:30:00Z'));
+      fetchMock.mockImplementation(async (url: string, init: RequestInit) => {
+        if (!String(url).endsWith('/api/themes')) throw new Error(`unexpected call to ${String(url)}`);
+        return runThemesRoute(new Request(url, { method: init.method, headers: init.headers }));
+      });
+    });
+
+    it('is reported once, by the route, when the route catches the failure itself', async () => {
+      dbQueryMock.mockImplementation(async (sql: string) => {
+        if (sql.includes('INSERT INTO cron_runs')) return [{ job: 'themes' }];
+        throw new Error('connection terminated');
+      });
+      dbExecuteMock.mockResolvedValue(1);
+
+      await bootAndPoll();
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(getErrorReportSnapshot().totalReported).toBe(1);
+      expect(getErrorReportSnapshot().recent).toEqual([
+        expect.objectContaining({ context: 'cron.themes', message: 'connection terminated' }),
+      ]);
+      // Still a failed poll as far as /api/admin/status is concerned.
+      expect(getSchedulerState().lastPollError).toBe('/api/themes returned 500');
+    });
+
+    it('is reported once, by withErrorReporting, when a throw escapes the route', async () => {
+      dbQueryMock.mockRejectedValue(new Error('connection terminated'));
+
+      await bootAndPoll();
+
+      expect(getErrorReportSnapshot().totalReported).toBe(1);
+      expect(getErrorReportSnapshot().recent).toEqual([
+        expect.objectContaining({ context: 'cron.themes', meta: { step: 'unhandled', method: 'POST' } }),
+      ]);
+      expect(getSchedulerState().lastPollError).toBe('/api/themes returned 500');
+    });
+  });
+
+  it.each([404, 502, 503, 504])(
+    'still reports a %i even if it carries the reported mark: only a route 500 is trusted with it',
+    async (status) => {
+      fetchMock.mockImplementation(
+        async () => new Response('upstream trouble', { status, headers: { 'x-churnlens-reported': '1' } }),
+      );
+
+      await bootAndPoll();
+
+      expect(reported('cron.scheduler').map((f) => f.message).sort()).toEqual([
+        `/api/digest returned ${status}: upstream trouble`,
+        `/api/themes returned ${status}: upstream trouble`,
+      ]);
+    },
+  );
+
+  it('still reports a 500 without the mark (a failure no route reported)', async () => {
+    fetchMock.mockImplementation(async () => new Response('Internal Server Error', { status: 500 }));
+
+    await bootAndPoll();
+
+    expect(reported('cron.scheduler')).toHaveLength(2);
+  });
+
+  it('still reports a 2xx whose body is not JSON', async () => {
+    fetchMock.mockImplementation(async () => new Response('<html>maintenance</html>', { status: 200 }));
+
+    await bootAndPoll();
+
+    expect(reported('cron.scheduler')).toHaveLength(1);
   });
 
   it('reports nothing on a clean poll', async () => {

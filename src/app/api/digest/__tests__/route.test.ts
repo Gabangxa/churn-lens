@@ -473,6 +473,8 @@ describe('POST /api/digest — run-level failures', () => {
 
     expect(res.status).toBe(500);
     expect(body).toEqual({ error: 'connection terminated', weekOf: WEEK_OF });
+    // Reported here, so marked for the scheduler not to report it again.
+    expect(res.headers.get('x-churnlens-reported')).toBe('1');
     expect(finishCronRunMock).toHaveBeenCalledWith('digest', WEEK_OF, {
       status: 'failed',
       processed: 0,

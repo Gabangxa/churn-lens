@@ -4,7 +4,7 @@ import { MAX_RESPONSES_PER_BATCH, clusterResponses } from '@/lib/openai';
 import { verifyCronSecret } from '@/lib/auth';
 import { reportingWeek } from '@/lib/week';
 import { claimCronRun, finishCronRun } from '@/lib/cron';
-import { reportError } from '@/lib/report-error';
+import { ALREADY_REPORTED_HEADER, reportError } from '@/lib/report-error';
 import { withErrorReporting } from '@/lib/with-error-reporting';
 
 async function runThemes(req: Request) {
@@ -159,7 +159,11 @@ async function runThemes(req: Request) {
       failed,
       error: message,
     });
-    return NextResponse.json({ error: message, weekOf: weekOfStr }, { status: 500 });
+    // Reported just above; the mark keeps the scheduler from reporting it again.
+    return NextResponse.json(
+      { error: message, weekOf: weekOfStr },
+      { status: 500, headers: { [ALREADY_REPORTED_HEADER]: '1' } },
+    );
   }
 
   // Deliberately outside the try/catch above: if this UPDATE itself throws (a

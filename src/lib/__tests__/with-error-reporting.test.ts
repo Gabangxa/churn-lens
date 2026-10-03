@@ -63,6 +63,7 @@ describe('withErrorReporting — a handler that answers', () => {
 
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: 'Failed to save' });
+    expect(res.headers.get('x-churnlens-reported')).toBeNull();
     expect(getErrorReportSnapshot().totalReported).toBe(0);
   });
 });
@@ -81,6 +82,8 @@ describe('withErrorReporting — a handler that throws', () => {
     expect(res.status).toBe(500);
     // Nothing about the failure leaks to the caller; Stripe and Polar still retry a 5xx.
     expect(await res.json()).toEqual({ error: 'Internal error' });
+    // Marked as reported, so the cron scheduler does not report it again.
+    expect(res.headers.get('x-churnlens-reported')).toBe('1');
     expect(getErrorReportSnapshot().recent).toEqual([
       expect.objectContaining({
         context: 'webhook.stripe',

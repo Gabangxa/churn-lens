@@ -207,6 +207,8 @@ describe('POST /api/themes — run-level failures', () => {
 
     expect(res.status).toBe(500);
     expect(body).toEqual({ error: 'connection terminated', weekOf: WEEK_OF });
+    // Reported here, so marked for the scheduler not to report it again.
+    expect(res.headers.get('x-churnlens-reported')).toBe('1');
     // Without this the row stays 'running' and the week is unretryable until
     // the 2h stale window elapses.
     expect(finishCronRunMock).toHaveBeenCalledWith('themes', WEEK_OF, {
