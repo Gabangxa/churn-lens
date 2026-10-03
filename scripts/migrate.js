@@ -513,6 +513,49 @@ async function migrate() {
       ADD COLUMN IF NOT EXISTS stripe_business_name text;
   `);
 
+  // Acceptance of the Terms of Service and Data Processing Agreement. POPIA
+  // s21 requires a written contract between the responsible party (the
+  // founder's org) and its operator (ChurnLens) before we process the org's
+  // customers' personal information, and the DPA is meant to be that
+  // contract — but until these columns existed nothing ever showed it to a
+  // founder or recorded that one had agreed to it.
+  //
+  // legal_accepted_version is LEGAL_DOCS_VERSION (src/lib/legal-version.ts)
+  // at the moment of acceptance, so a later change to the documents can tell
+  // who agreed to which wording; legal_accepted_at is always the database's
+  // now(), never a time the client sent. Both NULL means "no acceptance on
+  // record" — which is true of every org that connected before this shipped,
+  // so there is deliberately no backfill: inventing an acceptance for them
+  // would be exactly the false record these columns exist to replace. The
+  // dashboard asks those orgs to accept instead.
+  await pool.query(`
+    ALTER TABLE organizations
+      ADD COLUMN IF NOT EXISTS legal_accepted_at timestamptz,
+      ADD COLUMN IF NOT EXISTS legal_accepted_version text;
+  `);
+
+  // The two columns are one fact: a version with no time, or a time with no
+  // version, is not evidence of anything. Both write paths set them together
+  // in one statement, and both rely on "version set implies time set" to keep
+  // the original timestamp on a re-accept — so the database enforces it
+  // rather than trusting every future writer to. Every existing row has both
+  // NULL, so adding it validates instantly. Catalog-guarded because ADD
+  // CONSTRAINT has no IF NOT EXISTS.
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'organizations_legal_acceptance_pair_check'
+          AND conrelid = 'organizations'::regclass
+      ) THEN
+        ALTER TABLE organizations
+          ADD CONSTRAINT organizations_legal_acceptance_pair_check
+          CHECK ((legal_accepted_at IS NULL) = (legal_accepted_version IS NULL));
+      END IF;
+    END $$;
+  `);
+
   console.log('Database migration complete');
   await pool.end();
 }
