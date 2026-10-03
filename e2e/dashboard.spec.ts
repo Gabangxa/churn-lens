@@ -70,6 +70,32 @@ test.describe('dashboard status', () => {
     await expect(page.getByText('surveys sending automatically')).toHaveCount(0);
   });
 
+  test('an org whose surveys would name no business is asked for a name, until it has one', async ({ page }) => {
+    // Most keys cannot read the Stripe account name, so without a display
+    // name the survey email never says which business is asking.
+    const email = uniqueEmail('noname');
+    const { orgId } = await seedOrg({ email, withStripeKey: true, withStripeWebhook: true });
+
+    await loginAs(page, { orgId, email, redirectTo: '/dashboard' });
+    await page.waitForURL((url) => url.pathname === '/dashboard');
+
+    await expect(page.getByText(/Your survey emails don't say which business is asking/)).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Add your business name in Settings' })).toHaveAttribute(
+      'href',
+      '/settings',
+    );
+
+    // What saving a display name in Settings stores.
+    await query('UPDATE organizations SET survey_config = $1 WHERE id = $2', [
+      JSON.stringify({ display_name: 'Acme E2E' }),
+      orgId,
+    ]);
+    await page.reload();
+
+    await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
+    await expect(page.getByText(/Your survey emails don't say which business is asking/)).toHaveCount(0);
+  });
+
   test('a free org with responses is not promised AI themes', async ({ page }) => {
     const email = uniqueEmail('freethemes');
     const { orgId } = await seedOrg({ email, withStripeKey: true, withStripeWebhook: true });

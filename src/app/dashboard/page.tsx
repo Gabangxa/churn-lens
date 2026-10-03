@@ -7,6 +7,7 @@ import type { Theme, SurveyResponse } from '@/lib/db';
 import { legalFooterReady } from '@/lib/legal';
 import { LEGAL_DOCS_VERSION } from '@/lib/legal-version';
 import { countFreeTierSurveys, surveySendStatus } from '@/lib/survey-status';
+import { loadSurveyPresentation } from '@/lib/survey-config';
 import type { SurveySendStatus } from '@/lib/survey-status';
 import Wordmark from '@/components/Wordmark';
 import ThemeToggle from '@/components/ThemeToggle';
@@ -110,11 +111,40 @@ async function getDashboardData(orgId: string) {
   const responded = parseInt(stats?.responded ?? '0', 10);
   const mrrLost = parseInt(stats?.mrr_lost ?? '0', 10);
   const responseRate = totalSent > 0 ? Math.round((responded / totalSent) * 100) : 0;
+  // Who the survey emails say is asking, resolved exactly as they resolve
+  // it: the Settings display name, else the cached Stripe account name.
+  const { businessName } = await loadSurveyPresentation(orgId);
+
   const weekMrr = themes.reduce((acc, t) => acc + t.mrr_impact, 0);
   const weekResponses = themes.reduce((acc, t) => acc + t.response_count, 0);
   const pending = totalSent - responded;
 
-  return { themes, responses, latestWeek: latestWeek?.week_of ?? null, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending, plan, sendStatus, legalAcceptedVersion: org?.legal_accepted_version ?? null };
+  return { themes, responses, latestWeek: latestWeek?.week_of ?? null, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending, plan, sendStatus, legalAcceptedVersion: org?.legal_accepted_version ?? null, businessNamed: businessName !== null };
+}
+
+/**
+ * Asks for a business name when surveys would go out without one. POPIA s18
+ * wants the churned customer told who is asking, but the Stripe account name
+ * is only readable with a permission onboarding does not request, so for
+ * most orgs nothing names the business until the founder sets a display
+ * name. Asks, never blocks: the generic copy still sends (the zero-config
+ * decision), and nothing is made required.
+ */
+function BusinessNamePrompt() {
+  return (
+    <div className="mt-6 rounded-3xl border-2 border-amber-500/40 bg-amber-500/10 px-6 py-5">
+      <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200 leading-relaxed">
+        Your survey emails don&apos;t say which business is asking.{' '}
+        <Link
+          href="/settings"
+          className="font-bold text-teal-700 dark:text-teal-300 underline underline-offset-2 hover:text-teal-900 dark:hover:text-teal-200"
+        >
+          Add your business name in Settings
+        </Link>
+        .
+      </p>
+    </div>
+  );
 }
 
 /** One-line answer to "is a cancellation right now going to be surveyed?" */
@@ -197,7 +227,7 @@ export default async function DashboardPage() {
   // them back here once they've signed in or signed up.
   if (!orgId) redirect('/login?next=/dashboard');
 
-  const { themes, responses, latestWeek, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending, plan, sendStatus, legalAcceptedVersion } =
+  const { themes, responses, latestWeek, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending, plan, sendStatus, legalAcceptedVersion, businessNamed } =
     await getDashboardData(orgId);
   // /api/themes only clusters paid orgs, so a free org must not be told themes are on their way.
   const themesIncluded = plan !== 'free';
@@ -264,6 +294,7 @@ export default async function DashboardPage() {
           {legalAcceptedVersion !== LEGAL_DOCS_VERSION && (
             <LegalAcceptanceBanner previouslyAccepted={legalAcceptedVersion !== null} />
           )}
+          {!businessNamed && <BusinessNamePrompt />}
         </div>
 
         {/* ── Empty state ── */}
