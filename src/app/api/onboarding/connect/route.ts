@@ -67,6 +67,25 @@ function stripeFailureResponse(err: unknown, orgId: string, step: StripeStep): N
   );
 }
 
+/** The event the Stripe webhook route turns into an exit survey. */
+const SURVEY_TRIGGER_EVENT = 'customer.subscription.deleted';
+
+/**
+ * Whether an endpoint the new key can see will actually deliver what
+ * surveys need, to this org's webhook URL. An endpoint someone disabled (or
+ * Stripe disabled after failed deliveries), edited to another URL, or
+ * narrowed to other events would deliver nothing while the dashboard said
+ * surveys were sending.
+ */
+function isUsableEndpoint(endpoint: Stripe.WebhookEndpoint, expectedUrl: string): boolean {
+  const events = endpoint.enabled_events ?? [];
+  return (
+    endpoint.status === 'enabled' &&
+    endpoint.url === expectedUrl &&
+    (events.includes(SURVEY_TRIGGER_EVENT) || events.includes('*'))
+  );
+}
+
 /**
  * Best-effort removal of a webhook endpoint this route no longer wants.
  * Never throws: the connect's outcome is already decided, and the worst case
@@ -223,15 +242,23 @@ async function connectStripe(req: NextRequest) {
     // 2. An endpoint in the key's own account and mode. An endpoint lives in
     //    one account and one mode, and the webhook reads each event's
     //    customer with the stored key — so the org's existing endpoint is
-    //    only any use if the NEW key can see it. Not visible (404) means the
-    //    key is for another account, or the other of test/live: register one
-    //    where the key is, and retire the old one once the new connection is
-    //    saved.
+    //    only any use if the NEW key can see it, and only kept if it still
+    //    delivers the survey trigger to this org's URL (isUsableEndpoint).
+    //    Not visible (404) means the key is for another account, or the
+    //    other of test/live. Either way a new one is registered where the key
+    //    is, and the old one retired once the new connection is saved.
+    const webhookUrl = `${appUrl}/api/webhooks/stripe/${orgId}`;
     let kept: { id: string; secretEnc: string } | null = null;
+    // Whether the old endpoint is in the new key's account and mode, so the
+    // new key can retire it rather than the old one (often revoked by now).
+    let oldEndpointVisibleToNewKey = false;
     if (existing.stripe_webhook_id && existing.stripe_webhook_secret_enc) {
       try {
-        await customerStripe.webhookEndpoints.retrieve(existing.stripe_webhook_id);
-        kept = { id: existing.stripe_webhook_id, secretEnc: existing.stripe_webhook_secret_enc };
+        const endpoint = await customerStripe.webhookEndpoints.retrieve(existing.stripe_webhook_id);
+        oldEndpointVisibleToNewKey = true;
+        if (isUsableEndpoint(endpoint, webhookUrl)) {
+          kept = { id: existing.stripe_webhook_id, secretEnc: existing.stripe_webhook_secret_enc };
+        }
       } catch (err) {
         if (!isResourceMissing(err)) return stripeFailureResponse(err, orgId, 'stripe_webhook_lookup');
       }
@@ -251,8 +278,8 @@ async function connectStripe(req: NextRequest) {
       let endpoint: Stripe.WebhookEndpoint;
       try {
         endpoint = await customerStripe.webhookEndpoints.create({
-          url: `${appUrl}/api/webhooks/stripe/${orgId}`,
-          enabled_events: ['customer.subscription.deleted'],
+          url: webhookUrl,
+          enabled_events: [SURVEY_TRIGGER_EVENT],
           description: 'ChurnLens exit survey trigger',
         });
       } catch (err) {
@@ -332,11 +359,16 @@ async function connectStripe(req: NextRequest) {
     }
 
     // 5. Only now that the new endpoint is saved: retire the one it replaced.
-    //    It lives in the old account or mode, which only the old key can
-    //    reach — and that key is often revoked (the usual reason to
-    //    reconnect), so this is best-effort; Stripe disables an endpoint
-    //    whose deliveries keep failing, and ours now answer 400 for it.
-    if (replacedEndpointId && existing.stripe_api_key_enc) {
+    //    Best-effort either way; Stripe disables an endpoint whose deliveries
+    //    keep failing, and ours now answer 400 for it.
+    //    - Visible to the new key, and replaced because it was disabled,
+    //      pointed elsewhere or lost the event: the new key removes it.
+    //    - Not visible: it lives in the old account or mode, which only the
+    //      old key can reach — and that key is often revoked (the usual
+    //      reason to reconnect).
+    if (replacedEndpointId && oldEndpointVisibleToNewKey) {
+      await deleteEndpointBestEffort(customerStripe, replacedEndpointId, orgId, 'replaced by reconnect');
+    } else if (replacedEndpointId && existing.stripe_api_key_enc) {
       let oldStripe: Stripe | null = null;
       try {
         oldStripe = new Stripe(decryptApiKey(existing.stripe_api_key_enc), {

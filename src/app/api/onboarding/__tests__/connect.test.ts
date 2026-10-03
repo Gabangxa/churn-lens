@@ -72,7 +72,15 @@ function onboardingScopedKey(req: FakeStripeRequest): Response {
   }
   if (req.path.startsWith('/v1/webhook_endpoints/')) {
     const id = req.path.slice('/v1/webhook_endpoints/'.length);
-    return stripeJson(200, { id, object: 'webhook_endpoint', deleted: req.method === 'DELETE' });
+    if (req.method === 'DELETE') return stripeJson(200, { id, object: 'webhook_endpoint', deleted: true });
+    // An endpoint as this route registers it for ORG_ID, still enabled.
+    return stripeJson(200, {
+      id,
+      object: 'webhook_endpoint',
+      url: `${APP_URL}/api/webhooks/stripe/${ORG_ID}`,
+      enabled_events: ['customer.subscription.deleted'],
+      status: 'enabled',
+    });
   }
   return stripeError(403, 'invalid_request_error', 'The provided key does not have the required permissions.');
 }

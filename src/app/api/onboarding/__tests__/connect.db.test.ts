@@ -88,6 +88,14 @@ const ACCEPTED = { acceptedLegalVersion: CURRENT_VERSION };
 const OLD_KEY = 'rk_live_old_revoked_key';
 
 /**
+ * The webhook endpoints in the Stripe account the keys belong to, by id, as
+ * Stripe returns them. seedConnectedOrg adds the org's we_existing, as this
+ * route registered it; a test changes it to model an endpoint someone
+ * disabled or edited since.
+ */
+const stripeEndpoints = new Map<string, { url: string; enabled_events: string[]; status: string }>();
+
+/**
  * Stripe's answers for a key created per the onboarding instructions
  * (customers:read, subscriptions:read, webhooks:write) on the same account as
  * the org's existing endpoint, we_existing: the key check's customer list, the
@@ -102,9 +110,9 @@ function onboardingScopedKey(req: FakeStripeRequest): Response {
   }
   if (req.path.startsWith('/v1/webhook_endpoints/')) {
     const id = req.path.slice('/v1/webhook_endpoints/'.length);
-    return req.method === 'DELETE'
-      ? stripeJson(200, { id, object: 'webhook_endpoint', deleted: true })
-      : stripeJson(200, { id, object: 'webhook_endpoint', status: 'enabled' });
+    if (req.method === 'DELETE') return stripeJson(200, { id, object: 'webhook_endpoint', deleted: true });
+    const endpoint = stripeEndpoints.get(id);
+    return endpoint ? stripeJson(200, { id, object: 'webhook_endpoint', ...endpoint }) : noSuchEndpoint();
   }
   return stripeError(403, 'invalid_request_error', `The provided key does not have the required permissions (${req.path}).`);
 }
@@ -166,6 +174,13 @@ async function seedConnectedOrg(opts: OrgOpts = {}): Promise<string> {
       stripeBusinessName,
     ],
   );
+  if (webhookRegistered) {
+    stripeEndpoints.set('we_existing', {
+      url: `${APP_URL}/api/webhooks/stripe/${rows[0].id}`,
+      enabled_events: ['customer.subscription.deleted'],
+      status: 'enabled',
+    });
+  }
   return rows[0].id;
 }
 
@@ -292,6 +307,7 @@ suite('POST /api/onboarding/connect against a real database', () => {
     vi.stubEnv('ENCRYPTION_KEY', ENCRYPTION_KEY);
     vi.stubEnv('NEXT_PUBLIC_APP_URL', APP_URL);
     await pool().query('TRUNCATE organizations CASCADE');
+    stripeEndpoints.clear();
     fakeStripeApi.reset(onboardingScopedKey);
     resetErrorReports();
     consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -473,6 +489,50 @@ suite('POST /api/onboarding/connect against a real database', () => {
         // remove it — and only once the new connection is saved.
         `DELETE /v1/webhook_endpoints/we_existing (${OLD_KEY})`,
       ]);
+    });
+
+    it.each([
+      ['disabled in Stripe', { status: 'disabled' }],
+      ['pointed at another URL', { url: 'https://old-domain.example/api/webhooks/stripe/elsewhere' }],
+      ["no longer sending customer.subscription.deleted", { enabled_events: ['invoice.paid'] }],
+    ])(
+      'registers a new endpoint when the one the key can see is %s, and removes the old one with the new key',
+      async (_label, change) => {
+        // Kept, it would deliver nothing (or deliver it elsewhere) while the
+        // dashboard said surveys were sending.
+        const orgId = await seedConnectedOrg();
+        Object.assign(stripeEndpoints.get('we_existing')!, change);
+
+        const res = await POST(connectRequest(orgId, { apiKey: NEW_KEY, ...ACCEPTED }));
+
+        expect(res.status).toBe(200);
+        expect(await connection(orgId)).toEqual({
+          apiKey: NEW_KEY,
+          webhookId: 'we_registered',
+          webhookSecret: 'whsec_registered',
+        });
+        expect(stripeCalls()).toEqual([
+          `GET /v1/customers (${NEW_KEY})`,
+          `GET /v1/webhook_endpoints/we_existing (${NEW_KEY})`,
+          `POST /v1/webhook_endpoints (${NEW_KEY})`,
+          `GET /v1/account (${NEW_KEY})`,
+          // Visible to the new key, so removed with it: the old key is often
+          // revoked by now, the usual reason to reconnect.
+          `DELETE /v1/webhook_endpoints/we_existing (${NEW_KEY})`,
+        ]);
+        expect(getErrorReportSnapshot().totalReported).toBe(0);
+      },
+    );
+
+    it("keeps an endpoint that sends every event type ('*')", async () => {
+      const orgId = await seedConnectedOrg();
+      stripeEndpoints.get('we_existing')!.enabled_events = ['*'];
+
+      const res = await POST(connectRequest(orgId, { apiKey: NEW_KEY, ...ACCEPTED }));
+
+      expect(res.status).toBe(200);
+      expect((await connection(orgId)).webhookId).toBe('we_existing');
+      expect(stripeCalls()).not.toContain(`POST /v1/webhook_endpoints (${NEW_KEY})`);
     });
 
     it('still connects when the old endpoint cannot be removed, with a warning rather than an alert', async () => {
