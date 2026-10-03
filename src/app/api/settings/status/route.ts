@@ -3,7 +3,7 @@ import { queryOne } from '@/lib/db';
 import { requireOrgId } from '@/lib/auth';
 
 export async function GET(req: NextRequest) {
-  const auth = requireOrgId(req);
+  const auth = await requireOrgId(req);
   if ('error' in auth) return auth.error;
   const { orgId } = auth;
 

@@ -143,7 +143,7 @@ function SendStatusLine({ status }: { status: SurveySendStatus }) {
 }
 
 export default async function DashboardPage() {
-  const orgId = getOrgIdFromCookieStore(cookies());
+  const orgId = await getOrgIdFromCookieStore(cookies());
   // Not /onboarding: onboarding now requires a session too (it no longer
   // creates one), so an unauthenticated visitor goes to /login, which carries
   // them back here once they've signed in or signed up.

@@ -17,7 +17,7 @@ export async function GET(req: NextRequest) {
   // fall back below, because a preview link on the wrong host is useless.
   const appUrl = publicAppUrl();
 
-  const authResult = requireOrgId(req);
+  const authResult = await requireOrgId(req);
   if ('error' in authResult) {
     // Not /onboarding: onboarding now requires a session too, so an
     // unauthenticated visitor bounces straight to where they can get one.

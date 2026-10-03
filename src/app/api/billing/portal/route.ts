@@ -49,7 +49,7 @@ export async function GET(req: NextRequest) {
   // The sibling api/billing/checkout still answers in JSON. That is a real
   // inconsistency and this is the side worth copying — checkout is reached the
   // same way and has the same problem.
-  const authResult = requireOrgId(req);
+  const authResult = await requireOrgId(req);
   if ('error' in authResult) {
     // Not /onboarding: onboarding now requires a session too, so an
     // unauthenticated visitor bounces straight to where they can get one.

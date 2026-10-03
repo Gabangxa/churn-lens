@@ -5,7 +5,7 @@ import { loadSurveyConfig, validateSurveyConfig, toStoredConfig } from '@/lib/su
 
 /** Org-scoped read of the current survey customization (display name, logo, extra reasons). */
 export async function GET(req: NextRequest) {
-  const authResult = requireOrgId(req);
+  const authResult = await requireOrgId(req);
   if ('error' in authResult) return authResult.error;
   const { orgId } = authResult;
 
@@ -18,7 +18,7 @@ export async function PUT(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
 
-  const authResult = requireOrgId(req);
+  const authResult = await requireOrgId(req);
   if ('error' in authResult) return authResult.error;
   const { orgId } = authResult;
 

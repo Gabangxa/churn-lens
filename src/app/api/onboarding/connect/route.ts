@@ -19,7 +19,7 @@ export async function POST(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
 
-  const authResult = requireOrgId(req);
+  const authResult = await requireOrgId(req);
   if ('error' in authResult) return authResult.error;
   const { orgId } = authResult;
 
@@ -27,7 +27,9 @@ export async function POST(req: NextRequest) {
   // Checked AFTER requireOrgId: this bucket is keyed by IP, and an anonymous
   // caller who fails the session check must not be able to spend a founder's
   // (or a shared-IP neighbor's) budget with requests that were always going
-  // to 401. requireOrgId itself does no I/O, so this costs nothing to defer.
+  // to 401. Deferring it costs an anonymous caller nothing either:
+  // requireOrgId turns away every cookie we did not sign before it does any
+  // I/O, and only a genuine session costs it one database read.
   const rl = checkRateLimit(`onboard:${clientIp(req)}`, 8, 600_000);
   if (!rl.allowed) {
     return NextResponse.json(
@@ -61,12 +63,12 @@ export async function POST(req: NextRequest) {
     );
 
     if (!existing) {
-      // The cookie's signature verified, but the org row it names is gone
-      // (deleted out from under an old session, or a session from a
-      // different environment/database). There is nothing to attach a key
-      // to, and creating a fresh org here would silently reintroduce the
-      // "connect without proving who you are" hole this route was rewritten
-      // to close — so this forces a real re-login instead.
+      // requireOrgId already refuses a session whose org row is gone, so this
+      // is only reachable if the org was deleted between that check and this
+      // read. There is nothing to attach a key to, and creating a fresh org
+      // here would silently reintroduce the "connect without proving who you
+      // are" hole this route was rewritten to close — so this forces a real
+      // re-login instead.
       const response = NextResponse.json(
         { error: 'Session is no longer valid. Please log in again.' },
         { status: 401 },

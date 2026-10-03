@@ -8,7 +8,7 @@ export async function DELETE(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
 
-  const auth = requireOrgId(req);
+  const auth = await requireOrgId(req);
   if ('error' in auth) return auth.error;
   const { orgId } = auth;
 

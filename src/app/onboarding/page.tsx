@@ -13,12 +13,12 @@ const ALLOWED_PLANS = new Set(['starter', 'growth']);
  * visitor is sent to log in (or sign up) first, carrying `plan` along so it
  * survives the round trip and lands them back here.
  */
-export default function OnboardingPage({
+export default async function OnboardingPage({
   searchParams,
 }: {
   searchParams: { plan?: string | string[] };
 }) {
-  const orgId = getOrgIdFromCookieStore(cookies());
+  const orgId = await getOrgIdFromCookieStore(cookies());
   if (!orgId) {
     // Next.js parses a repeated query param (?plan=a&plan=b) as string[], not
     // string — take the first value if so, rather than crashing on `plan ?

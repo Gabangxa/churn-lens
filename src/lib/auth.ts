@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createHmac, hkdfSync, timingSafeEqual } from 'crypto';
+// Node runtime only: pg needs fs/net/tls. Nothing in this app runs on the Edge
+// runtime (there is no middleware.ts and no route opts in), and next.config.js
+// stubs pg out of the Edge bundle — a session check added to Edge code would
+// fail there, not silently pass.
+import { queryOne } from '@/lib/db';
 
 const ORG_COOKIE = 'churnlens_org_id';
 
@@ -99,11 +104,31 @@ function decodeSession(cookieValue: string): SessionClaims | null {
   return { orgId, issuedAtMs: Number(issuedAtText) };
 }
 
-/** The orgId of a genuine, unexpired session cookie, or null. */
-function verifySession(cookieValue: string): string | null {
+/**
+ * The orgId of a session that still counts, or null.
+ *
+ * Signature and expiry are checked first and need no I/O, so a forged,
+ * malformed or expired cookie — everything an unauthenticated caller can
+ * send — is turned away without costing a database round trip. Only a cookie
+ * this server genuinely issued gets as far as the lookup.
+ *
+ * The lookup exists because a signature can only prove "we issued this", not
+ * "this should still work": an org purged after its 30-day deletion window
+ * leaves cookies behind that verify perfectly.
+ *
+ * A database error propagates (the route 500s) rather than reading as "not
+ * signed in": the outage should look like an outage, not like every founder
+ * being logged out at once.
+ */
+async function verifySession(cookieValue: string): Promise<string | null> {
   const claims = decodeSession(cookieValue);
   if (!claims) return null;
   if (Date.now() - claims.issuedAtMs >= SESSION_TTL_MS) return null;
+
+  const org = await queryOne<{ id: string }>('SELECT id FROM organizations WHERE id = $1', [
+    claims.orgId,
+  ]);
+  if (!org) return null;
   return claims.orgId;
 }
 
@@ -127,28 +152,48 @@ export function clearOrgCookie(response: NextResponse): NextResponse {
 
 /**
  * For use in server components. Pass the return value of `cookies()` from
- * `next/headers`. Returns the verified orgId or null if missing/invalid.
+ * `next/headers`. Resolves to the verified orgId, or null if the cookie is
+ * missing or no longer valid.
+ *
+ * Async because validity is partly a database question (see verifySession).
+ * Server components cannot set cookies, so unlike requireOrgId this cannot
+ * evict a dead one — callers redirect to /login, and the next sign-in
+ * overwrites it.
  *
  * Example:
  *   import { cookies } from 'next/headers';
- *   const orgId = getOrgIdFromCookieStore(cookies());
+ *   const orgId = await getOrgIdFromCookieStore(cookies());
  */
-export function getOrgIdFromCookieStore(
+export async function getOrgIdFromCookieStore(
   cookieStore: { get(name: string): { value: string } | undefined },
-): string | null {
+): Promise<string | null> {
   const raw = cookieStore.get(ORG_COOKIE)?.value;
   if (!raw) return null;
   return verifySession(raw);
 }
 
-export function requireOrgId(req: NextRequest): { orgId: string } | { error: NextResponse } {
+/**
+ * Route-handler session gate. Resolves to `{ orgId }`, or to `{ error }` — a
+ * 401 the caller should return as-is.
+ *
+ * A cookie that is present but no longer valid is also cleared on that 401.
+ * Expiry, and an org that has gone, leave browsers holding credentials that
+ * can never work again; evicting one the first time it is presented means the
+ * browser stops sending it, rather than carrying it for the rest of its
+ * Max-Age.
+ */
+export async function requireOrgId(
+  req: NextRequest,
+): Promise<{ orgId: string } | { error: NextResponse }> {
   const raw = req.cookies.get(ORG_COOKIE)?.value;
   if (!raw) {
     return { error: NextResponse.json({ error: 'Not authenticated.' }, { status: 401 }) };
   }
-  const orgId = verifySession(raw);
+  const orgId = await verifySession(raw);
   if (!orgId) {
-    return { error: NextResponse.json({ error: 'Invalid session.' }, { status: 401 }) };
+    return {
+      error: clearOrgCookie(NextResponse.json({ error: 'Invalid session.' }, { status: 401 })),
+    };
   }
   return { orgId };
 }

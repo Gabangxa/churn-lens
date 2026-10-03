@@ -19,7 +19,7 @@ export async function POST(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
 
-  const auth = requireOrgId(req);
+  const auth = await requireOrgId(req);
   if ('error' in auth) return auth.error;
   const { orgId } = auth;
 
@@ -40,7 +40,8 @@ export async function POST(req: NextRequest) {
   if (!org) {
     // No org left to disconnect from, but the session cookie still names one
     // that no longer exists — clear it rather than leaving the browser
-    // holding a dead credential.
+    // holding a dead credential. (requireOrgId already refuses a session for
+    // a missing org, so only a delete racing this request lands here.)
     const response = NextResponse.json({ error: 'Organization not found.' }, { status: 404 });
     return clearOrgCookie(response);
   }
