@@ -1,6 +1,7 @@
 import Stripe from 'stripe';
 import { execute } from '@/lib/db';
 import { normalizeBusinessName } from '@/lib/survey-config';
+import { reportError } from '@/lib/report-error';
 
 // The lookup is garnish on a request whose job is something else (sending the
 // survey, saving a key). Bounded well under Stripe's webhook timeout and not
@@ -62,7 +63,9 @@ export async function cacheStripeBusinessName(orgId: string, name: string): Prom
     await execute('UPDATE organizations SET stripe_business_name = $1 WHERE id = $2', [name, orgId]);
     return true;
   } catch (err) {
-    console.error(`Caching the Stripe business name failed for org ${orgId}:`, err);
+    // A database write failing, not Stripe saying no (fetchStripeBusinessName
+    // owns those, as warnings): the caller falls back to the generic copy.
+    reportError('stripe.business-name', err, { orgId, step: 'cache' });
     return false;
   }
 }

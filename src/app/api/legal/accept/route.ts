@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { queryOne } from '@/lib/db';
 import { assertSameOrigin, requireOrgId, clearOrgCookie } from '@/lib/auth';
 import { LEGAL_DOCS_VERSION } from '@/lib/legal-version';
+import { reportError } from '@/lib/report-error';
 
 /**
  * Records the signed-in org's acceptance of the current Terms of Service and
@@ -82,7 +83,9 @@ export async function POST(req: NextRequest) {
       acceptedAt: new Date(org.legal_accepted_at).toISOString(),
     });
   } catch (err) {
-    console.error(`Recording legal acceptance failed for org ${orgId}:`, err);
+    // The version was already validated, so this is the database failing to
+    // record a founder's agreement.
+    reportError('legal.accept', err, { orgId });
     return NextResponse.json({ error: 'Internal server error.' }, { status: 500 });
   }
 }

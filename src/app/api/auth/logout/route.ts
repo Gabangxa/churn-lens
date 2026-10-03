@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { assertSameOrigin, clearOrgCookie, requireOrgId, revokeAllSessions } from '@/lib/auth';
 import { redirectUrl } from '@/lib/app-url';
+import { reportError } from '@/lib/report-error';
 
 /**
  * Log out: end the org's sessions on every device, clear this browser's
@@ -26,15 +27,24 @@ export async function POST(req: NextRequest) {
   // Only a session that still counts may sign the org out everywhere. An
   // expired, revoked or forged cookie is just cleared from this browser below:
   // a stale credential must not double as a way to end everyone else's.
+  //
+  // orgId is known only once the session check has passed; a failure of the
+  // check itself is reported without it.
+  let orgId: string | undefined;
   try {
     const auth = await requireOrgId(req);
-    if ('orgId' in auth) await revokeAllSessions(auth.orgId);
+    if ('orgId' in auth) {
+      orgId = auth.orgId;
+      await revokeAllSessions(orgId);
+    }
   } catch (err) {
     // This browser is still signed out — clearing its cookie needs no
     // database. What failed is ending the org's other sessions, and the
     // founder has to hear that rather than land on the home page as if it
     // had worked: they may be logging out precisely because of another device.
-    console.error('Logout could not revoke the org’s sessions server-side:', err);
+    // Reported as well as answered: the founder is told, but a database that
+    // cannot take this write is everyone's problem, not just theirs.
+    reportError('auth.logout', err, { orgId });
     const response = NextResponse.json(
       {
         error:

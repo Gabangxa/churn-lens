@@ -4,6 +4,7 @@ import { assertSameOrigin, requireOrgId } from '@/lib/auth';
 import { publicAppUrl } from '@/lib/app-url';
 import { getPolar } from '@/lib/polar';
 import { isPlan, type Plan } from '@/lib/plan';
+import { reportError } from '@/lib/report-error';
 
 /**
  * Start a Polar checkout for the signed-in org and redirect the founder to it.
@@ -73,7 +74,9 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.redirect(checkout.url, { status: 303 });
   } catch (err) {
-    console.error(`Polar checkout creation failed for org ${orgId}:`, err);
+    // A founder trying to pay cannot. reportError redacts the prefilled owner
+    // email if Polar's error echoes it back.
+    reportError('billing.checkout', err, { orgId, plan });
     return NextResponse.json(
       { error: 'Could not start checkout. Please try again.' },
       { status: 502 },

@@ -105,7 +105,9 @@ export async function POST(req: NextRequest) {
     try {
       await revokeAllSessions(orgId);
     } catch (err) {
-      console.error(`Session revocation failed during account deletion for org ${orgId}:`, err);
+      // Sessions on other devices keep showing this org's customers' survey
+      // answers through the grace window the founder asked to cut short.
+      reportError('settings.account-delete', err, { orgId, step: 'session_revoke' });
       sessionsRevokeFailed = true;
     }
   }

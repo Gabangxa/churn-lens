@@ -3,6 +3,7 @@ import { validateEvent, WebhookVerificationError } from '@polar-sh/sdk/webhooks'
 import { execute, queryOne } from '@/lib/db';
 import { getPolarWebhookSecret } from '@/lib/polar';
 import { entitlementForStatus, planForProduct } from '@/lib/plan';
+import { reportError } from '@/lib/report-error';
 
 /**
  * Polar billing webhook — ChurnLens's own subscriptions.
@@ -56,12 +57,14 @@ export async function POST(req: Request) {
     event = validateEvent(rawBody, headers, getPolarWebhookSecret());
   } catch (err) {
     if (err instanceof WebhookVerificationError) {
+      // Logged, never reported: anyone can POST a bad signature here.
       console.error('Polar webhook signature verification failed');
       return NextResponse.json({ error: 'Invalid signature' }, { status: 403 });
     }
     // A missing secret is a misconfiguration, not a bad request: 500 so it is
-    // visible and so Polar retries once the environment is fixed.
-    console.error('Polar webhook could not be validated:', err);
+    // visible and so Polar retries once the environment is fixed. Reported:
+    // until it is fixed no subscription change reaches any org's plan.
+    reportError('webhook.polar', err, { step: 'validate' });
     return NextResponse.json({ error: 'Webhook not configured' }, { status: 500 });
   }
 
@@ -84,8 +87,10 @@ export async function POST(req: Request) {
     // A subscription created outside our checkout flow (dashboard, import) has
     // no external id and cannot be attributed. Acknowledge so Polar stops
     // retrying, but say so loudly — it means someone was charged and got nothing.
-    console.error(
-      `Polar ${event.type} for subscription ${subscription.id} has no customer external_id — cannot map it to an organization.`,
+    reportError(
+      'webhook.polar',
+      new Error(`Polar ${event.type} has no customer external_id — cannot map it to an organization.`),
+      { subscriptionId: subscription.id, step: 'no_external_id' },
     );
     return NextResponse.json({ received: true, skipped: 'no_external_id' });
   }
@@ -104,9 +109,13 @@ export async function POST(req: Request) {
       // Refuse to guess a tier. Granting the wrong one either gives away the
       // more expensive plan or withholds what was paid for; both are worse than
       // leaving the plan untouched and alerting.
-      console.error(
-        `Polar ${event.type}: product ${subscription.productId} maps to no known plan — ` +
-          `check POLAR_PRODUCT_STARTER / POLAR_PRODUCT_GROWTH. Org ${orgId} left unchanged.`,
+      reportError(
+        'webhook.polar',
+        new Error(
+          `Polar ${event.type}: product maps to no known plan — check POLAR_PRODUCT_STARTER / ` +
+            'POLAR_PRODUCT_GROWTH. The org was left unchanged.',
+        ),
+        { orgId, productId: subscription.productId, subscriptionId: subscription.id, step: 'unknown_product' },
       );
       return NextResponse.json({ received: true, skipped: 'unknown_product' });
     }

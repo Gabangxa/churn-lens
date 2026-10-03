@@ -385,6 +385,29 @@ describe('assertSameOrigin — misconfiguration and header precedence', () => {
     expect(result!.status).toBe(403);
   });
 
+  it('reports a production deploy with no usable app URL once per process, not once per request', async () => {
+    // Every same-origin POST 403s until someone fixes the variable, so it must
+    // reach a human — but as one report, not one per blocked request. The
+    // once-flag is module state, so a fresh copy of the module is loaded.
+    vi.resetModules();
+    const fresh = await import('../auth');
+    const { getErrorReportSnapshot, resetErrorReports } = await import('@/lib/report-error');
+    resetErrorReports();
+    delete process.env.NEXT_PUBLIC_APP_URL;
+    const req = () =>
+      new NextRequest('https://app.churnlens.com/api/whatever', {
+        headers: { origin: 'https://app.churnlens.com' },
+      });
+
+    fresh.assertSameOrigin(req());
+    fresh.assertSameOrigin(req());
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({ context: 'auth.same-origin', name: 'Error' }),
+    ]);
+    expect(getErrorReportSnapshot().recent[0].message).toContain('NEXT_PUBLIC_APP_URL is missing or invalid in production');
+  });
+
   it('fails closed when NEXT_PUBLIC_APP_URL is not a parseable URL', () => {
     process.env.NEXT_PUBLIC_APP_URL = 'not a url';
     const result = assertSameOrigin(

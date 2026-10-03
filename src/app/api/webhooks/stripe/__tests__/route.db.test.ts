@@ -75,6 +75,9 @@ import { POST } from '../[orgId]/route';
 import SurveyPage from '@/app/survey/[token]/page';
 import { encryptApiKey } from '@/lib/crypto';
 import { FREE_TIER_MONTHLY_SURVEYS } from '@/lib/plan';
+// Real: what reaches the operator is asserted on what reportError recorded.
+// ALERT_EMAIL is pinned empty for every suite (vitest.config.ts).
+import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 import { countFreeTierSurveys, surveySendStatus } from '@/lib/survey-status';
 import {
   fakeStripeApi,
@@ -576,6 +579,20 @@ suite('Stripe webhook against a real database', () => {
       expect(logged).toContain(orgId);
       expect(logged).not.toContain(API_KEY);
     });
+
+    it("does not page the operator — the key is the founder's to fix, and their dashboard says so", async () => {
+      resetErrorReports();
+      const orgId = await seedOrg();
+      fakeStripeApi.respond = revokedKey;
+
+      await deliver(orgId, cancelledSubscription());
+
+      expect(getErrorReportSnapshot().totalReported).toBe(0);
+      // Still in the logs, as a warning rather than an error.
+      const warned = consoleWarnSpy.mock.calls.map((call) => call.map(String).join(' ')).join('\n');
+      expect(warned).toContain(orgId);
+      expect(warned).toContain('reconnects Stripe');
+    });
   });
 
   describe('when Stripe fails transiently', () => {
@@ -601,6 +618,24 @@ suite('Stripe webhook against a real database', () => {
       expect(await keyInvalidAt(orgId)).toBeNull();
       expect(await surveyRows(orgId)).toEqual([]);
       expect(sentEmails).toEqual([]);
+    });
+
+    it('reports the failed lookup, with the org and subscription, and never the key', async () => {
+      resetErrorReports();
+      const orgId = await seedOrg();
+      const subscription = cancelledSubscription();
+      fakeStripeApi.respond = () => stripeError(503, 'api_error', 'Service unavailable.');
+
+      await deliver(orgId, subscription);
+
+      const { recent } = getErrorReportSnapshot();
+      expect(recent).toEqual([
+        expect.objectContaining({
+          context: 'webhook.stripe',
+          meta: { orgId, subscriptionId: subscription.id, step: 'customer_lookup' },
+        }),
+      ]);
+      expect(JSON.stringify(recent)).not.toContain(API_KEY);
     });
 
     it('surveys the customer on the retry once Stripe recovers', async () => {

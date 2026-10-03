@@ -8,6 +8,7 @@ import { loadSurveyPresentation } from '@/lib/survey-config';
 import { cacheStripeBusinessName, fetchStripeBusinessName } from '@/lib/stripe-business-name';
 import { FREE_TIER_MONTHLY_SURVEYS } from '@/lib/plan';
 import { countFreeTierSurveys } from '@/lib/survey-status';
+import { reportError } from '@/lib/report-error';
 
 // Stripe Customer Portal cancellation reasons → our survey categories.
 // When the portal already asked, we record the answer directly and skip the
@@ -166,11 +167,22 @@ export async function POST(
   // (the portal-feedback insert and the email-claim insert both write real,
   // permanent rows) — so a not-yet-configured deploy burns no claim attempt
   // and records nothing at all. 200 so Stripe does not retry-storm the event.
+  //
+  // Reported, not just logged: while this holds every cancellation for every
+  // org is dropped, and only the operator can fix it. It runs before the
+  // signature check, so anyone holding an org's webhook URL can reach it —
+  // but only on a deploy that is already misconfigured, and the message
+  // carries no ids, so all of it is one fingerprint: at most one alert email
+  // an hour, whoever is calling.
   if (!legalFooterReady()) {
-    console.error(
-      `Survey email blocked for org ${org.id}: src/lib/legal.ts still has unfilled ` +
-        'placeholders required for the CAN-SPAM footer (LEGAL.entity / LEGAL.postalAddress). ' +
-        'Fill them in before this deploys real traffic.',
+    reportError(
+      'webhook.stripe',
+      new Error(
+        'Survey email blocked: src/lib/legal.ts still has unfilled placeholders required for ' +
+          'the CAN-SPAM footer (LEGAL.entity / LEGAL.postalAddress). Fill them in before this ' +
+          'deploys real traffic.',
+      ),
+      { orgId: org.id, step: 'legal_footer' },
     );
     return NextResponse.json({ received: true, skipped: 'legal_footer_unfilled' });
   }
@@ -182,6 +194,8 @@ export async function POST(
     // Verify using the org's own webhook signing secret (not the platform-level secret).
     event = Stripe.webhooks.constructEvent(rawBody, signature, webhookSecret);
   } catch (err) {
+    // Logged, never reported: anyone who knows an org's webhook URL can send
+    // a bad signature, so an alert here would be an alert anyone can trigger.
     console.error(`Webhook signature verification failed for org ${orgId}:`, err);
     return NextResponse.json({ error: 'Invalid signature' }, { status: 400 });
   }
@@ -281,7 +295,13 @@ export async function POST(
          WHERE id = $1 AND stripe_api_key_enc = $2 AND stripe_key_invalid_at IS NULL`,
         [org.id, org.stripe_api_key_enc],
       );
-      console.error(
+      //
+      // A warning, not an operator alert: the founder revoked or restricted
+      // their own key, only they can fix it, and the flag above puts it on
+      // their dashboard with a reconnect link. Alerting would page the
+      // operator once per affected org per hour about something they cannot
+      // act on, out of the same hourly budget as real failures.
+      console.warn(
         `Stripe rejected the stored API key for org ${org.id} ` +
           `(${err.type}, HTTP ${err.statusCode ?? 'unknown'}) — skipping subscription ` +
           `${subscription.id}; surveys are stopped until the founder reconnects Stripe.`,
@@ -291,10 +311,15 @@ export async function POST(
 
     // Rate limit, Stripe 5xx, network failure: transient. Nothing has been
     // recorded yet, so a 5xx lets Stripe's retry start this event cleanly.
-    console.error(
-      `Stripe customer lookup failed for org ${org.id}, subscription ${subscription.id}:`,
-      err,
-    );
+    // Reported all the same: Stripe's retries are what recover a blip, but a
+    // lookup that keeps failing (egress broken, Stripe down) is every survey
+    // on the platform stalled, and the fingerprint throttle keeps a blip to
+    // one email.
+    reportError('webhook.stripe', err, {
+      orgId: org.id,
+      subscriptionId: subscription.id,
+      step: 'customer_lookup',
+    });
     return NextResponse.json({ error: 'Stripe customer lookup failed' }, { status: 502 });
   }
 
@@ -311,7 +336,9 @@ export async function POST(
         [org.id, org.stripe_api_key_enc],
       );
     } catch (err) {
-      console.error(`Clearing stripe_key_invalid_at failed for org ${org.id}:`, err);
+      // The founder's dashboard keeps telling them to reconnect a key that
+      // works until a later delivery clears it.
+      reportError('webhook.stripe', err, { orgId: org.id, step: 'clear_key_invalid' });
     }
   }
 
@@ -478,9 +505,13 @@ export async function POST(
         // customer's personal information and this log ships to the platform's
         // aggregator; the subscription id identifies the row for an operator
         // without putting a data subject's email in third-party retention.
-        console.error(
-          `Survey email for org ${org.id}, subscription ${subscription.id} exhausted ` +
-            `${MAX_SURVEY_EMAIL_ATTEMPTS} send attempts — giving up.`,
+        // The ids ride in meta, not the message, so every exhausted send
+        // groups under one fingerprint instead of alerting once per
+        // subscription.
+        reportError(
+          'webhook.stripe.send',
+          new Error(`Survey email exhausted ${MAX_SURVEY_EMAIL_ATTEMPTS} send attempts — giving up.`),
+          { orgId: org.id, subscriptionId: subscription.id, step: 'exhausted' },
         );
         return NextResponse.json({ received: true, skipped: 'email_send_exhausted' });
       }
@@ -529,21 +560,21 @@ export async function POST(
       // fires anyway, the attempt was already claimed by the INSERT above (same
       // as any other send failure below), so treat it the same way: log
       // clearly which file to fix, and 200 so Stripe does not retry-storm it.
-      console.error(
-        `Survey email blocked for org ${org.id}, subscription ${subscription.id}: ` +
-          'src/lib/legal.ts still has unfilled placeholders required for the CAN-SPAM footer ' +
-          '(LEGAL.entity / LEGAL.postalAddress). Fill them in before this deploys real traffic.',
-      );
+      // The error's own message names src/lib/legal.ts.
+      reportError('webhook.stripe', err, {
+        orgId: org.id,
+        subscriptionId: subscription.id,
+        step: 'legal_footer',
+      });
       return NextResponse.json({ received: true, skipped: 'legal_footer_unfilled' });
     }
 
     // The attempt was already counted by the claim, so there is no bookkeeping
     // to do here — which is the point: a send that dies without returning at all
     // (provider stall, platform timeout) has consumed its attempt just the same.
-    console.error(
-      `Survey email send failed for org ${org.id}, subscription ${subscription.id}:`,
-      err,
-    );
+    // Its own context so a Resend problem reads as exactly that in the alert.
+    // A Resend error can quote the recipient; reportError redacts it.
+    reportError('webhook.stripe.send', err, { orgId: org.id, subscriptionId: subscription.id });
 
     // 5xx on purpose: Stripe retries 5xx with backoff, and the stranded-send
     // path above turns that retry into a real second attempt.
@@ -560,11 +591,13 @@ export async function POST(
   } catch (err) {
     // The email is already out. A 5xx here would make Stripe retry and send a
     // second copy to someone who just cancelled, so we accept the bookkeeping
-    // gap and log it loudly instead.
-    console.error(
-      `Survey email sent but marking survey_email_sent_at failed for subscription ${subscription.id}:`,
-      err,
-    );
+    // gap and report it instead: the row now reads as never emailed, so a
+    // later redelivery could mail the customer a second time.
+    reportError('webhook.stripe', err, {
+      orgId: org.id,
+      subscriptionId: subscription.id,
+      step: 'mark_sent',
+    });
   }
 
   return NextResponse.json({ received: true });

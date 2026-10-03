@@ -27,6 +27,9 @@ vi.mock('@/lib/polar', () => ({
 }));
 
 import { POST } from '../route';
+// Real: these tests assert on what the route reported. ALERT_EMAIL is pinned
+// empty for every suite (vitest.config.ts), so nothing is emailed.
+import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 
 const ORG_ID = '11111111-1111-1111-1111-111111111111';
 const STARTER = 'prod_starter';
@@ -264,5 +267,71 @@ describe('POST /api/webhooks/polar — out-of-order delivery', () => {
     expect(params[1]).toBe('cus_1');
     expect(params[2]).toBe('sub_1');
     expect(params[4]).toBe(ORG_ID);
+  });
+});
+
+describe('POST /api/webhooks/polar — error reporting', () => {
+  beforeEach(() => {
+    resetErrorReports();
+  });
+
+  it('does not report a bad signature — anyone can send one', async () => {
+    validateEventMock.mockImplementation(() => {
+      throw new FakeVerificationError('bad signature');
+    });
+
+    await POST(request());
+
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+  });
+
+  it('reports a webhook that cannot be validated at all — no plan changes land until it is fixed', async () => {
+    validateEventMock.mockImplementation(() => {
+      throw new Error('POLAR_WEBHOOK_SECRET is not set');
+    });
+
+    await POST(request());
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'webhook.polar',
+        message: 'POLAR_WEBHOOK_SECRET is not set',
+        meta: { step: 'validate' },
+      }),
+    ]);
+  });
+
+  it('reports a subscription it cannot attribute — someone may have paid for nothing', async () => {
+    emit('subscription.active', { customer: { id: 'cus_1', externalId: null } });
+
+    await POST(request());
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'webhook.polar',
+        meta: { subscriptionId: 'sub_1', step: 'no_external_id' },
+      }),
+    ]);
+  });
+
+  it('reports a product that maps to no plan, with the ids needed to fix the mapping', async () => {
+    emit('subscription.active', { productId: 'prod_unknown' });
+
+    await POST(request());
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'webhook.polar',
+        meta: { orgId: ORG_ID, productId: 'prod_unknown', subscriptionId: 'sub_1', step: 'unknown_product' },
+      }),
+    ]);
+  });
+
+  it('reports nothing for an ordinary grant', async () => {
+    emit('subscription.active');
+
+    await POST(request());
+
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
   });
 });

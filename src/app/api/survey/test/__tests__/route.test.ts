@@ -36,6 +36,9 @@ vi.mock('@/lib/survey-config', () => ({
 }));
 
 import { POST } from '../route';
+// Real: these tests assert on what the route reported. ALERT_EMAIL is pinned
+// empty for every suite (vitest.config.ts), so nothing is emailed.
+import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 
 const ORG_ID = 'org-abc';
 const APP_URL = 'https://app.churnlens.com';
@@ -121,5 +124,54 @@ describe('POST /api/survey/test — guards', () => {
     expect(sendSurveyEmailMock).toHaveBeenCalledWith(
       expect.objectContaining({ displayName: 'Acme From Stripe' }),
     );
+  });
+});
+
+describe('POST /api/survey/test — error reporting', () => {
+  beforeEach(() => {
+    resetErrorReports();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("reports a failed test send with the org id, never the founder's address", async () => {
+    // The same send path real cancellations take, so a failure here is an
+    // early warning for theirs. Resend errors can quote the recipient.
+    sendSurveyEmailMock.mockRejectedValue(new Error('Invalid to field: founder@example.com'));
+
+    const res = await POST(testSurveyRequest());
+
+    expect(res.status).toBe(500);
+    const { recent } = getErrorReportSnapshot();
+    expect(recent).toEqual([
+      expect.objectContaining({ context: 'survey.test', meta: { orgId: ORG_ID } }),
+    ]);
+    expect(JSON.stringify(recent)).not.toContain('founder@example.com');
+  });
+
+  it('reports a sent test whose survey_email_sent_at stamp failed, and still answers success', async () => {
+    executeMock.mockResolvedValueOnce(1); // INSERT
+    executeMock.mockRejectedValueOnce(new Error('connection reset')); // stamp
+
+    const res = await POST(testSurveyRequest());
+
+    expect(res.status).toBe(200);
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'survey.test',
+        meta: expect.objectContaining({ orgId: ORG_ID, step: 'mark_sent' }),
+      }),
+    ]);
+  });
+
+  it('does not report a rate-limited test send', async () => {
+    checkRateLimitMock.mockReturnValue({ allowed: false, retryAfterSec: 60 });
+
+    await POST(testSurveyRequest());
+
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
   });
 });

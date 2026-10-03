@@ -1,4 +1,5 @@
 import { Pool, PoolClient } from 'pg';
+import { reportError } from '@/lib/report-error';
 
 // TLS: verify the server certificate when a CA is provided (DATABASE_CA_CERT).
 // Without it we fall back to an unverified connection — a MITM risk — so we warn
@@ -38,8 +39,10 @@ function getPool(): Pool {
     connectionString: dbUrl,
     ssl: sslConfig(dbUrl),
   });
+  // An idle connection dying (database restart, failover, network drop).
+  // node-postgres requires this listener or the error crashes the process.
   pool.on('error', (err) => {
-    console.error('Unexpected PostgreSQL pool error:', err);
+    reportError('db.pool', err);
   });
   return pool;
 }
@@ -102,7 +105,9 @@ export async function withTransaction<T>(
     try {
       await client.query('ROLLBACK');
     } catch (rollbackErr) {
-      console.error('Transaction rollback failed:', rollbackErr);
+      // The caller still gets the original error below; this one is only
+      // ever seen here, and it usually means the connection itself is dead.
+      reportError('db.transaction', rollbackErr, { step: 'rollback' });
     }
     throw err;
   } finally {

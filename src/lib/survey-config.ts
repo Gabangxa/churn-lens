@@ -14,6 +14,7 @@
  * `{ displayName: null, logoUrl: null, customReasons: [] }` — today's behavior.
  */
 import { queryOne } from '@/lib/db';
+import { reportError } from '@/lib/report-error';
 
 // Single source of truth for the built-in reasons, shared with the survey
 // page so rendering and validation (dedupe-against-built-ins) can never drift.
@@ -149,7 +150,10 @@ export async function loadSurveyConfig(orgId: string): Promise<SurveyConfig> {
     if (!row) return { ...DEFAULT_CONFIG, customReasons: [] };
     return normalizeStoredConfig(row.survey_config);
   } catch (err) {
-    console.error(`Failed to load survey_config for org ${orgId}:`, err);
+    // Callers degrade to the zero-config copy, so nothing visibly breaks —
+    // which is why it is reported: surveys silently lose the org's own name,
+    // logo and reasons until the database answers again.
+    reportError('survey-config.load', err, { orgId });
     return { ...DEFAULT_CONFIG, customReasons: [] };
   }
 }
@@ -189,7 +193,9 @@ export async function loadSurveyPresentation(orgId: string): Promise<SurveyPrese
       businessName: config.displayName ?? normalizeBusinessName(row.stripe_business_name),
     };
   } catch (err) {
-    console.error(`Failed to load survey presentation for org ${orgId}:`, err);
+    // As loadSurveyConfig: degraded rather than failed, so reported — here the
+    // survey also stops naming the business that is asking (POPIA s18).
+    reportError('survey-config.load', err, { orgId });
     return { ...DEFAULT_CONFIG, customReasons: [], businessName: null };
   }
 }

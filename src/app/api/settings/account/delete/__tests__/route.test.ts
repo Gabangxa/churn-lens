@@ -257,6 +257,7 @@ describe('POST /api/settings/account/delete — teardown order and cookie', () =
   });
 
   it('does not fail the request when signing out everywhere fails — the deletion already stands — but reports it', async () => {
+    resetErrorReports();
     revokeAllSessionsMock.mockRejectedValue(new Error('db down'));
 
     const res = await POST(deleteRequest());
@@ -266,10 +267,15 @@ describe('POST /api/settings/account/delete — teardown order and cookie', () =
     expect(body).toMatchObject({ ok: true, sessions: 'revoke_failed' });
     // This browser is still signed out; only the other devices were missed.
     expect(clearOrgCookieMock).toHaveBeenCalledTimes(1);
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining(ORG_ID),
-      expect.any(Error),
-    );
+    // Reported through reportError (which also writes the log line), keyed
+    // by org id so the missed sessions can be ended by hand.
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'settings.account-delete',
+        message: 'db down',
+        meta: { orgId: ORG_ID, step: 'session_revoke' },
+      }),
+    ]);
   });
 
   it('omits `sessions` from the response when signing out everywhere succeeds', async () => {

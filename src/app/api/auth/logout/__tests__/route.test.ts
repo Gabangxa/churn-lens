@@ -15,6 +15,9 @@ vi.mock('@/lib/db', () => ({
 import * as route from '../route';
 import { POST } from '../route';
 import { setOrgCookie } from '@/lib/auth';
+// Real: these tests assert on what the route reported. ALERT_EMAIL is pinned
+// empty for every suite (vitest.config.ts), so nothing is emailed.
+import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 
 const ORIGINAL_APP_URL = process.env.NEXT_PUBLIC_APP_URL;
 
@@ -128,6 +131,7 @@ describe('POST /api/auth/logout — when sessions cannot be revoked server-side'
   });
 
   it('still signs this browser out, but says the other devices were not — no cheerful redirect', async () => {
+    resetErrorReports();
     executeMock.mockRejectedValue(new Error('connection terminated'));
 
     const res = await POST(logoutWithSession());
@@ -140,14 +144,27 @@ describe('POST /api/auth/logout — when sessions cannot be revoked server-side'
     // This browser's cookie goes regardless — that part never needed the DB.
     expect(res.headers.get('set-cookie') ?? '').toMatch(/Max-Age=0|Expires=Thu, 01 Jan 1970/);
     expect(console.error).toHaveBeenCalled();
+    // Reported with the org whose other sessions are still live.
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'auth.logout',
+        message: 'connection terminated',
+        meta: { orgId: '11111111-1111-4111-8111-111111111111' },
+      }),
+    ]);
   });
 
   it('treats a failed session lookup the same way — it cannot tell whether anything was revoked', async () => {
+    resetErrorReports();
     queryOneMock.mockRejectedValue(new Error('connection refused'));
 
     const res = await POST(logoutWithSession());
 
     expect(res.status).toBe(500);
+    // No org id: the session was never confirmed, so none is claimed.
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({ context: 'auth.logout', message: 'connection refused', meta: {} }),
+    ]);
     expect(executeMock).not.toHaveBeenCalled();
     expect(res.headers.get('set-cookie') ?? '').toMatch(/Max-Age=0|Expires=Thu, 01 Jan 1970/);
   });

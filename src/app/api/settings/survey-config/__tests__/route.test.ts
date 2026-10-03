@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { NextRequest, NextResponse } from 'next/server';
 
 const requireOrgIdMock = vi.fn();
@@ -16,6 +16,9 @@ vi.mock('@/lib/db', () => ({
 }));
 
 import { GET, PUT } from '../route';
+// Real: these tests assert on what the route reported. ALERT_EMAIL is pinned
+// empty for every suite (vitest.config.ts), so nothing is emailed.
+import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 
 const ORG_ID = 'org-abc';
 
@@ -201,5 +204,45 @@ describe('PUT /api/settings/survey-config', () => {
     const body = await res.json();
     expect(body.error).toMatch(/Failed to save/i);
     consoleErrorSpy.mockRestore();
+  });
+});
+
+describe('/api/settings/survey-config — error reporting', () => {
+  beforeEach(() => {
+    resetErrorReports();
+    authOk();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('reports a failed save with the org id — validation passed, so it is the database', async () => {
+    executeMock.mockRejectedValueOnce(new Error('connection reset'));
+
+    await PUT(putRequest({ displayName: 'Acme' }));
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({ context: 'settings.survey-config', message: 'connection reset', meta: { orgId: ORG_ID } }),
+    ]);
+  });
+
+  it('does not report a save the founder got wrong — that is a 400 with a field', async () => {
+    const res = await PUT(putRequest({ displayName: 'x'.repeat(500) }));
+
+    expect(res.status).toBe(400);
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+  });
+
+  it('reports a config read that fell back to the defaults, since nothing else would show it', async () => {
+    queryOneMock.mockRejectedValueOnce(new Error('connection terminated'));
+
+    const res = await GET(getRequest());
+
+    expect(res.status).toBe(200);
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({ context: 'survey-config.load', message: 'connection terminated', meta: { orgId: ORG_ID } }),
+    ]);
   });
 });

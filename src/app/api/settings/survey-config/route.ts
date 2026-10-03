@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { execute } from '@/lib/db';
 import { assertSameOrigin, requireOrgId } from '@/lib/auth';
 import { loadSurveyConfig, validateSurveyConfig, toStoredConfig } from '@/lib/survey-config';
+import { reportError } from '@/lib/report-error';
 
 /** Org-scoped read of the current survey customization (display name, logo, extra reasons). */
 export async function GET(req: NextRequest) {
@@ -43,7 +44,8 @@ export async function PUT(req: NextRequest) {
       orgId,
     ]);
   } catch (err) {
-    console.error(`Failed to save survey_config for org ${orgId}:`, err);
+    // Validation already passed, so this is the database, not the founder.
+    reportError('settings.survey-config', err, { orgId });
     return NextResponse.json({ error: 'Failed to save survey configuration.' }, { status: 500 });
   }
 

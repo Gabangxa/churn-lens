@@ -6,6 +6,7 @@ import { assertSameOrigin, requireOrgId } from '@/lib/auth';
 import { checkRateLimit } from '@/lib/ratelimit';
 import { sendSurveyEmail } from '@/lib/survey-email';
 import { loadSurveyPresentation } from '@/lib/survey-config';
+import { reportError } from '@/lib/report-error';
 
 /**
  * Send the founder a test exit survey at their own email — exercises the
@@ -93,13 +94,18 @@ export async function POST(req: NextRequest) {
         [testSubscriptionId, orgId],
       );
     } catch (bookkeepingErr) {
-      console.error(
-        `Test survey sent but marking survey_email_sent_at failed for ${testSubscriptionId}:`,
-        bookkeepingErr,
-      );
+      reportError('survey.test', bookkeepingErr, {
+        orgId,
+        subscriptionId: testSubscriptionId,
+        step: 'mark_sent',
+      });
     }
   } catch (err) {
-    console.error('Test survey send failed:', err);
+    // The same send path real cancellations use (Resend, the legal footer
+    // guard, the survey_responses insert), so a founder's test failing is an
+    // early sign the real ones will too. The founder's own address can appear
+    // in a Resend error; reportError redacts it.
+    reportError('survey.test', err, { orgId });
     return NextResponse.json({ error: 'Failed to send test survey.' }, { status: 500 });
   }
 

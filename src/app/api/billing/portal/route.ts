@@ -5,6 +5,7 @@ import { assertSameOrigin, requireOrgId } from '@/lib/auth';
 import { publicAppUrl, redirectUrl } from '@/lib/app-url';
 import { getPolar, isPolarConfigured } from '@/lib/polar';
 import { checkRateLimit } from '@/lib/ratelimit';
+import { reportError } from '@/lib/report-error';
 
 /**
  * Send the signed-in founder into Polar's hosted customer portal.
@@ -162,6 +163,20 @@ export async function GET(req: NextRequest) {
       });
     }
 
+    // Anything else is a real failure: a founder who asked to manage (or
+    // cancel) a paid plan cannot reach the portal. Reported with the same
+    // redaction as the log line above — a PolarError's own message and body
+    // echo Polar's response, so only its status and field paths go out.
+    reportError(
+      'billing.portal',
+      err instanceof PolarError
+        ? new Error(
+            `Polar customer session creation failed (status ${status})` +
+              (validationFields.length ? ` fields=${validationFields.join(',')}` : ''),
+          )
+        : err,
+      { orgId },
+    );
     return NextResponse.redirect(new URL('/settings?billing=error', appUrl), { status: 303 });
   }
 }

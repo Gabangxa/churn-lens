@@ -5,6 +5,7 @@ import { createHmac, hkdfSync, timingSafeEqual } from 'crypto';
 // stubs pg out of the Edge bundle — a session check added to Edge code would
 // fail there, not silently pass.
 import { execute, queryOne } from '@/lib/db';
+import { reportError } from '@/lib/report-error';
 
 const ORG_COOKIE = 'churnlens_org_id';
 
@@ -294,8 +295,14 @@ export function assertSameOrigin(req: NextRequest): NextResponse | null {
 
   if (allowedOrigins.size === 0 && process.env.NODE_ENV === 'production' && !warnedNoAllowedOriginsInProduction) {
     warnedNoAllowedOriginsInProduction = true;
-    console.error(
-      'assertSameOrigin: NEXT_PUBLIC_APP_URL is missing or invalid in production — every request that carries an Origin or Sec-Fetch-Site header will be rejected until it is set.',
+    // Reported: sign-in, connect, checkout and every settings change 403 for
+    // every founder until someone fixes the variable. Once per process, like
+    // the log line it replaces.
+    reportError(
+      'auth.same-origin',
+      new Error(
+        'assertSameOrigin: NEXT_PUBLIC_APP_URL is missing or invalid in production — every request that carries an Origin or Sec-Fetch-Site header will be rejected until it is set.',
+      ),
     );
   }
 
