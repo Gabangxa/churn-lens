@@ -67,8 +67,10 @@ async function requestAccountDeletion(req: NextRequest) {
   try {
     await disconnectStripe(orgId);
   } catch (err) {
-    // Until the purge retries it, this org's webhook can keep firing surveys
-    // for an account its founder asked to delete.
+    // No survey goes out meanwhile — the Stripe webhook skips any org with
+    // deletion_requested_at set ('deletion_pending'). What stays live until
+    // the purge retries is the stored key and the endpoint registered on the
+    // founder's Stripe account.
     reportError('settings.account-delete', err, { orgId, step: 'stripe_disconnect' });
     stripeDisconnectFailed = true;
   }

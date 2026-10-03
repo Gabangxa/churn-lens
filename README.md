@@ -41,9 +41,12 @@ ChurnLens fills the gap: exit interviews + AI theme synthesis at indie-founder p
 
 `/login` is both signup and login: posting an email to `/api/auth/request` creates
 an org and an owner user the first time it sees that address, then emails a
-magic link either way. `/api/auth/verify` is the *only* route that ever mints
-a session — it sends a founder with no Stripe key yet to `/onboarding`,
-everyone else to wherever they were headed (or `/dashboard`). `/api/onboarding/connect`
+magic link either way. Opening the emailed link (`GET /api/auth/verify?token=`)
+only forwards to `/login/confirm`, which shows the address the link was sent to
+and a Sign in button; that button's same-origin `POST /api/auth/verify` is the
+*only* request that ever mints a session. It sends a founder whose org has not
+finished connecting Stripe (no key, or a key but no registered webhook) to
+`/onboarding`, everyone else to wherever they were headed (or `/dashboard`). `/api/onboarding/connect`
 requires that session and only ever attaches a Stripe key to it; it can no
 longer create an org or accept an email on its own. It also refuses the key
 unless the request accepts the current Terms of Service and DPA
@@ -171,15 +174,15 @@ scheduler cannot race the cron spec.
 | Spec | Flow |
 |------|------|
 | `e2e/landing.spec.ts` | Marketing links: no anchor points at the session-gated `/onboarding`, pricing CTAs carry `?plan=`, header CTA goes to `/login` |
-| `e2e/auth.spec.ts` | Signup through the real form (email normalization, plan carried into `redirect_to`, no session yet), magic-link verification, replayed and expired links, signed-out redirects to `/login?next=…` |
+| `e2e/auth.spec.ts` | Signup through the real form (email normalization, plan carried into `redirect_to`, no session yet), magic-link verification, replayed and expired links, signed-out redirects to `/login?next=…`, the confirm step (opening a link signs nobody in; an attacker's link opened in a signed-in browser cannot switch its session), half-connected orgs landing on onboarding, a logout that cannot end other devices |
 | `e2e/csrf.spec.ts` | `assertSameOrigin` wired in front of connect / login / checkout, and an off-site `next` dropped rather than stored |
 | `e2e/onboarding.spec.ts` | Key-only form behind a session (no email field — that was the account-takeover hole), the unticked-by-default Terms/DPA checkbox, and the `rk_` validation error |
 | `e2e/dashboard.spec.ts` | Status line tells the truth about whether surveys send (involuntary churn named as not surveyed); an org whose Stripe key was rejected (or belongs to a different Stripe account or mode) told to reconnect; free orgs not promised AI themes; Terms/DPA banner for an org with no acceptance on record, and "I agree" recording it; an org with a key but no webhook endpoint told to finish connecting; an org whose surveys would name no business asked for a business name until it has one |
-| `e2e/account.spec.ts` | Delete account from Settings: two-step confirm, Stripe columns cleared, session ended |
+| `e2e/account.spec.ts` | Delete account from Settings: two-step confirm, Stripe columns cleared, session ended, and what Settings says when session revocation, the Stripe disconnect or the Polar revoke fails |
 | `e2e/cron.spec.ts` | `CRON_SECRET` gate on all three jobs; the purge job's retention, erasure, abandoned-signup and orphaned-opt-out rules against real rows; themes + digest recorded as succeeded |
 | `e2e/legal.spec.ts` | Privacy / Terms / DPA render with the draft banner, POPIA specifics, unsubscribe page's privacy link |
 
-Sign-in is seeded (a `login_tokens` row written directly, then the link is clicked)
+Sign-in is seeded (a `login_tokens` row written directly, then the link is opened and the confirm page's Sign in pressed)
 rather than requested through `/api/auth/request`, because that route is the one
 place a real user's inbox is involved and it is rate limited.
 
