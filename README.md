@@ -266,7 +266,11 @@ DB TLS is handled automatically: no SSL over Railway's `*.railway.internal` priv
 
 `scripts/monitor.js` is a founder-only dashboard: app health, scheduler/cron pipeline
 state (per-job status, attempts, due/action), activity counts (orgs, logins, surveys,
-digest sends, unsubscribes), and a near-live tail of Railway's logs (fetched every 15 s; the CLI does not stream when piped).
+digest sends, unsubscribes), the errors `reportError` has recorded since the server last
+booted (grouped by fingerprint, with whether alert emails are on and actually sending),
+and a near-live tail of Railway's logs (fetched every 15 s; the CLI does not stream when piped).
+The errors panel is in-memory on the server, so a restart or redeploy empties it; the
+JSON log lines in Railway are the durable record.
 
 ```bash
 railway run npm run monitor

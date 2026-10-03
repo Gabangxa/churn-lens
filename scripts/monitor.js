@@ -315,6 +315,9 @@ function renderPage() {
   #logView .line { white-space: pre-wrap; word-break: break-word; padding: 1px 0; }
   #logView .line.level-error { color: #ff8a80; }
   #logView .line.source-monitor { color: #8a94a3; font-style: italic; }
+  .tableWrap { overflow-x: auto; }
+  table.errorsTable td.msg { white-space: normal; word-break: break-word; min-width: 220px; }
+  .recentLine { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; padding: 2px 0; border-bottom: 1px solid #f0f0f0; white-space: pre-wrap; word-break: break-word; }
 </style>
 </head>
 <body>
@@ -335,6 +338,10 @@ function renderPage() {
   <section class="panel" id="activityPanel">
     <h2>Activity</h2>
     <div id="activityBody"><div class="row muted">waiting for first status fetch&hellip;</div></div>
+  </section>
+  <section class="panel" id="errorsPanel">
+    <h2>Errors (this server process)</h2>
+    <div id="errorsBody"><div class="row muted">waiting for first status fetch&hellip;</div></div>
   </section>
   <section class="panel" id="logsPanel">
     <h2>Logs</h2>
@@ -482,6 +489,60 @@ function renderPage() {
     section('Unsubscribes', [['total', a.unsubscribesTotal]]);
   }
 
+  // reportError's in-process buffer (src/lib/report-error.ts): what has failed
+  // since the server last booted, grouped by fingerprint, and whether those
+  // failures are also being emailed. Already redacted server-side; ids only.
+  function renderErrors(status) {
+    var body = document.getElementById('errorsBody');
+    clear(body);
+    var rep = status.reportedErrors;
+    if (!rep) {
+      // A deploy from before error reporting existed (after a rollback, say).
+      var u = el('div', 'row muted'); u.textContent = 'unavailable (this deploy predates error reporting)'; body.appendChild(u);
+      return;
+    }
+    row(body, 'Alert emails', rep.alertingConfigured ? 'on' : 'OFF (ALERT_EMAIL not set)', rep.alertingConfigured ? 'ok' : 'warn');
+    row(body, 'Reported since boot', String(rep.totalReported), rep.totalReported > 0 ? 'warn' : 'ok');
+    row(body, 'Alerts sent / failed', rep.alertsSent + ' / ' + rep.alertsFailed, rep.alertsFailed > 0 ? 'bad' : '');
+    if (rep.lastAlertError) row(body, 'Last alert error', rep.lastAlertError, 'bad');
+
+    var fingerprints = rep.fingerprints || [];
+    if (fingerprints.length === 0) {
+      var none = el('div', 'row muted'); none.textContent = 'nothing reported by this process'; body.appendChild(none);
+      return;
+    }
+
+    var table = el('table', 'errorsTable');
+    var headRow = el('tr');
+    ['count', 'context', 'message', 'last seen', 'last alert', 'suppressed'].forEach(function (h) {
+      var th = el('th'); th.textContent = h; headRow.appendChild(th);
+    });
+    var thead = el('thead'); thead.appendChild(headRow); table.appendChild(thead);
+    var tbody = el('tbody');
+    fingerprints.forEach(function (fp) {
+      var tr = el('tr');
+      function cell(text, cls) {
+        var td = el('td', cls || ''); td.textContent = text == null ? '' : String(text); tr.appendChild(td);
+      }
+      cell(fp.count); cell(fp.context); cell(fp.name + ': ' + fp.message, 'msg'); cell(agoLabel(fp.lastSeenAt));
+      cell(fp.lastAlertAt ? agoLabel(fp.lastAlertAt) : (rep.alertingConfigured ? 'not sent' : 'off'));
+      cell(fp.suppressedSinceAlert);
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    var wrap = el('div', 'tableWrap'); wrap.appendChild(table); body.appendChild(wrap);
+
+    var heading = el('div', 'row'); var strong = el('strong'); strong.textContent = 'Most recent'; heading.appendChild(strong);
+    body.appendChild(heading);
+    (rep.recent || []).slice(0, 10).forEach(function (r) {
+      var meta = r.meta || {};
+      var ids = Object.keys(meta).map(function (k) { return k + '=' + meta[k]; }).join(' ');
+      var line = el('div', 'recentLine');
+      line.textContent = r.at + ' [' + r.context + '] ' + r.message + (ids ? '  (' + ids + ')' : '');
+      body.appendChild(line);
+    });
+  }
+
   function pollStatus() {
     fetch('/api/status')
       .then(function (res) { return res.json().then(function (body) { return { ok: res.ok, status: res.status, body: body }; }); })
@@ -497,6 +558,7 @@ function renderPage() {
         renderSystem(result.body);
         renderScheduler(result.body);
         renderActivity(result.body);
+        renderErrors(result.body);
       })
       .catch(function (err) {
         var banner = document.getElementById('errorBanner');

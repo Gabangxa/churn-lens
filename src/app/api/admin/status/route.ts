@@ -16,6 +16,7 @@ import {
   type PollAction,
 } from '@/lib/cron';
 import { getSchedulerState, type SchedulerState } from '@/lib/scheduler-state';
+import { getErrorReportSnapshot, type ErrorReportSnapshot } from '@/lib/report-error';
 import { legalFooterReady } from '@/lib/legal';
 
 /**
@@ -82,6 +83,13 @@ export interface StatusResponse {
   };
   db: { ok: boolean; latencyMs: number | null; error?: string };
   scheduler: SchedulerState;
+  /**
+   * What reportError has recorded in THIS process since it started (in-memory,
+   * so a restart or redeploy empties it), and whether ALERT_EMAIL is set.
+   * Read from memory, not the database, so it is still there during a DB
+   * outage — exactly when it is most needed. Already redacted; ids only.
+   */
+  reportedErrors: ErrorReportSnapshot;
   pipeline: PipelineSection | null;
   activity: ActivitySection | null;
   legal: { footerReady: boolean };
@@ -287,6 +295,7 @@ export async function GET(req: Request) {
     },
     db,
     scheduler: getSchedulerState(),
+    reportedErrors: getErrorReportSnapshot(),
     pipeline,
     activity,
     legal: { footerReady: legalFooterReady() },

@@ -24,6 +24,8 @@ const legalFooterReadyMock = vi.fn();
 vi.mock('@/lib/legal', () => ({ legalFooterReady: () => legalFooterReadyMock() }));
 
 import { GET, type StatusResponse, type PipelineJob } from '../route';
+// Real, not mocked: the route must expose exactly what reportError recorded.
+import { reportError, resetErrorReports } from '@/lib/report-error';
 
 // Monday 2026-03-16 08:00 UTC: past both weekly due times, reporting week
 // 2026-03-09, purge keyed by 2026-03-16 and due (after 03:00 UTC).
@@ -101,11 +103,13 @@ beforeEach(() => {
   queryOneMock.mockReset();
   stubQueries();
   stubCronRows([]);
+  resetErrorReports();
 });
 
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllEnvs();
+  vi.restoreAllMocks();
 });
 
 describe('GET /api/admin/status — auth', () => {
@@ -148,7 +152,7 @@ describe('GET /api/admin/status — shape', () => {
     expect(res.headers.get('cache-control')).toBe('no-store');
     const json = await body(res);
     expect(Object.keys(json).sort()).toEqual(
-      ['activity', 'app', 'db', 'errors', 'generatedAt', 'legal', 'pipeline', 'scheduler'],
+      ['activity', 'app', 'db', 'errors', 'generatedAt', 'legal', 'pipeline', 'reportedErrors', 'scheduler'],
     );
     expect(json.generatedAt).toBe(NOW.toISOString());
     expect(json.db).toEqual({ ok: true, latencyMs: expect.any(Number) });
@@ -262,6 +266,82 @@ describe('GET /api/admin/status — activity', () => {
     expect(call('FROM digest_sends')[1]).toEqual([WEEK_OF]);
   });
 
+});
+
+describe('GET /api/admin/status — reported errors', () => {
+  beforeEach(() => {
+    // reportError writes its JSON line to stderr; keep the test output clean.
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  it('starts empty, with alerting reported off when ALERT_EMAIL is unset', async () => {
+    const json = await body(await GET(request()));
+
+    expect(json.reportedErrors).toEqual({
+      alertingConfigured: false,
+      totalReported: 0,
+      alertsSent: 0,
+      alertsFailed: 0,
+      lastAlertError: null,
+      recent: [],
+      fingerprints: [],
+    });
+  });
+
+  it("lists this process's recent errors and per-fingerprint counts, already redacted", async () => {
+    reportError('cron.themes', new Error('clustering failed for jane@customer.example'), { orgId: 'org_1', weekOf: WEEK_OF });
+    reportError('cron.themes', new Error('clustering failed for bob@customer.example'), { orgId: 'org_2', weekOf: WEEK_OF });
+
+    const json = await body(await GET(request()));
+    const reported = json.reportedErrors;
+
+    expect(reported.totalReported).toBe(2);
+    expect(reported.recent).toEqual([
+      expect.objectContaining({
+        at: NOW.toISOString(),
+        context: 'cron.themes',
+        message: 'clustering failed for [redacted email]',
+        meta: { orgId: 'org_2', weekOf: WEEK_OF },
+      }),
+      expect.objectContaining({ meta: { orgId: 'org_1', weekOf: WEEK_OF } }),
+    ]);
+    expect(reported.fingerprints).toEqual([
+      expect.objectContaining({ context: 'cron.themes', count: 2, lastSeenAt: NOW.toISOString() }),
+    ]);
+    expect(JSON.stringify(json)).not.toContain('customer.example');
+  });
+
+  it('says alerting is configured without exposing the recipient address', async () => {
+    vi.stubEnv('ALERT_EMAIL', 'founder@ops.test');
+
+    const json = await body(await GET(request()));
+
+    expect(json.reportedErrors.alertingConfigured).toBe(true);
+    expect(JSON.stringify(json)).not.toContain('founder@ops.test');
+  });
+
+  it('still reports errors when the database is down — the moment they matter most', async () => {
+    queryOneMock.mockImplementation(async () => {
+      throw new Error('ECONNREFUSED');
+    });
+    reportError('survey.submit', new Error('connect ECONNREFUSED 10.0.0.1:5432'), { orgId: 'org_1' });
+
+    const json = await body(await GET(request()));
+
+    expect(json.db.ok).toBe(false);
+    expect(json.reportedErrors.recent[0]).toMatchObject({ context: 'survey.submit', meta: { orgId: 'org_1' } });
+  });
+
+  it('is not readable without the cron secret', async () => {
+    verifyCronSecretMock.mockReturnValue(false);
+    reportError('cron.themes', new Error('boom'));
+
+    const res = await GET(request('Bearer wrong'));
+
+    expect(res.status).toBe(401);
+    expect(await body(res)).toEqual({ error: 'Unauthorized' });
+  });
 });
 
 describe('GET /api/admin/status — degraded database', () => {
