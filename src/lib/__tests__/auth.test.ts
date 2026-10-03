@@ -23,7 +23,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  queryOneMock.mockReset().mockImplementation(async (_sql: string, [orgId]: string[]) => ({ id: orgId }));
+  queryOneMock.mockReset().mockResolvedValue({ sessions_valid_after: null });
 });
 
 // Build a NextRequest with a cookie header pre-set.
@@ -166,6 +166,18 @@ describe('requireOrgId', () => {
     const result = await requireOrgId(requestWithCookie(mintCookie('org-gone')));
     expect('error' in result).toBe(true);
     if ('error' in result) expect(result.error.status).toBe(401);
+  });
+
+  it('rejects a session issued before the org last signed out everywhere, and accepts one issued since', async () => {
+    const revokedAt = new Date('2026-09-10T00:00:00.000Z');
+    queryOneMock.mockResolvedValue({ sessions_valid_after: revokedAt });
+    const earlier = mintCookie('org-xyz', new Date(revokedAt.getTime() - 1));
+    const later = mintCookie('org-xyz', new Date(revokedAt.getTime() + 1));
+
+    const now = new Date(revokedAt.getTime() + DAY_MS);
+    const rejected = await at(now, () => requireOrgId(requestWithCookie(earlier)));
+    expect('error' in rejected).toBe(true);
+    expect(await at(now, () => requireOrgId(requestWithCookie(later)))).toEqual({ orgId: 'org-xyz' });
   });
 
   it('lets a database failure surface instead of reading it as "signed out"', async () => {

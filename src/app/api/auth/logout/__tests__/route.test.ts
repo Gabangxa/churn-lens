@@ -1,8 +1,20 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { NextRequest } from 'next/server';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { NextRequest, NextResponse } from 'next/server';
+
+// Only the database is stubbed — auth (assertSameOrigin, the session check,
+// the revocation) is real throughout. The happy path of logging out
+// everywhere runs against a real Postgres in src/lib/__tests__/auth.db.test.ts;
+// this file needs the database only to make it fail on demand.
+const queryOneMock = vi.fn();
+const executeMock = vi.fn();
+vi.mock('@/lib/db', () => ({
+  queryOne: (...args: unknown[]) => queryOneMock(...args),
+  execute: (...args: unknown[]) => executeMock(...args),
+}));
 
 import * as route from '../route';
 import { POST } from '../route';
+import { setOrgCookie } from '@/lib/auth';
 
 const ORIGINAL_APP_URL = process.env.NEXT_PUBLIC_APP_URL;
 
@@ -12,6 +24,9 @@ function logoutRequest() {
 
 beforeEach(() => {
   process.env.NEXT_PUBLIC_APP_URL = 'https://app.churnlens.com';
+  process.env.ENCRYPTION_KEY = 'b'.repeat(64);
+  queryOneMock.mockReset().mockResolvedValue({ sessions_valid_after: null });
+  executeMock.mockReset().mockResolvedValue(1);
 });
 
 afterEach(() => {
@@ -85,5 +100,63 @@ describe('POST /api/auth/logout — cross-site rejection', () => {
 
     expect(res.status).toBe(303);
     expect(res.headers.get('set-cookie') ?? '').toMatch(/Max-Age=0|Expires=Thu, 01 Jan 1970/);
+  });
+});
+
+// ─── Signing out everywhere, when the database will not cooperate ────────────
+
+describe('POST /api/auth/logout — when sessions cannot be revoked server-side', () => {
+  function sessionCookie(orgId = '11111111-1111-4111-8111-111111111111'): string {
+    const carrier = new NextResponse();
+    setOrgCookie(carrier, orgId);
+    return carrier.cookies.get('churnlens_org_id')!.value;
+  }
+
+  function logoutWithSession() {
+    return new NextRequest('http://localhost/api/auth/logout', {
+      method: 'POST',
+      headers: { cookie: `churnlens_org_id=${sessionCookie()}` },
+    });
+  }
+
+  beforeEach(() => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('still signs this browser out, but says the other devices were not — no cheerful redirect', async () => {
+    executeMock.mockRejectedValue(new Error('connection terminated'));
+
+    const res = await POST(logoutWithSession());
+
+    // A founder logging out because a laptop went missing must not be shown
+    // the landing page as if every device had been signed out.
+    expect(res.status).toBe(500);
+    expect(res.headers.get('location')).toBeNull();
+    expect((await res.json()).error).toMatch(/other devices/);
+    // This browser's cookie goes regardless — that part never needed the DB.
+    expect(res.headers.get('set-cookie') ?? '').toMatch(/Max-Age=0|Expires=Thu, 01 Jan 1970/);
+    expect(console.error).toHaveBeenCalled();
+  });
+
+  it('treats a failed session lookup the same way — it cannot tell whether anything was revoked', async () => {
+    queryOneMock.mockRejectedValue(new Error('connection refused'));
+
+    const res = await POST(logoutWithSession());
+
+    expect(res.status).toBe(500);
+    expect(executeMock).not.toHaveBeenCalled();
+    expect(res.headers.get('set-cookie') ?? '').toMatch(/Max-Age=0|Expires=Thu, 01 Jan 1970/);
+  });
+
+  it('touches no database at all when there is no session to end', async () => {
+    const res = await POST(logoutRequest());
+
+    expect(res.status).toBe(303);
+    expect(queryOneMock).not.toHaveBeenCalled();
+    expect(executeMock).not.toHaveBeenCalled();
   });
 });

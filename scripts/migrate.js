@@ -472,6 +472,19 @@ async function migrate() {
     CREATE INDEX IF NOT EXISTS cron_runs_ran_at ON cron_runs (ran_at);
   `);
 
+  // Server-side session revocation. A session is a signed cookie carrying its
+  // own issued-at (src/lib/auth.ts), so on its own nothing can end one early:
+  // logout used to delete the cookie from the one browser that clicked it,
+  // and a copy held anywhere else kept working. Every session for this org
+  // issued before this instant is rejected; logout and an account-deletion
+  // request move it forward, never back. NULL = never revoked, which is what
+  // every existing row should read as. Nullable with no default, so adding it
+  // is a catalog-only change — no table rewrite, no backfill.
+  await pool.query(`
+    ALTER TABLE organizations
+      ADD COLUMN IF NOT EXISTS sessions_valid_after timestamptz;
+  `);
+
   console.log('Database migration complete');
   await pool.end();
 }

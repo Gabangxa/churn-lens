@@ -4,7 +4,7 @@ import { createHmac, hkdfSync, timingSafeEqual } from 'crypto';
 // runtime (there is no middleware.ts and no route opts in), and next.config.js
 // stubs pg out of the Edge bundle — a session check added to Edge code would
 // fail there, not silently pass.
-import { queryOne } from '@/lib/db';
+import { execute, queryOne } from '@/lib/db';
 
 const ORG_COOKIE = 'churnlens_org_id';
 
@@ -31,8 +31,9 @@ const SESSION_KEY_INFO = 'churnlens/session-cookie/v1';
  * session key reveals nothing about ENCRYPTION_KEY, because HKDF is one-way.
  * What a second env var would add is independent rotation — and that is
  * already covered without one: bumping SESSION_KEY_INFO logs everyone out
- * without touching the Stripe-key ciphertext. One fewer secret to provision,
- * store and lose is the better trade.
+ * without touching the Stripe-key ciphertext, and revokeAllSessions handles
+ * the one-org case. One fewer secret to provision, store and lose is the
+ * better trade.
  *
  * The IKM is the configured string as-is (no hex decode): HKDF's extract step
  * condenses any input keying material, so this does not need to re-implement
@@ -113,8 +114,9 @@ function decodeSession(cookieValue: string): SessionClaims | null {
  * this server genuinely issued gets as far as the lookup.
  *
  * The lookup exists because a signature can only prove "we issued this", not
- * "this should still work": an org purged after its 30-day deletion window
- * leaves cookies behind that verify perfectly.
+ * "this should still work": a session the org has since signed out
+ * everywhere (revokeAllSessions), and one for an org purged after its 30-day
+ * deletion window, both verify perfectly.
  *
  * A database error propagates (the route 500s) rather than reading as "not
  * signed in": the outage should look like an outage, not like every founder
@@ -125,11 +127,47 @@ async function verifySession(cookieValue: string): Promise<string | null> {
   if (!claims) return null;
   if (Date.now() - claims.issuedAtMs >= SESSION_TTL_MS) return null;
 
-  const org = await queryOne<{ id: string }>('SELECT id FROM organizations WHERE id = $1', [
-    claims.orgId,
-  ]);
+  const org = await queryOne<{ sessions_valid_after: Date | null }>(
+    'SELECT sessions_valid_after FROM organizations WHERE id = $1',
+    [claims.orgId],
+  );
   if (!org) return null;
+  // Strictly before: a session minted in the very millisecond of a
+  // revocation survives it. Both instants come from the app clock (see
+  // revokeAllSessions), so that tie is the only ambiguity, and it can only
+  // be a sign-in racing a logout — never a credential the logout meant to end.
+  if (org.sessions_valid_after && claims.issuedAtMs < org.sessions_valid_after.getTime()) {
+    return null;
+  }
   return claims.orgId;
+}
+
+/**
+ * Sign `orgId` out everywhere: every session issued before now stops working
+ * on its next request, on every device, whether or not that device ever hears
+ * about it. Sessions issued afterwards (the founder signing straight back in)
+ * are unaffected. Throws if the write fails — callers decide how to tell the
+ * founder, but must not pretend it happened.
+ *
+ * The instant comes from this process's clock, not Postgres now(), because
+ * the session's issued-at it is compared against does too. Mixing the two
+ * clocks would put app/DB skew straight into the "log out, then sign back in
+ * a second later" path: a database clock running ahead rejects the fresh
+ * sign-in, one running behind lets a just-revoked session through.
+ *
+ * GREATEST makes it a watermark that only moves forward. Two logouts can be
+ * in flight at once; if the one that read the clock first commits last, a
+ * plain assignment would move the revocation point back and revive sessions
+ * the later logout had ended. GREATEST ignores NULL, so the first revocation
+ * simply sets it.
+ */
+export async function revokeAllSessions(orgId: string): Promise<void> {
+  await execute(
+    `UPDATE organizations
+     SET sessions_valid_after = GREATEST(sessions_valid_after, $2)
+     WHERE id = $1`,
+    [orgId, new Date()],
+  );
 }
 
 export function setOrgCookie(response: NextResponse, orgId: string): NextResponse {
@@ -177,10 +215,10 @@ export async function getOrgIdFromCookieStore(
  * 401 the caller should return as-is.
  *
  * A cookie that is present but no longer valid is also cleared on that 401.
- * Expiry, and an org that has gone, leave browsers holding credentials that
- * can never work again; evicting one the first time it is presented means the
- * browser stops sending it, rather than carrying it for the rest of its
- * Max-Age.
+ * Expiry, revocation and an org that has gone all leave browsers holding
+ * credentials that can never work again; evicting one the first time it is
+ * presented means the browser stops sending it, rather than carrying it for
+ * the rest of its Max-Age.
  */
 export async function requireOrgId(
   req: NextRequest,

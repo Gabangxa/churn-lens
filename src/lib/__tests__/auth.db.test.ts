@@ -37,8 +37,9 @@ vi.mock('@/lib/db', () => ({
     (await pool().query(text, params)).rows[0] ?? null,
 }));
 
-import { requireOrgId, getOrgIdFromCookieStore } from '../auth';
+import { requireOrgId, getOrgIdFromCookieStore, revokeAllSessions } from '../auth';
 import { GET as verifyMagicLink } from '@/app/api/auth/verify/route';
+import { POST as logout } from '@/app/api/auth/logout/route';
 
 const COOKIE_NAME = 'churnlens_org_id';
 const ENCRYPTION_KEY = 'e'.repeat(64);
@@ -91,6 +92,27 @@ function cookieStoreWith(cookie: string) {
   return { get: (name: string) => (name === COOKIE_NAME ? { value: cookie } : undefined) };
 }
 
+/** Click "Log out" in the browser holding `cookie` — a same-origin form POST. */
+async function logOutWith(cookie: string) {
+  return logout(
+    new NextRequest('http://localhost/api/auth/logout', {
+      method: 'POST',
+      headers: { cookie: `${COOKIE_NAME}=${cookie}`, 'sec-fetch-site': 'same-origin' },
+    }),
+  );
+}
+
+/** Run `fn` with the app clock reading `when`. */
+async function atTime<T>(when: Date, fn: () => Promise<T>): Promise<T> {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(when);
+  try {
+    return await fn();
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
 /** The org a cookie authenticates as, through both public entry points — they must agree. */
 async function sessionOrg(cookie: string): Promise<string | null> {
   const fromRoute = await requireOrgId(requestWith(cookie));
@@ -107,7 +129,7 @@ suite('sessions against a real database', () => {
     dbState.pool = new Pool({ connectionString: TEST_DATABASE_URL, ssl: false });
     const { rows } = await pool().query(
       `SELECT 1 FROM information_schema.columns
-       WHERE table_name = 'organizations' AND column_name = 'last_login_at'`,
+       WHERE table_name = 'organizations' AND column_name = 'sessions_valid_after'`,
     );
     if (rows.length === 0) {
       throw new Error(
@@ -189,5 +211,97 @@ suite('sessions against a real database', () => {
 
     expect(await sessionOrg(stale)).toBeNull();
     expect(await sessionOrg(nearlyStale)).toBe(orgId);
+  });
+
+  // ─── Revocation ──────────────────────────────────────────────────────────
+
+  it('logging out on one device signs the org out on every device', async () => {
+    const orgId = await seedOrg();
+    const laptop = await signIn(orgId);
+    const phone = await signIn(orgId);
+    expect(await sessionOrg(phone)).toBe(orgId);
+
+    const res = await logOutWith(laptop);
+
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toBe('https://app.churnlens.com/');
+    expect(res.headers.get('set-cookie') ?? '').toMatch(/Max-Age=0|Expires=Thu, 01 Jan 1970/);
+    // The phone never talked to the server, and its cookie is untouched — it
+    // is the server that no longer honours it.
+    expect(await sessionOrg(phone)).toBeNull();
+    expect(await sessionOrg(laptop)).toBeNull();
+  });
+
+  it('a sign-in after logging out works — revocation ends old sessions, not the account', async () => {
+    const orgId = await seedOrg();
+    await logOutWith(await signIn(orgId));
+
+    const fresh = await signIn(orgId);
+
+    expect(await sessionOrg(fresh)).toBe(orgId);
+  });
+
+  it('rejects exactly the sessions issued before the revocation', async () => {
+    const orgId = await seedOrg();
+    const revokedAt = new Date(Date.now() - 60_000);
+    const before = await signIn(orgId, new Date(revokedAt.getTime() - 1));
+    const sameInstant = await signIn(orgId, revokedAt);
+
+    await atTime(revokedAt, () => revokeAllSessions(orgId));
+
+    expect(await sessionOrg(before)).toBeNull();
+    expect(await sessionOrg(sameInstant)).toBe(orgId);
+  });
+
+  it('one org logging out leaves every other org signed in', async () => {
+    const orgA = await seedOrg('A');
+    const orgB = await seedOrg('B');
+    const cookieA = await signIn(orgA);
+    const cookieB = await signIn(orgB);
+
+    await logOutWith(cookieA);
+
+    expect(await sessionOrg(cookieA)).toBeNull();
+    expect(await sessionOrg(cookieB)).toBe(orgB);
+  });
+
+  it('a cookie that no longer counts cannot sign the org out elsewhere, but is still cleared here', async () => {
+    const orgId = await seedOrg();
+    const expired = await signIn(orgId, new Date(Date.now() - 31 * DAY_MS));
+    const current = await signIn(orgId);
+
+    const res = await logOutWith(expired);
+
+    // This browser is logged out as normal...
+    expect(res.status).toBe(303);
+    expect(res.headers.get('set-cookie') ?? '').toMatch(/Max-Age=0|Expires=Thu, 01 Jan 1970/);
+    // ...but a stale or stolen-then-expired credential is not a key to every
+    // other device's session.
+    expect(await sessionOrg(current)).toBe(orgId);
+    const { rows } = await pool().query(
+      'SELECT sessions_valid_after FROM organizations WHERE id = $1',
+      [orgId],
+    );
+    expect(rows[0].sessions_valid_after).toBeNull();
+  });
+
+  it('never moves the revocation point backwards, so a slow earlier logout cannot revive later-revoked sessions', async () => {
+    // Two logouts in flight: the one that read the clock first commits last.
+    // Without a forward-only watermark it would overwrite the later
+    // revocation and quietly bring back the session that one ended.
+    const orgId = await seedOrg();
+    const t1 = new Date(Date.now() - 120_000);
+    const t2 = new Date(Date.now() - 60_000);
+    const issuedBetween = await signIn(orgId, new Date(t1.getTime() + 30_000));
+
+    await atTime(t2, () => revokeAllSessions(orgId));
+    await atTime(t1, () => revokeAllSessions(orgId));
+
+    expect(await sessionOrg(issuedBetween)).toBeNull();
+    const { rows } = await pool().query(
+      'SELECT sessions_valid_after FROM organizations WHERE id = $1',
+      [orgId],
+    );
+    expect((rows[0].sessions_valid_after as Date).getTime()).toBe(t2.getTime());
   });
 });
