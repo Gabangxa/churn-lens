@@ -34,26 +34,54 @@ afterEach(() => {
 });
 
 describe('GET /api/settings/status', () => {
-  it('says connected, with any pending deletion, for an org holding a Stripe key', async () => {
+  it('says connected, with any pending deletion, for an org holding a Stripe key and its webhook', async () => {
     queryOneMock.mockResolvedValue({
       stripe_api_key_enc: 'v1:enc',
       stripe_account_id: null,
+      stripe_webhook_id: 'we_1',
+      stripe_webhook_secret_enc: 'v1:secret',
       deletion_requested_at: '2026-10-01T00:00:00.000Z',
     });
 
     const res = await GET(statusRequest());
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ connected: true, deletionRequestedAt: '2026-10-01T00:00:00.000Z' });
+    expect(await res.json()).toEqual({
+      connected: true,
+      setupIncomplete: false,
+      deletionRequestedAt: '2026-10-01T00:00:00.000Z',
+    });
     expect(queryOneMock.mock.calls[0][1]).toEqual([ORG_ID]);
   });
 
-  it('says not connected for an org without one', async () => {
-    queryOneMock.mockResolvedValue({ stripe_api_key_enc: null, stripe_account_id: null, deletion_requested_at: null });
+  it.each([
+    ['no webhook endpoint', { stripe_webhook_id: null, stripe_webhook_secret_enc: null }],
+    ['an endpoint but no signing secret', { stripe_webhook_id: 'we_1', stripe_webhook_secret_enc: null }],
+  ])('says setup is incomplete for a key with %s, as the dashboard does', async (_label, webhook) => {
+    queryOneMock.mockResolvedValue({
+      stripe_api_key_enc: 'v1:enc',
+      stripe_account_id: null,
+      deletion_requested_at: null,
+      ...webhook,
+    });
 
     const res = await GET(statusRequest());
 
-    expect(await res.json()).toEqual({ connected: false, deletionRequestedAt: null });
+    expect(await res.json()).toEqual({ connected: true, setupIncomplete: true, deletionRequestedAt: null });
+  });
+
+  it('says not connected for an org without one', async () => {
+    queryOneMock.mockResolvedValue({
+      stripe_api_key_enc: null,
+      stripe_account_id: null,
+      stripe_webhook_id: null,
+      stripe_webhook_secret_enc: null,
+      deletion_requested_at: null,
+    });
+
+    const res = await GET(statusRequest());
+
+    expect(await res.json()).toEqual({ connected: false, setupIncomplete: false, deletionRequestedAt: null });
   });
 
   it('passes the session gate\'s 401 through and reports nothing', async () => {
