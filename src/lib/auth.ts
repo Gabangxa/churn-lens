@@ -45,30 +45,77 @@ function getSessionSigningKey(): Buffer {
   return Buffer.from(hkdfSync('sha256', encryptionKey, '', SESSION_KEY_INFO, 32));
 }
 
-function sign(value: string): string {
-  const hmac = createHmac('sha256', getSessionSigningKey()).update(value).digest('hex');
-  return `${value}.${hmac}`;
+/**
+ * Hard lifetime of a session, counted from the moment /api/auth/verify issued
+ * it. Not refreshed on use: a founder who is active every day still re-proves
+ * inbox ownership once a month, and a stolen cookie is worthless after at most
+ * this long, however busy the account is.
+ */
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Session cookie wire format:
+ *
+ *   <orgId>.<issuedAtMs>.<hex HMAC-SHA256 of the string "<orgId>.<issuedAtMs>">
+ *
+ * The issued-at lives inside the signed part so the SERVER decides when a
+ * session ends. Cookie Max-Age is only advice to an honest browser; a cookie
+ * value copied out of one and replayed by hand carries no expiry at all.
+ *
+ * orgId is always an organizations.id uuid, so it never contains the '.'
+ * separator, and a well-formed value is exactly three parts. That rule alone
+ * rejects the pre-expiry `<orgId>.<hmac>` cookies still sitting in browsers,
+ * before any key is even involved.
+ */
+interface SessionClaims {
+  orgId: string;
+  issuedAtMs: number;
 }
 
-function verify(signed: string): string | null {
-  const idx = signed.lastIndexOf('.');
-  if (idx === -1) return null;
-  const value = signed.substring(0, idx);
-  const expected = sign(value);
-  const expectedBuf = Buffer.from(expected);
-  const signedBuf = Buffer.from(signed);
-  if (expectedBuf.length !== signedBuf.length) return null;
-  if (!timingSafeEqual(expectedBuf, signedBuf)) return null;
-  return value;
+function sessionHmac(payload: string): Buffer {
+  return createHmac('sha256', getSessionSigningKey()).update(payload).digest();
+}
+
+function encodeSession({ orgId, issuedAtMs }: SessionClaims): string {
+  const payload = `${orgId}.${issuedAtMs}`;
+  return `${payload}.${sessionHmac(payload).toString('hex')}`;
+}
+
+/** Returns the signed claims, or null if the value is malformed or forged. Says nothing about expiry. */
+function decodeSession(cookieValue: string): SessionClaims | null {
+  const parts = cookieValue.split('.');
+  if (parts.length !== 3) return null;
+  const [orgId, issuedAtText, signatureHex] = parts;
+  // Shape checks first, so the comparison below always sees two 32-byte
+  // buffers. The 15-digit cap keeps Number() exact (Date.now() is 13 digits).
+  if (!orgId || !/^\d{1,15}$/.test(issuedAtText) || !/^[0-9a-f]{64}$/.test(signatureHex)) {
+    return null;
+  }
+  const expected = sessionHmac(`${orgId}.${issuedAtText}`);
+  const provided = Buffer.from(signatureHex, 'hex');
+  // Constant-time: an early-exit compare would tell an attacker how many
+  // leading bytes of a forged signature are right, one request at a time.
+  if (!timingSafeEqual(expected, provided)) return null;
+  return { orgId, issuedAtMs: Number(issuedAtText) };
+}
+
+/** The orgId of a genuine, unexpired session cookie, or null. */
+function verifySession(cookieValue: string): string | null {
+  const claims = decodeSession(cookieValue);
+  if (!claims) return null;
+  if (Date.now() - claims.issuedAtMs >= SESSION_TTL_MS) return null;
+  return claims.orgId;
 }
 
 export function setOrgCookie(response: NextResponse, orgId: string): NextResponse {
-  response.cookies.set(ORG_COOKIE, sign(orgId), {
+  response.cookies.set(ORG_COOKIE, encodeSession({ orgId, issuedAtMs: Date.now() }), {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax',
     path: '/',
-    maxAge: 60 * 60 * 24 * 365,
+    // Matches the server-side limit so the browser drops the cookie when it
+    // stops working anyway. Enforcement is verifySession, not this.
+    maxAge: SESSION_TTL_MS / 1000,
   });
   return response;
 }
@@ -91,7 +138,7 @@ export function getOrgIdFromCookieStore(
 ): string | null {
   const raw = cookieStore.get(ORG_COOKIE)?.value;
   if (!raw) return null;
-  return verify(raw);
+  return verifySession(raw);
 }
 
 export function requireOrgId(req: NextRequest): { orgId: string } | { error: NextResponse } {
@@ -99,7 +146,7 @@ export function requireOrgId(req: NextRequest): { orgId: string } | { error: Nex
   if (!raw) {
     return { error: NextResponse.json({ error: 'Not authenticated.' }, { status: 401 }) };
   }
-  const orgId = verify(raw);
+  const orgId = verifySession(raw);
   if (!orgId) {
     return { error: NextResponse.json({ error: 'Invalid session.' }, { status: 401 }) };
   }

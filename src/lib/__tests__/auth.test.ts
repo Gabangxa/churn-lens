@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { NextRequest, NextResponse } from 'next/server';
-import { createHmac } from 'crypto';
+import { createHmac, hkdfSync } from 'crypto';
 import { setOrgCookie, requireOrgId, clearOrgCookie, assertSameOrigin } from '../auth';
 
 const TEST_KEY = 'b'.repeat(64);
@@ -21,16 +21,48 @@ function emptyRequest() {
   return new NextRequest('http://localhost/');
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Mint a session cookie value exactly as /api/auth/verify does, as of `at`. */
+function mintCookie(orgId: string, at: Date = new Date()): string {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(at);
+  try {
+    const res = new NextResponse();
+    setOrgCookie(res, orgId);
+    return res.cookies.get(COOKIE_NAME)!.value;
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
+/** Run `fn` with the clock reading `at` — for "how does this cookie look later". */
+function at<T>(when: Date, fn: () => T): T {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(when);
+  try {
+    return fn();
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
 // ─── setOrgCookie ─────────────────────────────────────────────────────────────
 
 describe('setOrgCookie', () => {
-  it('sets a signed cookie on the response', () => {
+  it('sets a signed cookie carrying the org id and the moment it was issued', () => {
+    const issuedAt = new Date('2026-09-01T12:00:00.000Z');
+    const value = mintCookie('org-abc', issuedAt);
+    // "<orgId>.<issuedAtMs>.<hmac-hex>" — the issued-at is inside the signed
+    // part, so the server can enforce expiry without trusting the browser.
+    expect(value).toBe(`org-abc.${issuedAt.getTime()}.${value.split('.')[2]}`);
+    expect(value.split('.')[2]).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it('asks the browser to keep the cookie for 30 days, the same as the server-side limit', () => {
     const res = new NextResponse();
     setOrgCookie(res, 'org-abc');
-    const cookie = res.cookies.get(COOKIE_NAME);
-    expect(cookie).toBeDefined();
-    // Signed format: "<value>.<hmac-hex>"
-    expect(cookie!.value).toMatch(/^org-abc\.[a-f0-9]+$/);
+    expect(res.headers.get('set-cookie')).toContain(`Max-Age=${30 * 24 * 60 * 60}`);
   });
 
   it('produces a different signed value for a different orgId', () => {
@@ -66,8 +98,17 @@ describe('requireOrgId', () => {
   });
 
   it('returns 401 when the cookie signature is tampered', () => {
-    const req = requestWithCookie('org-evil.deadsignature');
-    const result = requireOrgId(req);
+    // A genuine cookie with one signature nibble flipped: right shape, right
+    // length, so only the HMAC comparison itself can turn it away.
+    const [orgId, issuedAt, signature] = mintCookie('org-xyz').split('.');
+    const flipped = (signature[0] === '0' ? '1' : '0') + signature.slice(1);
+    const result = requireOrgId(requestWithCookie(`${orgId}.${issuedAt}.${flipped}`));
+    expect('error' in result).toBe(true);
+    if ('error' in result) expect(result.error.status).toBe(401);
+  });
+
+  it('returns 401 for a cookie that is not in the signed format at all', () => {
+    const result = requireOrgId(requestWithCookie('org-evil.deadsignature'));
     expect('error' in result).toBe(true);
     if ('error' in result) expect(result.error.status).toBe(401);
   });
@@ -101,6 +142,64 @@ describe('requireOrgId', () => {
     expect('error' in result).toBe(true);
 
     process.env.ENCRYPTION_KEY = TEST_KEY; // restore
+  });
+});
+
+// ─── requireOrgId: expiry ─────────────────────────────────────────────────────
+//
+// Cookie Max-Age is advice to an honest browser. A copied cookie value replayed
+// by hand carries no expiry at all, so the 30 days are enforced from the signed
+// issued-at, on the server.
+
+describe('requireOrgId — sessions expire 30 days after issue', () => {
+  const ISSUED = new Date('2026-09-01T12:00:00.000Z');
+
+  it('accepts a session up to the last millisecond of its 30 days', () => {
+    const value = mintCookie('org-xyz', ISSUED);
+    const result = at(new Date(ISSUED.getTime() + 30 * DAY_MS - 1), () =>
+      requireOrgId(requestWithCookie(value)),
+    );
+    expect(result).toEqual({ orgId: 'org-xyz' });
+  });
+
+  it('rejects the same session once 30 days have passed, whatever the browser still holds', () => {
+    const value = mintCookie('org-xyz', ISSUED);
+    const result = at(new Date(ISSUED.getTime() + 30 * DAY_MS), () =>
+      requireOrgId(requestWithCookie(value)),
+    );
+    expect('error' in result).toBe(true);
+    if ('error' in result) expect(result.error.status).toBe(401);
+  });
+
+  it('rejects a session whose issued-at was rewritten to extend it — the timestamp is signed', () => {
+    const value = mintCookie('org-xyz', ISSUED);
+    const [orgId, , signature] = value.split('.');
+    const now = new Date(ISSUED.getTime() + 31 * DAY_MS);
+    const extended = `${orgId}.${now.getTime()}.${signature}`;
+
+    const result = at(now, () => requireOrgId(requestWithCookie(extended)));
+    expect('error' in result).toBe(true);
+  });
+
+  it('rejects a correctly keyed cookie that carries no issued-at at all', () => {
+    // The shape a session would have if issued-at were ever made optional:
+    // signed with the right key, but with nothing to expire it by. A sanity
+    // mint with the same local derivation first proves the forgery below is
+    // keyed correctly, so its rejection is about the missing timestamp and not
+    // about a stale label in this test.
+    const sessionKey = Buffer.from(
+      hkdfSync('sha256', TEST_KEY, '', 'churnlens/session-cookie/v1', 32),
+    );
+    const hmacHex = (payload: string) => createHmac('sha256', sessionKey).update(payload).digest('hex');
+
+    const issuedAtMs = Date.now();
+    const sanity = requireOrgId(
+      requestWithCookie(`org-xyz.${issuedAtMs}.${hmacHex(`org-xyz.${issuedAtMs}`)}`),
+    );
+    expect(sanity).toEqual({ orgId: 'org-xyz' });
+
+    const result = requireOrgId(requestWithCookie(`org-xyz.${hmacHex('org-xyz')}`));
+    expect('error' in result).toBe(true);
   });
 });
 
