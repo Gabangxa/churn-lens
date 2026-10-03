@@ -1,16 +1,52 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createHmac, timingSafeEqual } from 'crypto';
+import { createHmac, hkdfSync, timingSafeEqual } from 'crypto';
 
 const ORG_COOKIE = 'churnlens_org_id';
 
-function getSigningKey(): string {
-  const key = process.env.ENCRYPTION_KEY;
-  if (!key) throw new Error('ENCRYPTION_KEY not set');
-  return key;
+/**
+ * HKDF `info` label for the session-cookie HMAC key. Changing it changes the
+ * derived key, which invalidates every outstanding session at once — so it is
+ * also the lever for any future change to the cookie's signed format.
+ */
+const SESSION_KEY_INFO = 'churnlens/session-cookie/v1';
+
+/**
+ * The session HMAC key, derived from ENCRYPTION_KEY rather than being it.
+ *
+ * ENCRYPTION_KEY also encrypts every customer's Stripe restricted key
+ * (src/lib/crypto.ts). Keying the cookie HMAC with that same secret meant the
+ * one value whose compromise exposes every connected Stripe account was also
+ * fed, raw, into a second primitive on every request — and that any future
+ * change to session signing had to be reasoned about against AES-GCM too.
+ *
+ * Why a derived key is enough, and no separate SESSION_SECRET is needed:
+ * HKDF-SHA256 with a distinct `info` label yields a key that is
+ * computationally independent of ENCRYPTION_KEY and of anything else derived
+ * from it under another label. Knowing (or brute-forcing a cookie toward) the
+ * session key reveals nothing about ENCRYPTION_KEY, because HKDF is one-way.
+ * What a second env var would add is independent rotation — and that is
+ * already covered without one: bumping SESSION_KEY_INFO logs everyone out
+ * without touching the Stripe-key ciphertext. One fewer secret to provision,
+ * store and lose is the better trade.
+ *
+ * The IKM is the configured string as-is (no hex decode): HKDF's extract step
+ * condenses any input keying material, so this does not need to re-implement
+ * or depend on crypto.ts's parsing. The salt is empty because the IKM is
+ * already a uniformly random 256-bit secret (validateEnv enforces 64 hex
+ * chars), which is the case RFC 5869 §3.1 says needs no salt.
+ *
+ * Re-derived per call rather than cached: it is two HMAC computations, and a
+ * cache would have to notice ENCRYPTION_KEY changing (tests swap it) to stay
+ * correct.
+ */
+function getSessionSigningKey(): Buffer {
+  const encryptionKey = process.env.ENCRYPTION_KEY;
+  if (!encryptionKey) throw new Error('ENCRYPTION_KEY not set');
+  return Buffer.from(hkdfSync('sha256', encryptionKey, '', SESSION_KEY_INFO, 32));
 }
 
 function sign(value: string): string {
-  const hmac = createHmac('sha256', getSigningKey()).update(value).digest('hex');
+  const hmac = createHmac('sha256', getSessionSigningKey()).update(value).digest('hex');
   return `${value}.${hmac}`;
 }
 

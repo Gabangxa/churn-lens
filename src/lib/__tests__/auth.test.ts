@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { NextRequest, NextResponse } from 'next/server';
+import { createHmac } from 'crypto';
 import { setOrgCookie, requireOrgId, clearOrgCookie, assertSameOrigin } from '../auth';
 
 const TEST_KEY = 'b'.repeat(64);
@@ -73,6 +74,16 @@ describe('requireOrgId', () => {
 
   it('returns 401 when the cookie has no dot separator', () => {
     const result = requireOrgId(requestWithCookie('invalidsigned'));
+    expect('error' in result).toBe(true);
+    if ('error' in result) expect(result.error.status).toBe(401);
+  });
+
+  it('rejects a cookie HMACed directly with ENCRYPTION_KEY — the session key is derived, not the raw secret', () => {
+    // Exactly what the pre-HKDF build minted: HMAC-SHA256 keyed with the very
+    // secret that encrypts customers' Stripe keys. A cookie in this shape must
+    // not authenticate, or the key separation is decorative.
+    const rawKeyHmac = createHmac('sha256', TEST_KEY).update('org-xyz').digest('hex');
+    const result = requireOrgId(requestWithCookie(`org-xyz.${rawKeyHmac}`));
     expect('error' in result).toBe(true);
     if ('error' in result) expect(result.error.status).toBe(401);
   });
