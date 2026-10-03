@@ -78,7 +78,15 @@ export async function POST(req: NextRequest) {
     }
 
     const encrypted = encryptApiKey(apiKey);
-    await query('UPDATE organizations SET stripe_api_key_enc = $1 WHERE id = $2', [encrypted, orgId]);
+    // A new key is not one Stripe has rejected, so the dashboard's "reconnect
+    // Stripe" warning (stripe_key_invalid_at, set by the Stripe webhook) is
+    // cleared in the same statement that replaces the key. Nothing here proves
+    // the new key works — when a webhook is already registered no Stripe call
+    // is made at all — so the next cancellation re-flags it if it does not.
+    await query(
+      'UPDATE organizations SET stripe_api_key_enc = $1, stripe_key_invalid_at = NULL WHERE id = $2',
+      [encrypted, orgId],
+    );
 
     // Register ChurnLens webhook on the customer's Stripe account (only if not already done).
     // Stripe rejects webhook URLs without an explicit https scheme, so fail fast here

@@ -66,6 +66,23 @@ const MONTHS_PER_INTERVAL: Record<string, number> = {
 };
 
 /**
+ * Whether a Stripe API failure means the stored key itself is unusable, as
+ * opposed to Stripe being briefly unavailable. The SDK raises these by HTTP
+ * status: 401 (revoked, rolled, or mistyped key) and 403 (a restricted key
+ * missing a permission it needs). Neither changes until the founder acts, so
+ * retrying them is pointless; everything else (429, 5xx, network) is transient.
+ * Same classification as /api/onboarding/connect uses to blame the key.
+ */
+function isStripeKeyRejected(
+  err: unknown,
+): err is Stripe.errors.StripeAuthenticationError | Stripe.errors.StripePermissionError {
+  return (
+    err instanceof Stripe.errors.StripeAuthenticationError ||
+    err instanceof Stripe.errors.StripePermissionError
+  );
+}
+
+/**
  * Normalizes one subscription item to monthly cents: an annual plan must not be
  * recorded as 12x its true MRR, and a 5-seat plan must not be recorded as 1/5.
  *
@@ -129,8 +146,11 @@ export async function POST(
     stripe_api_key_enc: string | null;
     stripe_webhook_secret_enc: string | null;
     deletion_requested_at: string | null;
+    // node-postgres parses timestamptz into a Date.
+    stripe_key_invalid_at: Date | null;
   }>(
-    `SELECT id, plan, stripe_api_key_enc, stripe_webhook_secret_enc, deletion_requested_at
+    `SELECT id, plan, stripe_api_key_enc, stripe_webhook_secret_enc, deletion_requested_at,
+            stripe_key_invalid_at
      FROM organizations WHERE id = $1`,
     [orgId],
   );
@@ -239,7 +259,61 @@ export async function POST(
   const apiKey = decryptApiKey(org.stripe_api_key_enc);
   const stripeClient = new Stripe(apiKey, { apiVersion: '2024-04-10', typescript: true });
 
-  const customer = await stripeClient.customers.retrieve(subscription.customer);
+  let customer: Stripe.Customer | Stripe.DeletedCustomer;
+  try {
+    customer = await stripeClient.customers.retrieve(subscription.customer);
+  } catch (err) {
+    if (isStripeKeyRejected(err)) {
+      // The key is revoked, rolled, or no longer allowed to read customers.
+      // Every retry would fail identically until the founder reconnects, so
+      // answer 200 to stop Stripe's days-long retry schedule, and flag the org
+      // so the dashboard tells the founder why surveys stopped.
+      //
+      // The flag is keyed to the exact ciphertext this request used. If the
+      // founder reconnected while this call was in flight, the row now holds a
+      // different key that nothing has rejected, and the UPDATE matches no
+      // row. IS NULL keeps the time of the FIRST rejection. Not wrapped: if
+      // this write fails the error 500s, and Stripe's retry will both meet the
+      // same rejection and try the flag again — the right outcome either way.
+      await execute(
+        `UPDATE organizations SET stripe_key_invalid_at = now()
+         WHERE id = $1 AND stripe_api_key_enc = $2 AND stripe_key_invalid_at IS NULL`,
+        [org.id, org.stripe_api_key_enc],
+      );
+      console.error(
+        `Stripe rejected the stored API key for org ${org.id} ` +
+          `(${err.type}, HTTP ${err.statusCode ?? 'unknown'}) — skipping subscription ` +
+          `${subscription.id}; surveys are stopped until the founder reconnects Stripe.`,
+      );
+      return NextResponse.json({ received: true, skipped: 'stripe_key_invalid' });
+    }
+
+    // Rate limit, Stripe 5xx, network failure: transient. Nothing has been
+    // recorded yet, so a 5xx lets Stripe's retry start this event cleanly.
+    console.error(
+      `Stripe customer lookup failed for org ${org.id}, subscription ${subscription.id}:`,
+      err,
+    );
+    return NextResponse.json({ error: 'Stripe customer lookup failed' }, { status: 502 });
+  }
+
+  if (org.stripe_key_invalid_at !== null) {
+    // The key was flagged by an earlier delivery and has just worked — e.g.
+    // the founder restored its permissions in Stripe without reconnecting
+    // here. Same ciphertext condition as the flag, so a success can only
+    // clear the flag about the key that succeeded. Best-effort: a status-line
+    // write must not decide whether this customer is surveyed.
+    try {
+      await execute(
+        `UPDATE organizations SET stripe_key_invalid_at = NULL
+         WHERE id = $1 AND stripe_api_key_enc = $2`,
+        [org.id, org.stripe_api_key_enc],
+      );
+    } catch (err) {
+      console.error(`Clearing stripe_key_invalid_at failed for org ${org.id}:`, err);
+    }
+  }
+
   if (customer.deleted) {
     return NextResponse.json({ received: true, skipped: 'customer_deleted' });
   }

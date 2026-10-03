@@ -50,8 +50,10 @@ async function getDashboardData(orgId: string) {
     stripe_account_id: string | null;
     plan: string;
     deletion_requested_at: string | null;
+    stripe_key_invalid_at: Date | null;
   }>(
-    'SELECT stripe_api_key_enc, stripe_account_id, plan, deletion_requested_at FROM organizations WHERE id = $1',
+    `SELECT stripe_api_key_enc, stripe_account_id, plan, deletion_requested_at, stripe_key_invalid_at
+     FROM organizations WHERE id = $1`,
     [orgId],
   );
   const stripeConnected = !!(org?.stripe_api_key_enc || org?.stripe_account_id);
@@ -59,6 +61,8 @@ async function getDashboardData(orgId: string) {
   const sendStatus = surveySendStatus({
     stripeConnected,
     deletionRequested: !!org?.deletion_requested_at,
+    // node-postgres parses timestamptz into a Date.
+    stripeKeyInvalidSince: org?.stripe_key_invalid_at ?? null,
     legalFooterReady: legalFooterReady(),
     plan,
     surveysThisMonth: plan === 'free' ? await countFreeTierSurveys(orgId) : 0,
@@ -132,6 +136,18 @@ function SendStatusLine({ status }: { status: SurveySendStatus }) {
       );
     case 'deletion_pending':
       return <p className="text-sm font-medium text-muted">{dot('warn')} Account deletion requested — surveys have stopped.</p>;
+    case 'stripe_key_invalid':
+      // /onboarding is where a key is pasted; saving one there clears this.
+      return (
+        <p className="text-sm font-medium text-muted">
+          {dot('warn')} Stripe has been rejecting your API key since{' '}
+          {status.since.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} — it was
+          revoked, rolled, or lost a permission, so cancellations are not being surveyed.{' '}
+          <Link href="/onboarding" className="underline underline-offset-2 hover:text-zinc-900 dark:hover:text-white">
+            Reconnect Stripe with a new key
+          </Link>
+        </p>
+      );
     case 'paused_by_churnlens':
       return (
         <p className="text-sm font-medium text-muted">

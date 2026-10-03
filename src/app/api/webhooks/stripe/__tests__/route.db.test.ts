@@ -64,58 +64,22 @@ vi.mock('@/lib/resend', () => ({
   }),
 }));
 
-/** One request the SDK made to the fake api.stripe.com. */
-interface StripeApiRequest {
-  method: string;
-  path: string;
-  apiKey: string;
-}
-
-/**
- * The fake api.stripe.com. `respond` decides each answer; tests replace it to
- * make Stripe reject the key, rate-limit, fall over, or vanish from the network.
- */
-const stripeApi = vi.hoisted(() => ({
-  requests: [] as Array<{ method: string; path: string; apiKey: string }>,
-  respond: null as null | ((req: { method: string; path: string; apiKey: string }) => Promise<Response> | Response),
-  async fetch(url: string | URL, init?: RequestInit): Promise<Response> {
-    const authorization = new Headers(init?.headers).get('authorization') ?? '';
-    const req = {
-      method: init?.method ?? 'GET',
-      path: new URL(String(url)).pathname,
-      apiKey: authorization.replace(/^Bearer /, ''),
-    };
-    this.requests.push(req);
-    if (!this.respond) throw new Error('fake Stripe API has no responder');
-    return this.respond(req);
-  },
-}));
-
+// Stripe's HTTP transport only — see src/__tests__/helpers/fake-stripe-api.ts.
 vi.mock('stripe', async (importOriginal) => {
-  const { default: RealStripe } = await importOriginal<typeof import('stripe')>();
-  // The route does `new Stripe(key, config)` and also uses the statics
-  // Stripe.webhooks and Stripe.errors. A plain function constructor that
-  // returns a real client keeps both working: `new` hands back the returned
-  // object, and the prototype link forwards every static to the real class.
-  function StripeOverFakeApi(apiKey: string, config?: Stripe.StripeConfig) {
-    return new RealStripe(apiKey, {
-      ...config,
-      httpClient: RealStripe.createFetchHttpClient((url: string | URL, init?: RequestInit) =>
-        stripeApi.fetch(url, init),
-      ),
-      // The SDK's own retry (1 by default) only adds a backoff sleep here; what
-      // is under test is how the route classifies the error that comes out.
-      maxNetworkRetries: 0,
-    });
-  }
-  Object.setPrototypeOf(StripeOverFakeApi, RealStripe);
-  return { default: StripeOverFakeApi };
+  const { stripeModuleOverFakeApi } = await import('@/__tests__/helpers/fake-stripe-api');
+  return stripeModuleOverFakeApi(await importOriginal<typeof import('stripe')>());
 });
 
 import { POST } from '../[orgId]/route';
 import { encryptApiKey } from '@/lib/crypto';
 import { FREE_TIER_MONTHLY_SURVEYS } from '@/lib/plan';
 import { countFreeTierSurveys, surveySendStatus } from '@/lib/survey-status';
+import {
+  fakeStripeApi,
+  stripeError,
+  stripeJson,
+  type FakeStripeRequest,
+} from '@/__tests__/helpers/fake-stripe-api';
 
 const ENCRYPTION_KEY = 'c'.repeat(64);
 const APP_URL = 'https://app.churnlens.test';
@@ -125,22 +89,6 @@ const CUSTOMER_ID = 'cus_jane';
 const CUSTOMER_EMAIL = 'jane@example.com';
 
 // ─── Fake Stripe responses ────────────────────────────────────────────────
-
-function stripeJson(status: number, body: unknown): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      'content-type': 'application/json',
-      'request-id': 'req_fake',
-      // Real Stripe sends this on most 4xx/5xx; it keeps the SDK from retrying.
-      'stripe-should-retry': 'false',
-    },
-  });
-}
-
-function stripeError(status: number, type: string, message: string): Response {
-  return stripeJson(status, { error: { type, message } });
-}
 
 const customerJson = {
   id: CUSTOMER_ID,
@@ -154,7 +102,7 @@ const customerJson = {
  * subscriptions:read, webhooks:write) gets back: the customer, and a
  * permission error for anything else.
  */
-function onboardingScopedKey(req: StripeApiRequest): Response {
+function onboardingScopedKey(req: FakeStripeRequest): Response {
   if (req.method === 'GET' && req.path === `/v1/customers/${CUSTOMER_ID}`) {
     return stripeJson(200, customerJson);
   }
@@ -171,18 +119,28 @@ interface OrgOpts {
   plan?: 'free' | 'starter' | 'growth';
   /** Plaintext restricted key to store encrypted; null for "never connected". */
   apiKey?: string | null;
+  /** SQL interval ago that Stripe first rejected the key, or null (the default). */
+  keyInvalidAgo?: string | null;
 }
 
 async function seedOrg(opts: OrgOpts = {}): Promise<string> {
-  const { plan = 'growth', apiKey = API_KEY } = opts;
+  const { plan = 'growth', apiKey = API_KEY, keyInvalidAgo = null } = opts;
   const { rows } = await pool().query<{ id: string }>(
     `INSERT INTO organizations
-       (name, plan, stripe_api_key_enc, stripe_webhook_id, stripe_webhook_secret_enc)
-     VALUES ('DB suite org', $1, $2, 'we_db_suite', $3)
+       (name, plan, stripe_api_key_enc, stripe_webhook_id, stripe_webhook_secret_enc, stripe_key_invalid_at)
+     VALUES ('DB suite org', $1, $2, 'we_db_suite', $3, now() - $4::interval)
      RETURNING id`,
-    [plan, apiKey === null ? null : encryptApiKey(apiKey), encryptApiKey(WEBHOOK_SECRET)],
+    [plan, apiKey === null ? null : encryptApiKey(apiKey), encryptApiKey(WEBHOOK_SECRET), keyInvalidAgo],
   );
   return rows[0].id;
+}
+
+async function keyInvalidAt(orgId: string): Promise<Date | null> {
+  const { rows } = await pool().query<{ stripe_key_invalid_at: Date | null }>(
+    'SELECT stripe_key_invalid_at FROM organizations WHERE id = $1',
+    [orgId],
+  );
+  return rows[0].stripe_key_invalid_at;
 }
 
 interface SubscriptionOpts {
@@ -288,7 +246,7 @@ suite('Stripe webhook against a real database', () => {
     dbState.pool = new Pool({ connectionString: TEST_DATABASE_URL, ssl: false });
     const { rows } = await pool().query(
       `SELECT 1 FROM information_schema.columns
-       WHERE table_name = 'survey_responses' AND column_name = 'survey_email_last_attempt_at'`,
+       WHERE table_name = 'organizations' AND column_name = 'stripe_key_invalid_at'`,
     );
     if (rows.length === 0) {
       throw new Error('TEST_DATABASE_URL is not migrated — run `node scripts/migrate.js` against it first.');
@@ -306,8 +264,7 @@ suite('Stripe webhook against a real database', () => {
     // unsubscribes has no FK to organizations any more, so it needs naming.
     await pool().query('TRUNCATE organizations, unsubscribes CASCADE');
     sentEmails.length = 0;
-    stripeApi.requests.length = 0;
-    stripeApi.respond = onboardingScopedKey;
+    fakeStripeApi.reset(onboardingScopedKey);
     consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
@@ -356,7 +313,7 @@ suite('Stripe webhook against a real database', () => {
 
       await deliver(orgId, cancelledSubscription({ reason: 'payment_failed' }));
 
-      expect(stripeApi.requests).toEqual([]);
+      expect(fakeStripeApi.requests).toEqual([]);
     });
 
     it('is skipped even when the customer also left portal feedback', async () => {
@@ -404,7 +361,7 @@ suite('Stripe webhook against a real database', () => {
       const res = await deliver(orgId, cancelledSubscription());
 
       expect(res).toEqual({ status: 200, body: { received: true, skipped: 'free_tier_limit' } });
-      expect(stripeApi.requests).toEqual([]);
+      expect(fakeStripeApi.requests).toEqual([]);
       expect(sentEmails).toEqual([]);
       expect(await surveyRows(orgId)).toHaveLength(FREE_TIER_MONTHLY_SURVEYS);
     });
@@ -477,7 +434,7 @@ suite('Stripe webhook against a real database', () => {
       const res = await deliver(orgId, cancelledSubscription({ id: foreign }));
 
       expect(res.body).toEqual({ received: true, skipped: 'free_tier_limit' });
-      expect(stripeApi.requests).toEqual([]);
+      expect(fakeStripeApi.requests).toEqual([]);
     });
 
     it('agrees with the dashboard: the status line reports the cap exactly when new cancellations are refused', async () => {
@@ -487,6 +444,7 @@ suite('Stripe webhook against a real database', () => {
         surveySendStatus({
           stripeConnected: true,
           deletionRequested: false,
+          stripeKeyInvalidSince: null,
           legalFooterReady: true,
           plan: 'free',
           surveysThisMonth: await countFreeTierSurveys(orgId),
@@ -502,6 +460,140 @@ suite('Stripe webhook against a real database', () => {
         received: true,
         skipped: 'free_tier_limit',
       });
+    });
+  });
+
+  // ─── A Stripe key that no longer works ────────────────────────────────────
+
+  describe('when Stripe rejects the stored key', () => {
+    // What api.stripe.com answers for a revoked/rolled key (401) and for a
+    // restricted key that lost customers:read (403). The SDK maps these by HTTP
+    // status, which is exactly what the route has to classify.
+    const revokedKey = () =>
+      stripeError(401, 'invalid_request_error', 'Expired API Key provided: rk_live_*********************_key');
+    const keyLackingPermission = () =>
+      stripeError(403, 'invalid_request_error', 'The provided key does not have the required permissions for this endpoint.');
+
+    it.each([
+      ['revoked or rolled (401)', revokedKey],
+      ['missing a permission it needs (403)', keyLackingPermission],
+    ])('answers 200 stripe_key_invalid when the key is %s, so Stripe stops retrying', async (_why, response) => {
+      const orgId = await seedOrg();
+      fakeStripeApi.respond = response;
+
+      const res = await deliver(orgId, cancelledSubscription());
+
+      // A retry can never succeed until the founder reconnects: a 5xx here was
+      // days of Stripe retries, each one failing the same way.
+      expect(res).toEqual({ status: 200, body: { received: true, skipped: 'stripe_key_invalid' } });
+      expect(sentEmails).toEqual([]);
+      expect(await surveyRows(orgId)).toEqual([]);
+    });
+
+    it('records on the org when the key was first rejected, for the dashboard to report', async () => {
+      const orgId = await seedOrg();
+      fakeStripeApi.respond = revokedKey;
+      const before = Date.now();
+
+      await deliver(orgId, cancelledSubscription());
+
+      const flaggedAt = await keyInvalidAt(orgId);
+      expect(flaggedAt).not.toBeNull();
+      expect(flaggedAt!.getTime()).toBeGreaterThanOrEqual(before - 1000);
+    });
+
+    it('keeps the first rejection time on later rejections', async () => {
+      const orgId = await seedOrg({ keyInvalidAgo: '2 days' });
+      const firstRejectedAt = await keyInvalidAt(orgId);
+      fakeStripeApi.respond = revokedKey;
+
+      await deliver(orgId, cancelledSubscription());
+
+      expect(await keyInvalidAt(orgId)).toEqual(firstRejectedAt);
+    });
+
+    it('does not flag a key the founder replaced while the rejected request was in flight', async () => {
+      // The founder reconnects (new key stored, flag cleared) between this
+      // delivery reading the old key and Stripe rejecting it. The rejection is
+      // about the old key; flagging the org now would tell the founder to
+      // reconnect a key that works.
+      const orgId = await seedOrg();
+      fakeStripeApi.respond = async () => {
+        await pool().query('UPDATE organizations SET stripe_api_key_enc = $1 WHERE id = $2', [
+          encryptApiKey('rk_live_replacement_key'),
+          orgId,
+        ]);
+        return revokedKey();
+      };
+
+      const res = await deliver(orgId, cancelledSubscription());
+
+      expect(res.body).toEqual({ received: true, skipped: 'stripe_key_invalid' });
+      expect(await keyInvalidAt(orgId)).toBeNull();
+    });
+
+    it('clears the flag once a call with the stored key succeeds again, and surveys as normal', async () => {
+      // e.g. the founder restored the key's permissions in Stripe's dashboard
+      // without reconnecting here.
+      const orgId = await seedOrg({ keyInvalidAgo: '1 day' });
+
+      const res = await deliver(orgId, cancelledSubscription());
+
+      expect(res.body).toEqual({ received: true });
+      expect(sentEmails).toHaveLength(1);
+      expect(await keyInvalidAt(orgId)).toBeNull();
+    });
+
+    it('logs the org id but never the key', async () => {
+      const orgId = await seedOrg();
+      fakeStripeApi.respond = revokedKey;
+
+      await deliver(orgId, cancelledSubscription());
+
+      const logged = [...consoleErrorSpy.mock.calls, ...consoleWarnSpy.mock.calls]
+        .map((call) => call.map(String).join(' '))
+        .join('\n');
+      expect(logged).toContain(orgId);
+      expect(logged).not.toContain(API_KEY);
+    });
+  });
+
+  describe('when Stripe fails transiently', () => {
+    it.each([
+      ['rate-limits the request (429)', () => stripeError(429, 'invalid_request_error', 'Too many requests.')],
+      ['has an internal error (500)', () => stripeError(500, 'api_error', 'Something went wrong on our end.')],
+      ['is unavailable (503)', () => stripeError(503, 'api_error', 'Service unavailable.')],
+      [
+        'cannot be reached at all',
+        () => {
+          throw new TypeError('fetch failed');
+        },
+      ],
+    ])('still answers 5xx when Stripe %s, so Stripe retries the event', async (_why, response) => {
+      const orgId = await seedOrg();
+      fakeStripeApi.respond = response;
+
+      const res = await deliver(orgId, cancelledSubscription());
+
+      expect(res.status).toBeGreaterThanOrEqual(500);
+      // Nothing is wrong with the key, and nothing was recorded that would
+      // turn the retry into a duplicate.
+      expect(await keyInvalidAt(orgId)).toBeNull();
+      expect(await surveyRows(orgId)).toEqual([]);
+      expect(sentEmails).toEqual([]);
+    });
+
+    it('surveys the customer on the retry once Stripe recovers', async () => {
+      const orgId = await seedOrg();
+      const subscription = cancelledSubscription();
+      fakeStripeApi.respond = () => stripeError(500, 'api_error', 'Something went wrong on our end.');
+      expect((await deliver(orgId, subscription)).status).toBeGreaterThanOrEqual(500);
+
+      fakeStripeApi.respond = onboardingScopedKey;
+      const retry = await deliver(orgId, subscription);
+
+      expect(retry.body).toEqual({ received: true });
+      expect(sentEmails).toHaveLength(1);
     });
   });
 });

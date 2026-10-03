@@ -108,6 +108,8 @@ function orgRow(overrides: Record<string, unknown> = {}) {
     plan: 'growth',
     stripe_api_key_enc: 'enc-api-key',
     stripe_webhook_secret_enc: 'enc-webhook-secret',
+    deletion_requested_at: null,
+    stripe_key_invalid_at: null,
     ...overrides,
   };
 }

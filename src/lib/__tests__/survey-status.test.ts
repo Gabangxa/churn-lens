@@ -4,6 +4,7 @@ import { surveySendStatus } from '../survey-status';
 const ready = {
   stripeConnected: true,
   deletionRequested: false,
+  stripeKeyInvalidSince: null,
   legalFooterReady: true,
   plan: 'free',
   surveysThisMonth: 0,
@@ -25,6 +26,39 @@ describe('surveySendStatus', () => {
     expect(
       surveySendStatus({ ...ready, deletionRequested: true, legalFooterReady: false, surveysThisMonth: 10 }),
     ).toEqual({ kind: 'deletion_pending' });
+  });
+
+  describe('a Stripe key the webhook found rejected', () => {
+    const rejectedOn = new Date(2026, 8, 20, 9, 30);
+
+    it('tells the founder to reconnect, with the date Stripe first rejected it', () => {
+      expect(surveySendStatus({ ...ready, stripeKeyInvalidSince: rejectedOn })).toEqual({
+        kind: 'stripe_key_invalid',
+        since: rejectedOn,
+      });
+    });
+
+    it('is reported ahead of the legal pause, whose copy says nothing in their setup needs fixing', () => {
+      expect(
+        surveySendStatus({ ...ready, stripeKeyInvalidSince: rejectedOn, legalFooterReady: false }),
+      ).toMatchObject({ kind: 'stripe_key_invalid' });
+    });
+
+    it('is reported ahead of the free-tier cap, which lifts on the 1st while the key stays broken', () => {
+      expect(
+        surveySendStatus({ ...ready, stripeKeyInvalidSince: rejectedOn, surveysThisMonth: 10 }),
+      ).toMatchObject({ kind: 'stripe_key_invalid' });
+    });
+
+    it('gives way to a missing connection and to a pending deletion', () => {
+      // After a disconnect the stale flag is moot; during deletion nothing will send anyway.
+      expect(
+        surveySendStatus({ ...ready, stripeKeyInvalidSince: rejectedOn, stripeConnected: false }),
+      ).toEqual({ kind: 'stripe_not_connected' });
+      expect(
+        surveySendStatus({ ...ready, stripeKeyInvalidSince: rejectedOn, deletionRequested: true }),
+      ).toEqual({ kind: 'deletion_pending' });
+    });
   });
 
   it('reports the platform-side pause while the legal footer is unfilled', () => {

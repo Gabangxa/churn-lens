@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 // Pure module (no next/, no db) — safe to import into a Playwright process.
 import { legalFooterReady } from '../src/lib/legal';
-import { closeDb, daysAgo, seedOrg, seedSurveyResponse, uniqueEmail } from './helpers/db';
+import { closeDb, daysAgo, query, seedOrg, seedSurveyResponse, uniqueEmail } from './helpers/db';
 import { loginAs } from './helpers/session';
 
 /**
@@ -32,6 +32,24 @@ test.describe('dashboard status', () => {
       await expect(page.getByText(/Surveys are paused on our side/)).toBeVisible();
       await expect(page.getByText('surveys sending automatically')).toHaveCount(0);
     }
+  });
+
+  test('an org whose Stripe key was rejected is told to reconnect', async ({ page }) => {
+    const email = uniqueEmail('keyrejected');
+    const { orgId } = await seedOrg({ email, withStripeKey: true });
+    // What the Stripe webhook records when Stripe answers 401/403 for the stored key.
+    await query('UPDATE organizations SET stripe_key_invalid_at = now() WHERE id = $1', [orgId]);
+
+    await loginAs(page, { orgId, email, redirectTo: '/dashboard' });
+    await page.waitForURL((url) => url.pathname === '/dashboard');
+
+    // Shown whether or not legal.ts is filled: it outranks the platform pause.
+    await expect(page.getByText(/Stripe has been rejecting your API key/)).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Reconnect Stripe with a new key' })).toHaveAttribute(
+      'href',
+      '/onboarding',
+    );
+    await expect(page.getByText('surveys sending automatically')).toHaveCount(0);
   });
 
   test('a free org with responses is not promised AI themes', async ({ page }) => {

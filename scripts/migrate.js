@@ -485,6 +485,20 @@ async function migrate() {
       ADD COLUMN IF NOT EXISTS sessions_valid_after timestamptz;
   `);
 
+  // When Stripe first rejected the org's stored key (401: revoked or rolled;
+  // 403: a restricted key missing a permission). The Stripe webhook used to
+  // 500 on that, so Stripe retried for days with a key that could never work
+  // and nobody told the founder. It now answers 200 and stamps this, and the
+  // dashboard status line (src/lib/survey-status.ts) tells the founder to
+  // reconnect. NULL means "no known problem": cleared by /api/onboarding/connect
+  // when a key is saved, and by the webhook when a later call with the same key
+  // succeeds. Nullable with no default and no backfill, so every existing org
+  // reads as fine and a rollback to code that ignores the column is harmless.
+  await pool.query(`
+    ALTER TABLE organizations
+      ADD COLUMN IF NOT EXISTS stripe_key_invalid_at timestamptz;
+  `);
+
   console.log('Database migration complete');
   await pool.end();
 }

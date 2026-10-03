@@ -20,12 +20,18 @@ export type SurveySendStatus =
   | { kind: 'sending' }
   | { kind: 'stripe_not_connected' }
   | { kind: 'deletion_pending' }
+  | { kind: 'stripe_key_invalid'; since: Date }
   | { kind: 'paused_by_churnlens' }
   | { kind: 'free_tier_limit'; limit: number; resetsOn: Date };
 
 export function surveySendStatus(input: {
   stripeConnected: boolean;
   deletionRequested: boolean;
+  /**
+   * organizations.stripe_key_invalid_at: when the webhook first found Stripe
+   * rejecting the stored key (401/403), or null when no problem is known.
+   */
+  stripeKeyInvalidSince: Date | null;
   /** legalFooterReady() from src/lib/legal — injected so this stays pure. */
   legalFooterReady: boolean;
   plan: string;
@@ -34,6 +40,14 @@ export function surveySendStatus(input: {
 }): SurveySendStatus {
   if (!input.stripeConnected) return { kind: 'stripe_not_connected' };
   if (input.deletionRequested) return { kind: 'deletion_pending' };
+  // Ahead of the platform pause, whose copy tells the founder nothing in their
+  // setup needs fixing — untrue while their key is rejected — and of the
+  // free-tier cap, which lifts on the 1st while a rejected key stays rejected.
+  // The webhook checks the key later than both, but this is the one the
+  // founder has to act on.
+  if (input.stripeKeyInvalidSince !== null) {
+    return { kind: 'stripe_key_invalid', since: input.stripeKeyInvalidSince };
+  }
   if (!input.legalFooterReady) return { kind: 'paused_by_churnlens' };
   if (input.plan === 'free' && input.surveysThisMonth >= FREE_TIER_MONTHLY_SURVEYS) {
     const start = freeTierWindowStart(input.now);
