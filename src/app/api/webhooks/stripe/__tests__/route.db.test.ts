@@ -114,6 +114,8 @@ vi.mock('stripe', async (importOriginal) => {
 
 import { POST } from '../[orgId]/route';
 import { encryptApiKey } from '@/lib/crypto';
+import { FREE_TIER_MONTHLY_SURVEYS } from '@/lib/plan';
+import { countFreeTierSurveys, surveySendStatus } from '@/lib/survey-status';
 
 const ENCRYPTION_KEY = 'c'.repeat(64);
 const APP_URL = 'https://app.churnlens.test';
@@ -230,6 +232,36 @@ async function deliver(
     { params: { orgId } },
   );
   return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+}
+
+interface SurveyRowOpts {
+  subscriptionId?: string;
+  /** SQL interval ago, or null for "never". */
+  sentAgo?: string | null;
+  attempts?: number;
+  /** SQL interval ago, or null for "never claimed". */
+  lastAttemptAgo?: string | null;
+  surveyedAgo?: string | null;
+}
+
+/** A survey_responses row as the webhook itself would have left it. */
+async function seedSurveyRow(orgId: string, opts: SurveyRowOpts = {}): Promise<string> {
+  const {
+    subscriptionId = `sub_${randomUUID()}`,
+    sentAgo = '1 hour',
+    attempts = 1,
+    lastAttemptAgo = '1 hour',
+    surveyedAgo = null,
+  } = opts;
+  await pool().query(
+    `INSERT INTO survey_responses
+       (org_id, customer_email, stripe_subscription_id, token, mrr_lost,
+        survey_email_sent_at, survey_email_attempts, survey_email_last_attempt_at, surveyed_at)
+     VALUES ($1, 'earlier@example.com', $2, $3, 29,
+             now() - $4::interval, $5, now() - $6::interval, now() - $7::interval)`,
+    [orgId, subscriptionId, `tok_${randomUUID()}`, sentAgo, attempts, lastAttemptAgo, surveyedAgo],
+  );
+  return subscriptionId;
 }
 
 async function surveyRows(orgId: string) {
@@ -350,6 +382,126 @@ suite('Stripe webhook against a real database', () => {
 
       expect(res.body).toEqual({ received: true });
       expect(sentEmails).toHaveLength(1);
+    });
+  });
+
+  // ─── Free-tier cap ────────────────────────────────────────────────────────
+
+  describe('a free org at its monthly cap', () => {
+    /** A free org that has already sent FREE_TIER_MONTHLY_SURVEYS surveys this month. */
+    async function orgAtCap(): Promise<{ orgId: string; earlierSubscriptionIds: string[] }> {
+      const orgId = await seedOrg({ plan: 'free' });
+      const earlierSubscriptionIds: string[] = [];
+      for (let i = 0; i < FREE_TIER_MONTHLY_SURVEYS; i++) {
+        earlierSubscriptionIds.push(await seedSurveyRow(orgId));
+      }
+      return { orgId, earlierSubscriptionIds };
+    }
+
+    it('refuses a NEW cancellation without fetching the customer or recording it', async () => {
+      const { orgId } = await orgAtCap();
+
+      const res = await deliver(orgId, cancelledSubscription());
+
+      expect(res).toEqual({ status: 200, body: { received: true, skipped: 'free_tier_limit' } });
+      expect(stripeApi.requests).toEqual([]);
+      expect(sentEmails).toEqual([]);
+      expect(await surveyRows(orgId)).toHaveLength(FREE_TIER_MONTHLY_SURVEYS);
+    });
+
+    it("re-sends Stripe's retry of a send that failed, instead of refusing it as over the cap", async () => {
+      // The 10th survey of the month failed to send (Resend down) and 500'd;
+      // the row it claimed is what put the org at the cap. Stripe's retry is the
+      // second attempt at a survey the org was always entitled to — the cap
+      // counts surveys, and this one was already counted.
+      const orgId = await seedOrg({ plan: 'free' });
+      for (let i = 0; i < FREE_TIER_MONTHLY_SURVEYS - 1; i++) await seedSurveyRow(orgId);
+      const stranded = await seedSurveyRow(orgId, {
+        sentAgo: null,
+        attempts: 1,
+        lastAttemptAgo: '10 minutes',
+      });
+
+      const res = await deliver(orgId, cancelledSubscription({ id: stranded }));
+
+      expect(res).toEqual({ status: 200, body: { received: true } });
+      expect(sentEmails.map((e) => e.to)).toEqual([CUSTOMER_EMAIL]);
+      const row = (await surveyRows(orgId)).find((r) => r.stripe_subscription_id === stranded)!;
+      expect(row.survey_email_sent_at).not.toBeNull();
+      expect(row.survey_email_attempts).toBe(2);
+      // A retry adds no row, so it cannot push the org further over.
+      expect(await surveyRows(orgId)).toHaveLength(FREE_TIER_MONTHLY_SURVEYS);
+    });
+
+    it('reports a redelivery of an already-sent survey as a duplicate, not as the cap', async () => {
+      const { orgId, earlierSubscriptionIds } = await orgAtCap();
+
+      const res = await deliver(orgId, cancelledSubscription({ id: earlierSubscriptionIds[0] }));
+
+      expect(res.body).toEqual({ received: true, skipped: 'duplicate_event' });
+      expect(sentEmails).toEqual([]);
+    });
+
+    it('reports an exhausted send as exhausted, not as the cap', async () => {
+      const orgId = await seedOrg({ plan: 'free' });
+      for (let i = 0; i < FREE_TIER_MONTHLY_SURVEYS - 1; i++) await seedSurveyRow(orgId);
+      const exhausted = await seedSurveyRow(orgId, { sentAgo: null, attempts: 5, lastAttemptAgo: '1 day' });
+
+      const res = await deliver(orgId, cancelledSubscription({ id: exhausted }));
+
+      expect(res.body).toEqual({ received: true, skipped: 'email_send_exhausted' });
+    });
+
+    it('reports a redelivered portal-feedback cancellation as a duplicate, not as the cap', async () => {
+      const orgId = await seedOrg({ plan: 'free' });
+      for (let i = 0; i < FREE_TIER_MONTHLY_SURVEYS - 1; i++) await seedSurveyRow(orgId);
+      const prefilled = await seedSurveyRow(orgId, {
+        sentAgo: null,
+        attempts: 0,
+        lastAttemptAgo: null,
+        surveyedAgo: '1 hour',
+      });
+
+      const res = await deliver(orgId, cancelledSubscription({ id: prefilled, feedback: 'too_expensive' }));
+
+      expect(res.body).toEqual({ received: true, skipped: 'duplicate_event' });
+    });
+
+    it("does not let another org's row for the same subscription lift this org's cap", async () => {
+      // The "already recorded" test is scoped to this org: another tenant's row
+      // must not let a capped org past its cap.
+      const { orgId } = await orgAtCap();
+      const otherOrgId = await seedOrg({ plan: 'growth' });
+      const foreign = await seedSurveyRow(otherOrgId);
+
+      const res = await deliver(orgId, cancelledSubscription({ id: foreign }));
+
+      expect(res.body).toEqual({ received: true, skipped: 'free_tier_limit' });
+      expect(stripeApi.requests).toEqual([]);
+    });
+
+    it('agrees with the dashboard: the status line reports the cap exactly when new cancellations are refused', async () => {
+      const orgId = await seedOrg({ plan: 'free' });
+      for (let i = 0; i < FREE_TIER_MONTHLY_SURVEYS - 1; i++) await seedSurveyRow(orgId);
+      const statusNow = async () =>
+        surveySendStatus({
+          stripeConnected: true,
+          deletionRequested: false,
+          legalFooterReady: true,
+          plan: 'free',
+          surveysThisMonth: await countFreeTierSurveys(orgId),
+        }).kind;
+
+      // One under the cap: the dashboard says sending, and the webhook sends.
+      expect(await statusNow()).toBe('sending');
+      expect((await deliver(orgId, cancelledSubscription())).body).toEqual({ received: true });
+
+      // That send reached the cap: the dashboard says so, and the next NEW one is refused.
+      expect(await statusNow()).toBe('free_tier_limit');
+      expect((await deliver(orgId, cancelledSubscription())).body).toEqual({
+        received: true,
+        skipped: 'free_tier_limit',
+      });
     });
   });
 });

@@ -50,6 +50,11 @@ export function surveySendStatus(input: {
  * Surveys counted against the free-tier cap this month. Counted by created_at
  * (surveys sent), not surveyed_at (responses): most customers never respond,
  * so counting responses would let a free org send without limit.
+ *
+ * The webhook applies the cap only to a subscription with no row yet — a
+ * redelivery of one already counted here is retried or reported as a
+ * duplicate as usual — so the dashboard's "new cancellations won't be
+ * surveyed" is exactly what happens once this reaches the cap.
  */
 export function countFreeTierSurveys(orgId: string, now: Date = new Date()): Promise<number> {
   return queryCount(

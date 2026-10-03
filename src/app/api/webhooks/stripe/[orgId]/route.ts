@@ -203,12 +203,31 @@ export async function POST(
   }
 
   if (org.plan === 'free') {
-    // Shared with the dashboard's status line, so the founder sees the cap
-    // exactly when this starts enforcing it.
-    const count = await countFreeTierSurveys(org.id);
+    // The cap limits how many cancellations get a survey, so it gates only a
+    // subscription we have never recorded. One that already has a row was
+    // counted when that row was written: Stripe redelivering it — a retry of a
+    // send that failed, or a plain duplicate — must reach the idempotency and
+    // stranded-send handling below exactly as it would under the cap. Refusing
+    // it here (as this once did) turned the 10th survey's failed send into a
+    // survey that was never retried, reported as 'free_tier_limit'.
+    //
+    // Scoped to this org so another tenant's row can never move this org past
+    // its cap. Checked from the database alone, before the customer is fetched
+    // from Stripe, so a refused cancellation still pulls no personal data.
+    const alreadyRecorded = await queryOne<{ recorded: number }>(
+      `SELECT 1 AS recorded FROM survey_responses
+       WHERE stripe_subscription_id = $1 AND org_id = $2`,
+      [subscription.id, org.id],
+    );
 
-    if (count >= FREE_TIER_MONTHLY_SURVEYS) {
-      return NextResponse.json({ received: true, skipped: 'free_tier_limit' });
+    if (!alreadyRecorded) {
+      // Shared with the dashboard's status line, so the founder sees the cap
+      // exactly when this starts enforcing it.
+      const count = await countFreeTierSurveys(org.id);
+
+      if (count >= FREE_TIER_MONTHLY_SURVEYS) {
+        return NextResponse.json({ received: true, skipped: 'free_tier_limit' });
+      }
     }
   }
 

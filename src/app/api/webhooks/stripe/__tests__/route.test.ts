@@ -688,9 +688,13 @@ describe('pre-send guards', () => {
     expect(sendSurveyEmailMock).not.toHaveBeenCalled();
   });
 
-  it('skips once a free org has hit its monthly cap', async () => {
+  it('skips a new subscription once a free org has hit its monthly cap', async () => {
+    // Redeliveries of an already-recorded subscription are not capped; that,
+    // and the cap boundary itself, are covered against real rows in
+    // route.db.test.ts.
     queryOneMock.mockReset();
-    queryOneMock.mockResolvedValue(orgRow({ plan: 'free' }));
+    queryOneMock.mockResolvedValueOnce(orgRow({ plan: 'free' }));
+    queryOneMock.mockResolvedValueOnce(null); // no survey_responses row for this subscription yet
     queryCountMock.mockReset();
     queryCountMock.mockResolvedValueOnce(10); // free-tier count
     const res = await callPost();
