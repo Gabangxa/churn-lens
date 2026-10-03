@@ -176,6 +176,23 @@ suite('POST /api/legal/accept against a real database', () => {
       expect((await readAcceptance(orgId)).legal_accepted_version).toBe(LEGAL_DOCS_VERSION);
     });
 
+    it('a session the org has since signed out everywhere is a 401 and nothing is written', async () => {
+      // The session gate is a database check (src/lib/auth.ts). A cookie that
+      // still verifies but predates a logout-everywhere must not be able to
+      // agree to anything on the founder's behalf.
+      const orgId = await seedOrg();
+      const cookieRequest = acceptRequest({ orgId });
+      await pool().query('UPDATE organizations SET sessions_valid_after = $2 WHERE id = $1', [
+        orgId,
+        new Date(Date.now() + 60_000),
+      ]);
+
+      const res = await POST(cookieRequest);
+
+      expect(res.status).toBe(401);
+      expect(await readAcceptance(orgId)).toEqual(NOTHING_RECORDED);
+    });
+
     it('a valid session for an org that no longer exists is a 401 that clears the cookie', async () => {
       const res = await POST(acceptRequest({ orgId: '00000000-0000-4000-8000-000000000000' }));
 

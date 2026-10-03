@@ -21,7 +21,10 @@ export async function POST(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
 
-  const auth = requireOrgId(req);
+  // Awaited: the session gate checks the database (expiry, sign-out
+  // everywhere, a purged org). Un-awaited, `'error' in auth` is asked of a
+  // Promise, is always false, and every request would get past this line.
+  const auth = await requireOrgId(req);
   if ('error' in auth) return auth.error;
   const { orgId } = auth;
 
@@ -62,8 +65,9 @@ export async function POST(req: NextRequest) {
     );
 
     if (!org) {
-      // The cookie verified but its org is gone (deleted under an old
-      // session). Nothing to record against; evict the dead session, as
+      // requireOrgId already refuses a session whose org row is gone, so this
+      // is only reachable if the org was deleted between that check and this
+      // write. Nothing to record against; evict the dead session, as
       // /api/onboarding/connect does.
       const response = NextResponse.json(
         { error: 'Session is no longer valid. Please log in again.' },
