@@ -44,14 +44,14 @@ export async function POST(req: NextRequest) {
     // had worked: they may be logging out precisely because of another device.
     // Reported as well as answered: the founder is told, but a database that
     // cannot take this write is everyone's problem, not just theirs.
+    //
+    // Told on /login rather than in a JSON body: every caller is a native
+    // form POST, so a JSON 500 was a raw error page. /login is also where
+    // the retry starts — sign in again, then log out again.
     reportError('auth.logout', err, { orgId });
-    const response = NextResponse.json(
-      {
-        error:
-          'You are signed out of this browser, but we could not sign you out of your other devices. Sign in again and log out to retry.',
-      },
-      { status: 500 },
-    );
+    const response = NextResponse.redirect(redirectUrl('/login?error=logout_partial', req), {
+      status: 303,
+    });
     return clearOrgCookie(response);
   }
 

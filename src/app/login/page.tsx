@@ -15,18 +15,25 @@ export default function LoginPage() {
   const [sent, setSent] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expired, setExpired] = useState(false);
+  // /api/auth/logout could not end the org's sessions on other devices (a
+  // database failure), though it did clear this browser's cookie.
+  const [logoutPartial, setLogoutPartial] = useState(false);
   // The redirect to send along with this request, computed once from the URL.
   // Null means "omit it" — the server defaults to /dashboard (or /onboarding,
   // if the org still has no Stripe key) when nothing is sent.
   const [next, setNext] = useState<string | null>(null);
 
   // Surfaced when /login/confirm or /api/auth/verify bounces an invalid/expired/used link back here,
+  // when /api/auth/logout could only sign this browser out,
   // or when a plan/next was carried from the landing page or a login-gated route.
   // Read from the URL client-side to avoid a useSearchParams Suspense boundary.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    if (params.get('error') === 'expired') {
+    const errorParam = params.get('error');
+    if (errorParam === 'expired') {
       setExpired(true);
+    } else if (errorParam === 'logout_partial') {
+      setLogoutPartial(true);
     }
 
     const plan = params.get('plan');
@@ -98,6 +105,19 @@ export default function LoginPage() {
             {expired && (
               <p className="mb-4 rounded-2xl border-2 border-yellow-300 bg-yellow-300/20 dark:bg-yellow-300/10 px-4 py-2.5 text-sm font-bold text-yellow-800 dark:text-yellow-300">
                 That link is invalid or has expired. Request a fresh one below.
+              </p>
+            )}
+
+            {/* Not cleared on submit, unlike the notice above: it describes
+                devices that are still signed in, and stays true until the
+                founder has signed in and logged out again. */}
+            {logoutPartial && (
+              <p
+                role="alert"
+                className="mb-4 rounded-2xl border-2 border-yellow-300 bg-yellow-300/20 dark:bg-yellow-300/10 px-4 py-2.5 text-sm font-bold text-yellow-800 dark:text-yellow-300"
+              >
+                You&apos;re signed out of this browser, but not on your other devices. Sign in
+                below and log out again to end those sessions.
               </p>
             )}
 

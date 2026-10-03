@@ -1,5 +1,13 @@
 import { expect, test } from '@playwright/test';
-import { closeDb, loginTokenUsedAt, queryOne, seedLoginToken, seedOrg, uniqueEmail } from './helpers/db';
+import {
+  closeDb,
+  loginTokenUsedAt,
+  queryOne,
+  refuseOrgColumnWrites,
+  seedLoginToken,
+  seedOrg,
+  uniqueEmail,
+} from './helpers/db';
 import { E2E_CLIENT_IP } from './env';
 import { atLoginWithNext, confirmSignIn, loginAs } from './helpers/session';
 
@@ -229,5 +237,36 @@ test.describe('authentication', () => {
     await loginAs(page, { orgId, email, redirectTo: '/dashboard' });
 
     await page.waitForURL((url) => url.pathname === '/onboarding');
+  });
+
+  test('a logout that cannot end the other devices says so on /login, and still signs this browser out', async ({ page }) => {
+    // Someone logging out because a laptop went missing must not be shown the
+    // landing page as if every device had been signed out — nor, because the
+    // button is a native form POST, a raw JSON error page.
+    const email = uniqueEmail('logoutpartial');
+    const { orgId } = await seedOrg({ email, withStripeKey: true, withStripeWebhook: true });
+    await loginAs(page, { orgId, email, redirectTo: '/dashboard' });
+    await page.waitForURL((url) => url.pathname === '/dashboard');
+
+    const allowWrites = await refuseOrgColumnWrites(orgId, 'sessions_valid_after');
+    try {
+      await page.getByRole('button', { name: 'Log out' }).click();
+      await page.waitForURL(
+        (url) => url.pathname === '/login' && url.searchParams.get('error') === 'logout_partial',
+      );
+    } finally {
+      await allowWrites();
+    }
+
+    // By text, not role: Next's route announcer is a role="alert" too.
+    await expect(
+      page.getByText("You're signed out of this browser, but not on your other devices"),
+    ).toBeVisible();
+    expect((await page.context().cookies()).find((c) => c.name === SESSION_COOKIE)).toBeUndefined();
+    const org = await queryOne<{ sessions_valid_after: string | null }>(
+      'SELECT sessions_valid_after FROM organizations WHERE id = $1',
+      [orgId],
+    );
+    expect(org!.sessions_valid_after).toBeNull();
   });
 });

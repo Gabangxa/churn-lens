@@ -130,17 +130,19 @@ describe('POST /api/auth/logout — when sessions cannot be revoked server-side'
     vi.restoreAllMocks();
   });
 
-  it('still signs this browser out, but says the other devices were not — no cheerful redirect', async () => {
+  it('still signs this browser out, but sends it to a page that says the other devices were not', async () => {
     resetErrorReports();
     executeMock.mockRejectedValue(new Error('connection terminated'));
 
     const res = await POST(logoutWithSession());
 
     // A founder logging out because a laptop went missing must not be shown
-    // the landing page as if every device had been signed out.
-    expect(res.status).toBe(500);
-    expect(res.headers.get('location')).toBeNull();
-    expect((await res.json()).error).toMatch(/other devices/);
+    // the landing page as if every device had been signed out. Nor a raw
+    // JSON error page: the logout button is a native form POST, so whatever
+    // this answers is what the browser shows. /login says what happened and
+    // is where the fix (sign in, log out again) starts.
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toBe('https://app.churnlens.com/login?error=logout_partial');
     // This browser's cookie goes regardless — that part never needed the DB.
     expect(res.headers.get('set-cookie') ?? '').toMatch(/Max-Age=0|Expires=Thu, 01 Jan 1970/);
     expect(console.error).toHaveBeenCalled();
@@ -160,7 +162,8 @@ describe('POST /api/auth/logout — when sessions cannot be revoked server-side'
 
     const res = await POST(logoutWithSession());
 
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toBe('https://app.churnlens.com/login?error=logout_partial');
     // No org id: the session was never confirmed, so none is claimed.
     expect(getErrorReportSnapshot().recent).toEqual([
       expect.objectContaining({ context: 'auth.logout', message: 'connection refused', meta: {} }),

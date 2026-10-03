@@ -181,6 +181,48 @@ export async function loginTokenUsedAt(rawToken: string): Promise<string | null>
   return row.used_at;
 }
 
+/** Columns a spec can make the database refuse to write; see refuseOrgColumnWrites. */
+export type RefusableOrgColumn =
+  /** Written by revokeAllSessions: logout, account deletion. */
+  | 'sessions_valid_after'
+  /** Cleared by disconnectStripe: Settings disconnect, account deletion. */
+  | 'stripe_api_key_enc';
+
+/**
+ * Make the database refuse every UPDATE that writes `column` on one org's
+ * row, as an outage or a lock timeout would, for specs about what the founder
+ * is told when a flow fails half-way. A real trigger on the real table, so the
+ * server's own error handling runs unmodified — nothing in the app is stubbed.
+ *
+ * Returns the undo; call it in a `finally`. The trigger only matches this one
+ * org id, so one left behind by a crashed run cannot affect any other spec.
+ */
+export async function refuseOrgColumnWrites(
+  orgId: string,
+  column: RefusableOrgColumn,
+): Promise<() => Promise<void>> {
+  // DDL takes no bind parameters, so the id is spliced in: check it is the
+  // uuid seedOrg generated and nothing else.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(orgId)) {
+    throw new Error(`refuseOrgColumnWrites: ${JSON.stringify(orgId)} is not an org id`);
+  }
+  const trigger = `e2e_refuse_${randomBytes(6).toString('hex')}`;
+  await query(`
+    CREATE OR REPLACE FUNCTION e2e_refuse_org_write() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      RAISE EXCEPTION 'e2e: write to organizations.% refused on purpose', TG_ARGV[0];
+    END $$
+  `);
+  await query(`
+    CREATE TRIGGER ${trigger} BEFORE UPDATE OF ${column} ON organizations
+    FOR EACH ROW WHEN (OLD.id = '${orgId}')
+    EXECUTE FUNCTION e2e_refuse_org_write('${column}')
+  `);
+  return async () => {
+    await query(`DROP TRIGGER IF EXISTS ${trigger} ON organizations`);
+  };
+}
+
 export interface SeedSurveyResponseOptions {
   customerEmail: string;
   /** Drives the purge job's 24-month retention window. */
