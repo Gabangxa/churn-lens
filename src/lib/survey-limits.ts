@@ -41,6 +41,32 @@ export interface TruncationResult {
 // eslint-disable-next-line no-control-regex
 const UNTYPEABLE_CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g;
 
+/** Every C0 control character and DEL, line breaks and tabs included. */
+// eslint-disable-next-line no-control-regex
+const ALL_CONTROL_CHARS = /[\u0000-\u001F\u007F]/g;
+
+/**
+ * Prose from a provider (a Stripe Customer Portal cancellation comment), made
+ * storable: the untypeable control characters truncateFreeText strips, NUL
+ * among them, removed; tab and line breaks kept. Not truncated — the
+ * provider bounds its own length.
+ */
+export function storableProse(value: string): string {
+  return value.replace(UNTYPEABLE_CONTROL_CHARS, '');
+}
+
+/**
+ * A provider-supplied name (a Stripe customer's name) for one line of copy —
+ * "Hi <name>," in the survey email — and a dashboard cell: every control
+ * character removed, line breaks included, then trimmed. Null when nothing is
+ * left, which every caller already treats as "no name".
+ */
+export function singleLineName(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null;
+  const clean = value.replace(ALL_CONTROL_CHARS, '').trim();
+  return clean === '' ? null : clean;
+}
+
 /**
  * Strip untypeable control characters, then truncate to `max` characters.
  *
@@ -61,7 +87,7 @@ export function truncateFreeText(value: string, max: number): TruncationResult {
   // Stripped first, so the cap measures what is actually stored. `truncated`
   // still means only "lost a tail to the cap": a stripped NUL is not text the
   // customer wrote.
-  const clean = value.replace(UNTYPEABLE_CONTROL_CHARS, '');
+  const clean = storableProse(value);
   if (clean.length <= max) return { value: clean, truncated: false };
 
   let cut = clean.slice(0, max);

@@ -9,6 +9,7 @@ import { cacheStripeBusinessName, fetchStripeBusinessName } from '@/lib/stripe-b
 import { FREE_TIER_MONTHLY_SURVEYS } from '@/lib/plan';
 import { countFreeTierSurveys } from '@/lib/survey-status';
 import { reportError } from '@/lib/report-error';
+import { singleLineName, storableProse } from '@/lib/survey-limits';
 import { withErrorReporting } from '@/lib/with-error-reporting';
 
 // Stripe Customer Portal cancellation reasons → our survey categories.
@@ -430,6 +431,18 @@ async function handleStripeWebhook(
     return NextResponse.json({ received: true, skipped: 'no_customer_email' });
   }
 
+  // Free text the founder's customer typed into Stripe, cleaned before it is
+  // stored or mailed. Postgres `text` cannot hold NUL, and the INSERTs below
+  // sit outside any try: a name or portal comment carrying one used to fail
+  // with 22021, which withErrorReporting answers as bad input (400, a warning)
+  // — so Stripe retried for three days and the cancellation was lost with
+  // nobody alerted. The name also opens the email ("Hi <name>,"), so it loses
+  // line breaks as well. The email address is Stripe-validated and left as is.
+  const customerName = singleLineName(customer.name);
+  const portalComment = subscription.cancellation_details?.comment
+    ? storableProse(subscription.cancellation_details.comment)
+    : null;
+
   // Respect prior opt-outs (CAN-SPAM): never re-survey a customer who unsubscribed.
   const suppressed = await queryCount(
     'SELECT COUNT(*) FROM unsubscribes WHERE org_id = $1 AND customer_email = $2',
@@ -477,12 +490,12 @@ async function handleStripeWebhook(
       [
         org.id,
         customerEmail,
-        customer.name ?? null,
+        customerName,
         subscription.id,
         mrrLost,
         token,
         portalReason,
-        subscription.cancellation_details?.comment ?? null,
+        portalComment,
         new Date().toISOString(),
       ],
     );
@@ -508,7 +521,7 @@ async function handleStripeWebhook(
         survey_email_attempts, survey_email_last_attempt_at)
      VALUES ($1, $2, $3, $4, $5, $6, 1, now())
      ON CONFLICT (stripe_subscription_id) DO NOTHING`,
-    [org.id, customerEmail, customer.name ?? null, subscription.id, mrrLost, token],
+    [org.id, customerEmail, customerName, subscription.id, mrrLost, token],
   );
 
   // The token that will actually be emailed. On the first insert it is the one
@@ -628,7 +641,7 @@ async function handleStripeWebhook(
   try {
     await sendSurveyEmail({
       to: customerEmail,
-      customerName: customer.name ?? null,
+      customerName,
       surveyUrl,
       optOutUrl,
       displayName: presentation.businessName,

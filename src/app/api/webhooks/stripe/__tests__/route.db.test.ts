@@ -172,6 +172,8 @@ interface SubscriptionOpts {
   id?: string;
   reason?: string | null;
   feedback?: string | null;
+  /** cancellation_details.comment: what the customer typed in the portal. */
+  comment?: string | null;
 }
 
 /** A customer.subscription.deleted payload's data.object. */
@@ -188,7 +190,7 @@ function cancelledSubscription(opts: SubscriptionOpts = {}) {
     cancellation_details: {
       reason: opts.reason === undefined ? 'cancellation_requested' : opts.reason,
       feedback: opts.feedback ?? null,
-      comment: null,
+      comment: opts.comment ?? null,
     },
   };
 }
@@ -323,6 +325,49 @@ suite('Stripe webhook against a real database', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].stripe_subscription_id).toBe(subscription.id);
     expect(rows[0].survey_email_sent_at).not.toBeNull();
+  });
+
+  // ─── Free text from Stripe ────────────────────────────────────────────────
+
+  describe('free text the customer typed into Stripe', () => {
+    // Postgres `text` cannot hold NUL. These INSERTs run outside any try, so
+    // one NUL used to fail the cancellation with 22021, answered as bad input
+    // (400, a warning): Stripe retried for three days and then it was lost.
+
+    async function storedRow(orgId: string) {
+      const { rows } = await pool().query<{ customer_name: string | null; open_text: string | null }>(
+        'SELECT customer_name, open_text FROM survey_responses WHERE org_id = $1',
+        [orgId],
+      );
+      return rows;
+    }
+
+    it('surveys a customer whose Stripe name carries NUL and line breaks, under the cleaned name', async () => {
+      fakeStripeApi.reset((req) =>
+        req.method === 'GET' && req.path === `/v1/customers/${CUSTOMER_ID}`
+          ? stripeJson(200, { ...customerJson, name: 'Jane\u0000 Cus\r\ntomer ' })
+          : onboardingScopedKey(req),
+      );
+      const orgId = await seedOrg();
+
+      const res = await deliver(orgId, cancelledSubscription());
+
+      expect(res).toEqual({ status: 200, body: { received: true } });
+      expect(await storedRow(orgId)).toEqual([{ customer_name: 'Jane Customer', open_text: null }]);
+      expect(sentEmails).toHaveLength(1);
+      expect(sentEmails[0].text).toContain('Hi Jane Customer,');
+    });
+
+    it('records a portal comment carrying NUL without it, keeping its line breaks', async () => {
+      const orgId = await seedOrg();
+      const res = await deliver(
+        orgId,
+        cancelledSubscription({ feedback: 'too_expensive', comment: 'Too pricey\u0000\nfor us' }),
+      );
+
+      expect(res).toEqual({ status: 200, body: { received: true, prefilled: 'portal_feedback' } });
+      expect(await storedRow(orgId)).toEqual([{ customer_name: 'Jane Customer', open_text: 'Too pricey\nfor us' }]);
+    });
   });
 
   // ─── An unfilled legal footer ─────────────────────────────────────────────
