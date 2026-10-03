@@ -114,9 +114,11 @@ const BUDGET_WINDOW_MS = 60 * 60 * 1000;
  * letters (the TLD). Deliberately broad: a false positive costs a redacted
  * token in a log line, a false negative leaks a churned customer's address
  * into logs and an inbox. Beyond plain ASCII that means:
- *   - any letter, digit or combining mark (`\p{L}\p{N}\p{M}`), because
- *     internationalised addresses (jöhn@exämple.de, андрей@почта.рф) are
- *     real and Stripe and Resend pass them through;
+ *   - any non-ASCII character other than whitespace, because internationalised
+ *     addresses (jöhn@exämple.de, андрей@почта.рф, 用户@例子.广告) are real
+ *     and Stripe and Resend pass them through. Broader than "letters": a
+ *     non-ASCII quote or dash glued to an address goes with it, which is the
+ *     cheap side of the trade above;
  *   - the separator as `@`, fullwidth `＠` (U+FF20), URL-encoded `%40` (an
  *     address that was a query parameter of a failed request) and
  *     double-encoded `%2540` (one that went through two encoders);
@@ -129,18 +131,19 @@ const BUDGET_WINDOW_MS = 60 * 60 * 1000;
  * request input reaches these messages (Postgres quotes a rejected value).
  * Every pattern below is a single linear scan.
  *
+ * No `u` flag and no `\p{…}` classes: tsconfig sets no `target`, so tsc
+ * checks against ES5 and rejects the flag. Without it the patterns see UTF-16
+ * code units, and "non-ASCII" covers both halves of a surrogate pair, so
+ * astral-plane characters stay inside a run too.
+ *
  * Kept off the TLD rule: version strings (pkg@1.2.3) and scoped package paths
  * in stacks (node_modules/@vitest/…), which have no letters after a dot.
  */
-const EMAIL_CHAR_RUN = /[\p{L}\p{N}\p{M}._%+@＠．。-]+/gu;
-const ADDRESS_SEPARATOR = /@|＠|%40|%2540/u;
-const DOT_THEN_TLD = /[.．。][\p{L}\p{M}]{2}/u;
-/**
- * One UTF-16 code unit of a run — used to drop a token a length cut split.
- * Any surrogate half counts too: a cut through an astral-plane letter must
- * not stop the walk-back early.
- */
-const EMAIL_CHAR = /[\p{L}\p{N}\p{M}._%+@＠．。-]|[\uD800-\uDFFF]/u;
+const EMAIL_CHAR_RUN = /(?:[A-Za-z0-9._%+@-]|[^\x00-\x7F\s])+/g;
+const ADDRESS_SEPARATOR = /@|＠|%40|%2540/;
+const DOT_THEN_TLD = /[.．。](?:[A-Za-z]|[^\x00-\x7F\s]){2}/;
+/** One UTF-16 code unit of a run — used to drop a token a length cut split. */
+const EMAIL_CHAR = /[A-Za-z0-9._%+@-]|[^\x00-\x7F\s]/;
 const REDACTED_EMAIL = '[redacted email]';
 
 const UUID_SHAPED = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
@@ -294,10 +297,12 @@ function fnv1a32(text: string): string {
 
 /**
  * A quoted value: "…", `…`, or '…' where the opening quote does not follow a
- * letter or digit — so the apostrophes in "can't reach the server's" are prose,
- * not a literal. Postgres, Stripe and JSON.parse all quote the offending value.
+ * letter or digit (ASCII, or any non-ASCII non-space, as in the redaction
+ * patterns above) — so the apostrophes in "can't reach the server's" are
+ * prose, not a literal. Postgres, Stripe and JSON.parse all quote the
+ * offending value.
  */
-const QUOTED_LITERAL = /"[^"\n]*"|`[^`\n]*`|(?<![\p{L}\p{N}])'[^'\n]*'/gu;
+const QUOTED_LITERAL = /"[^"\n]*"|`[^`\n]*`|(?<![A-Za-z0-9]|[^\x00-\x7F\s])'[^'\n]*'/g;
 
 /**
  * Prefixed ids: cus_…, sub_…, req_…, evt_…, whsec_…. Only replaced when the

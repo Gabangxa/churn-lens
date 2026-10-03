@@ -188,6 +188,9 @@ describe('reportError — PII redaction', () => {
     ['a fullwidth at sign', 'jane＠customer.example', ['jane', 'customer.example']],
     ['a double-encoded at sign (%2540)', 'jane%2540customer.example', ['jane', 'customer.example']],
     ['a percent-encoded non-ASCII domain', 'jane%40caf%C3%A9.example', ['jane', 'caf%C3%A9']],
+    ['an astral-plane character in the local part', 'j𝒶ne@customer.example', ['j𝒶ne', 'customer.example']],
+    // The typographic quotes go with it: non-ASCII counts as address text.
+    ['an address in typographic quotes', '“jane@customer.example”', ['jane', 'customer.example']],
   ])('redacts %s', (_label, address, fragments) => {
     reportError('auth.login-request', new Error(`lookup failed for ${address} (retrying)`), { who: address });
 
