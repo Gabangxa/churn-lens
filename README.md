@@ -45,7 +45,10 @@ magic link either way. `/api/auth/verify` is the *only* route that ever mints
 a session — it sends a founder with no Stripe key yet to `/onboarding`,
 everyone else to wherever they were headed (or `/dashboard`). `/api/onboarding/connect`
 requires that session and only ever attaches a Stripe key to it; it can no
-longer create an org or accept an email on its own.
+longer create an org or accept an email on its own. It also refuses the key
+unless the request accepts the current Terms of Service and DPA
+(`LEGAL_DOCS_VERSION` in `src/lib/legal-version.ts`), and records that
+acceptance in the same statement that stores the key.
 
 ---
 
@@ -166,7 +169,7 @@ scheduler cannot race the cron spec.
 | `e2e/landing.spec.ts` | Marketing links: no anchor points at the session-gated `/onboarding`, pricing CTAs carry `?plan=`, header CTA goes to `/login` |
 | `e2e/auth.spec.ts` | Signup through the real form (email normalization, plan carried into `redirect_to`, no session yet), magic-link verification, replayed and expired links, signed-out redirects to `/login?next=…` |
 | `e2e/csrf.spec.ts` | `assertSameOrigin` wired in front of connect / login / checkout, and an off-site `next` dropped rather than stored |
-| `e2e/onboarding.spec.ts` | Key-only form behind a session (no email field — that was the account-takeover hole) and the `rk_` validation error |
+| `e2e/onboarding.spec.ts` | Key-only form behind a session (no email field — that was the account-takeover hole), the unticked-by-default Terms/DPA checkbox, and the `rk_` validation error |
 | `e2e/account.spec.ts` | Delete account from Settings: two-step confirm, Stripe columns cleared, session ended |
 | `e2e/cron.spec.ts` | `CRON_SECRET` gate on all three jobs; the purge job's retention, erasure, abandoned-signup and orphaned-opt-out rules against real rows; themes + digest recorded as succeeded |
 | `e2e/legal.spec.ts` | Privacy / Terms / DPA render with the draft banner, POPIA specifics, unsubscribe page's privacy link |

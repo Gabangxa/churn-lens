@@ -6,6 +6,7 @@ import { assertSameOrigin, requireOrgId, clearOrgCookie } from '@/lib/auth';
 import { checkRateLimit, clientIp } from '@/lib/ratelimit';
 import { reportError } from '@/lib/report-error';
 import { fetchStripeBusinessName } from '@/lib/stripe-business-name';
+import { LEGAL_DOCS_VERSION } from '@/lib/legal-version';
 
 /**
  * Attach (or replace) the signed-in org's Stripe restricted key and register
@@ -16,6 +17,12 @@ import { fetchStripeBusinessName } from '@/lib/stripe-business-name';
  * body with nothing proving the caller owned that address; that was the
  * account-takeover hole this route was rewritten to close. Signup now happens
  * only in /api/auth/request, and a session is minted only in /api/auth/verify.
+ *
+ * Connecting also requires accepting the current Terms of Service and Data
+ * Processing Agreement (see LEGAL_DOCS_VERSION). The stored key is what starts
+ * processing the org's customers' personal information on its behalf, which
+ * POPIA s21 only allows under a written operator contract — so no key is
+ * stored without an acceptance recorded in the same statement.
  */
 export async function POST(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
@@ -41,10 +48,25 @@ export async function POST(req: NextRequest) {
   }
 
   let apiKey: unknown;
+  let acceptedLegalVersion: unknown;
   try {
-    ({ apiKey } = await req.json());
+    ({ apiKey, acceptedLegalVersion } = await req.json());
   } catch {
     return NextResponse.json({ error: 'Invalid request body.' }, { status: 400 });
+  }
+
+  // Checked before the key is even looked at: without an agreement in place
+  // there is nothing to process it under. The form sends the version string it
+  // was built with, not a bare `true`, so a page loaded before a version bump
+  // cannot agree to wording the founder was never shown — it gets told to
+  // reload instead. Whatever else the body carries (a timestamp, say) is
+  // ignored: the acceptance time below is the database's clock.
+  if (acceptedLegalVersion !== LEGAL_DOCS_VERSION) {
+    const error =
+      typeof acceptedLegalVersion === 'string' && acceptedLegalVersion !== ''
+        ? 'The Terms of Service or Data Processing Agreement changed after this page loaded. Reload the page to review and accept the current version.'
+        : 'You need to accept the Terms of Service and Data Processing Agreement to connect Stripe. If you do not see the checkbox, reload the page.';
+    return NextResponse.json({ error }, { status: 400 });
   }
 
   try {
@@ -96,11 +118,26 @@ export async function POST(req: NextRequest) {
     //  - stripe_business_name: always overwritten, NULL included. The new key
     //    may belong to a different Stripe account, and surveys must not go out
     //    naming the previous one; the webhook retries the lookup lazily.
+    //  - legal_accepted_*: the Terms/DPA acceptance is written in the SAME
+    //    statement as the key, so a stored key can never exist without one
+    //    beside it — even if the webhook registration below then fails, the
+    //    founder did agree. now() is the database's clock, never a
+    //    client-supplied time. A re-accept of the version already on record
+    //    keeps the original time: the record should say when the founder first
+    //    agreed to this wording, and replacing a key is not a new agreement to
+    //    it. In a SET clause the right-hand columns are the row's values BEFORE
+    //    this update, and the organizations_legal_acceptance_pair_check
+    //    constraint guarantees a matching version always has a time beside it.
+    //    POST /api/legal/accept applies the same rule.
     await query(
       `UPDATE organizations
-       SET stripe_api_key_enc = $1, stripe_key_invalid_at = NULL, stripe_business_name = $2
-       WHERE id = $3`,
-      [encrypted, businessName, orgId],
+       SET stripe_api_key_enc = $1,
+           stripe_key_invalid_at = NULL,
+           stripe_business_name = $2,
+           legal_accepted_at = CASE WHEN legal_accepted_version = $3 THEN legal_accepted_at ELSE now() END,
+           legal_accepted_version = $3
+       WHERE id = $4`,
+      [encrypted, businessName, LEGAL_DOCS_VERSION, orgId],
     );
 
     // Register ChurnLens webhook on the customer's Stripe account (only if not already done).

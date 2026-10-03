@@ -52,11 +52,15 @@ import { POST } from '../connect/route';
 // Real: these tests assert on what the route reported. ALERT_EMAIL is pinned
 // empty for every suite (vitest.config.ts), so nothing is emailed.
 import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
+import { LEGAL_DOCS_VERSION } from '@/lib/legal-version';
 
 const ORG_ID = 'org-abc';
 const APP_URL = 'https://app.churnlens.com';
 const RESTRICTED_KEY = 'rk_live_abc123';
 const ORIGINAL_APP_URL = process.env.NEXT_PUBLIC_APP_URL;
+// Every connect must carry acceptance of the current Terms/DPA; what happens
+// without it is pinned against real rows in connect.db.test.ts.
+const ACCEPTED = { acceptedLegalVersion: LEGAL_DOCS_VERSION };
 
 function connectRequest(body: unknown) {
   return new NextRequest('http://localhost/api/onboarding/connect', {
@@ -106,7 +110,7 @@ describe('POST /api/onboarding/connect — CSRF', () => {
       NextResponse.json({ error: 'Cross-site request rejected.' }, { status: 403 }),
     );
 
-    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY }));
+    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY, ...ACCEPTED }));
 
     expect(res.status).toBe(403);
     expect(requireOrgIdMock).not.toHaveBeenCalled();
@@ -119,7 +123,7 @@ describe('POST /api/onboarding/connect — requires a session', () => {
   it('returns 401 and writes nothing when there is no session', async () => {
     authFail();
 
-    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY }));
+    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY, ...ACCEPTED }));
 
     expect(res.status).toBe(401);
     expect(queryOneMock).not.toHaveBeenCalled();
@@ -131,7 +135,7 @@ describe('POST /api/onboarding/connect — requires a session', () => {
     authOk();
     queryOneMock.mockResolvedValueOnce(null); // org row is gone
 
-    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY }));
+    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY, ...ACCEPTED }));
 
     expect(res.status).toBe(401);
     expect((await res.json()).error).toMatch(/session is no longer valid/i);
@@ -142,7 +146,7 @@ describe('POST /api/onboarding/connect — requires a session', () => {
 
 describe('POST /api/onboarding/connect — happy path', () => {
   it('stores the encrypted key, registers the webhook, and sets no cookie', async () => {
-    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY }));
+    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY, ...ACCEPTED }));
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ success: true });
@@ -151,7 +155,7 @@ describe('POST /api/onboarding/connect — happy path', () => {
     expect(queryMock).toHaveBeenCalledWith(
       expect.stringMatching(/UPDATE organizations\s+SET stripe_api_key_enc = \$1/),
       // No business name: this key may not read the account (see the mock).
-      [`enc:${RESTRICTED_KEY}`, null, ORG_ID],
+      [`enc:${RESTRICTED_KEY}`, null, LEGAL_DOCS_VERSION, ORG_ID],
     );
 
     expect(webhookEndpointsCreateMock).toHaveBeenCalledWith(
@@ -167,7 +171,7 @@ describe('POST /api/onboarding/connect — happy path', () => {
   });
 
   it('ignores an email field in the request body — nothing is ever written to users', async () => {
-    await POST(connectRequest({ apiKey: RESTRICTED_KEY, email: 'attacker@evil.example' }));
+    await POST(connectRequest({ apiKey: RESTRICTED_KEY, ...ACCEPTED, email: 'attacker@evil.example' }));
 
     const allSql = [...queryMock.mock.calls, ...queryOneMock.mock.calls].map(([sql]) => sql as string);
     for (const sql of allSql) {
@@ -178,14 +182,14 @@ describe('POST /api/onboarding/connect — happy path', () => {
   it('skips webhook registration when the org already has one', async () => {
     queryOneMock.mockResolvedValueOnce({ id: ORG_ID, stripe_webhook_id: 'we_existing' });
 
-    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY }));
+    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY, ...ACCEPTED }));
 
     expect(res.status).toBe(200);
     expect(webhookEndpointsCreateMock).not.toHaveBeenCalled();
   });
 
   it('rejects a non-restricted key before touching the database', async () => {
-    const res = await POST(connectRequest({ apiKey: 'sk_live_not_restricted' }));
+    const res = await POST(connectRequest({ apiKey: 'sk_live_not_restricted', ...ACCEPTED }));
 
     expect(res.status).toBe(400);
     expect(queryOneMock).not.toHaveBeenCalled();
@@ -194,7 +198,7 @@ describe('POST /api/onboarding/connect — happy path', () => {
   it('returns 422 when Stripe rejects webhook registration', async () => {
     webhookEndpointsCreateMock.mockRejectedValue(new Error('bad request'));
 
-    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY }));
+    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY, ...ACCEPTED }));
 
     expect(res.status).toBe(422);
   });
@@ -205,7 +209,7 @@ describe('POST /api/onboarding/connect — happy path', () => {
     // shared-IP neighbor's) connect budget just by hammering this route.
     checkRateLimitMock.mockReturnValue({ allowed: false, retryAfterSec: 42 });
 
-    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY }));
+    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY, ...ACCEPTED }));
 
     expect(res.status).toBe(429);
     expect(requireOrgIdMock).toHaveBeenCalledTimes(1);
@@ -216,7 +220,7 @@ describe('POST /api/onboarding/connect — happy path', () => {
     authFail();
     checkRateLimitMock.mockReturnValue({ allowed: false, retryAfterSec: 42 });
 
-    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY }));
+    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY, ...ACCEPTED }));
 
     expect(res.status).toBe(401);
     expect(checkRateLimitMock).not.toHaveBeenCalled();
@@ -265,7 +269,7 @@ describe('POST /api/onboarding/connect — the account-takeover attack', () => {
   }
 
   it('the original exploit — { email: victim, apiKey } with no cookie — is a 401 with zero DB writes', async () => {
-    const res = await POST(attackRequest({ email: VICTIM_EMAIL, apiKey: RESTRICTED_KEY }));
+    const res = await POST(attackRequest({ email: VICTIM_EMAIL, apiKey: RESTRICTED_KEY, ...ACCEPTED }));
 
     expect(res.status).toBe(401);
     // Nothing read, nothing written, no org or user conjured from the email.
@@ -279,7 +283,7 @@ describe('POST /api/onboarding/connect — the account-takeover attack', () => {
 
   it('a forged cookie (right shape, wrong signature) is a 401 with zero DB writes', async () => {
     const res = await POST(
-      attackRequest({ email: VICTIM_EMAIL, apiKey: RESTRICTED_KEY }, 'org-victim.deadbeef'),
+      attackRequest({ email: VICTIM_EMAIL, apiKey: RESTRICTED_KEY, ...ACCEPTED }, 'org-victim.deadbeef'),
     );
 
     expect(res.status).toBe(401);
@@ -292,7 +296,7 @@ describe('POST /api/onboarding/connect — the account-takeover attack', () => {
 
     const res = await POST(
       attackRequest(
-        { email: VICTIM_EMAIL, apiKey: RESTRICTED_KEY },
+        { email: VICTIM_EMAIL, apiKey: RESTRICTED_KEY, ...ACCEPTED },
         signedCookieFor(ATTACKER_ORG_ID),
       ),
     );
@@ -322,7 +326,7 @@ describe('POST /api/onboarding/connect — the account-takeover attack', () => {
     queryOneMock.mockResolvedValue(null);
 
     const res = await POST(
-      attackRequest({ apiKey: RESTRICTED_KEY }, signedCookieFor('org-deleted')),
+      attackRequest({ apiKey: RESTRICTED_KEY, ...ACCEPTED }, signedCookieFor('org-deleted')),
     );
 
     expect(res.status).toBe(401);

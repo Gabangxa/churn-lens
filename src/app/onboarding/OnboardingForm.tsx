@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useState, FormEvent, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Wordmark from '@/components/Wordmark';
+import { LEGAL_DOCS_VERSION } from '@/lib/legal-version';
 
 // Account-takeover fix: this form no longer collects an email or creates an
 // org/user. A session (from /api/auth/verify) is required to even reach this
@@ -34,6 +35,9 @@ function OnboardingFormInner() {
 
   const [apiKey, setApiKey] = useState('');
   const [showKey, setShowKey] = useState(false);
+  // Unticked by default, every time — including for a founder reconnecting
+  // after a disconnect. Acceptance has to be an act, not a default.
+  const [acceptedLegal, setAcceptedLegal] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -45,7 +49,13 @@ function OnboardingFormInner() {
       const res = await fetch('/api/onboarding/connect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey }),
+        // The version this page was built with, not a bare `true`: the server
+        // refuses a version that is no longer current, so a tab left open
+        // across a Terms/DPA update cannot agree to text it never showed.
+        body: JSON.stringify({
+          apiKey,
+          ...(acceptedLegal ? { acceptedLegalVersion: LEGAL_DOCS_VERSION } : {}),
+        }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -168,6 +178,38 @@ function OnboardingFormInner() {
             </p>
           </div>
 
+          {/* The documents open in a new tab so the pasted key and this
+              checkbox survive the founder going off to read them. */}
+          <div className="flex items-start gap-3">
+            <input
+              id="accept-legal"
+              type="checkbox"
+              checked={acceptedLegal}
+              onChange={(e) => setAcceptedLegal(e.target.checked)}
+              className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer accent-teal-700"
+            />
+            <label htmlFor="accept-legal" className="cursor-pointer text-sm font-medium text-zinc-700 dark:text-zinc-300 leading-snug">
+              I agree to the{' '}
+              <Link
+                href="/legal/terms"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-bold text-teal-700 dark:text-teal-300 hover:underline"
+              >
+                Terms of Service
+              </Link>{' '}
+              and{' '}
+              <Link
+                href="/legal/dpa"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-bold text-teal-700 dark:text-teal-300 hover:underline"
+              >
+                Data Processing Agreement
+              </Link>
+            </label>
+          </div>
+
           {error && (
             <p className="rounded-2xl border-2 border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-sm font-bold text-rose-700 dark:text-rose-400">
               {error}
@@ -176,7 +218,7 @@ function OnboardingFormInner() {
 
           <button
             type="submit"
-            disabled={loading || !apiKey.trim()}
+            disabled={loading || !apiKey.trim() || !acceptedLegal}
             className="w-full rounded-full bg-teal-700 px-6 py-3.5 text-sm font-extrabold uppercase tracking-widest text-white shadow-[4px_4px_0px_0px_#134e4a] dark:shadow-[4px_4px_0px_0px_#5eead4] hover:shadow-none hover:translate-x-[4px] hover:translate-y-[4px] hover:bg-teal-800 transition-all disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none disabled:translate-x-0 disabled:translate-y-0"
           >
             {loading ? 'Saving…' : 'Save and activate'}
