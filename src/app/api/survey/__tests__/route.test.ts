@@ -188,6 +188,17 @@ describe('POST /api/survey — free-text caps', () => {
     expect(params[P_COMEBACK_TEXT]).toBeNull();
   });
 
+  it('measures the cap after stripping NULs, so they neither cost the customer a tail nor log a truncation', async () => {
+    // Postgres text cannot hold U+0000 (see route.db.test.ts for the real write).
+    const openText = 'a'.repeat(MAX_OPEN_TEXT) + '\u0000'.repeat(5);
+
+    const res = await POST(surveyRequest({ token: TOKEN, reason: BUILTIN_REASON, open_text: openText }));
+
+    expect(res.status).toBe(303);
+    expect(updateParams()[P_OPEN_TEXT]).toBe('a'.repeat(MAX_OPEN_TEXT));
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
   it('never stores a lone surrogate when the cut lands mid-emoji', async () => {
     // '🙂' is a surrogate pair, so a 1999-char prefix plus one emoji puts the
     // cut exactly between its two halves. Postgres rejects a lone surrogate.
