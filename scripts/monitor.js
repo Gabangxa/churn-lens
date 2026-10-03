@@ -504,6 +504,19 @@ function renderPage() {
     row(body, 'Alert emails', rep.alertingConfigured ? 'on' : 'OFF (ALERT_EMAIL not set)', rep.alertingConfigured ? 'ok' : 'warn');
     row(body, 'Reported since boot', String(rep.totalReported), rep.totalReported > 0 ? 'warn' : 'ok');
     row(body, 'Alerts sent / failed', rep.alertsSent + ' / ' + rep.alertsFailed, rep.alertsFailed > 0 ? 'bad' : '');
+    // A spent cap means new failures are being counted, not mailed: the inbox
+    // is quiet because of the budget, not because nothing is wrong.
+    var budget = rep.alertBudget;
+    if (budget) {
+      var spent = budget.attemptsLastHour >= budget.maxPerHour || budget.attemptsLastDay >= budget.maxPerDay;
+      row(
+        body,
+        'Alert budget',
+        budget.attemptsLastHour + '/' + budget.maxPerHour + ' this hour, ' + budget.attemptsLastDay + '/' + budget.maxPerDay +
+          ' today' + (budget.queued > 0 ? ', ' + budget.queued + ' queued' : '') + (spent ? ' (SPENT)' : ''),
+        spent ? 'warn' : '',
+      );
+    }
     if (rep.lastAlertError) row(body, 'Last alert error', rep.lastAlertError, 'bad');
 
     var fingerprints = rep.fingerprints || [];

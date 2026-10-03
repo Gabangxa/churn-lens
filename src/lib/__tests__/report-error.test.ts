@@ -20,7 +20,8 @@ import {
   getErrorReportSnapshot,
   installProcessErrorHandlers,
   resetErrorReports,
-  ALERT_THROTTLE_MS,
+  ALERT_SEND_SPACING_MS,
+  MAX_ALERTS_PER_DAY,
   MAX_ALERTS_PER_HOUR,
   RECENT_ERRORS_LIMIT,
 } from '../report-error';
@@ -41,8 +42,19 @@ function sentEmail(index = 0): { from: string; to: string; subject: string; text
   return sendMock.mock.calls[index][0] as { from: string; to: string; subject: string; text: string };
 }
 
+/** Run the send queue's spacing timers until every queued alert has been handed to Resend and settled. */
+async function drainAlertQueue(): Promise<void> {
+  await vi.runAllTimersAsync();
+}
+
+/** Wait until `count` alerts have been delivered (alertsSent is stamped when Resend's promise resolves). */
+async function alertsSettled(count: number): Promise<void> {
+  await vi.waitFor(() => expect(getErrorReportSnapshot().alertsSent).toBe(count));
+}
+
 beforeEach(() => {
-  vi.useFakeTimers({ toFake: ['Date'] });
+  // setTimeout too: the alert send queue spaces bursts out on a timer.
+  vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
   vi.setSystemTime(T0);
   resetErrorReports();
 
@@ -369,6 +381,11 @@ describe('getErrorReportSnapshot — the in-process ring buffer', () => {
 });
 
 describe('reportError — alert email throttle', () => {
+  const HOUR = 60 * 60 * 1000;
+  const at = (offsetMs: number) => vi.setSystemTime(new Date(T0.getTime() + offsetMs));
+  const recurring = () => reportError('cron.themes', new Error('connection terminated'));
+  const fingerprint = () => getErrorReportSnapshot().fingerprints[0];
+
   it('emails the first occurrence immediately, with the environment and context in the subject', () => {
     reportError('cron.themes', new Error('connection terminated'), { weekOf: '2026-09-28' });
 
@@ -382,37 +399,77 @@ describe('reportError — alert email throttle', () => {
     expect(email.text).toContain('weekOf: 2026-09-28');
   });
 
-  it('suppresses repeats of the same fingerprint for an hour, then sends one carrying the suppressed count', async () => {
-    reportError('cron.themes', new Error('connection terminated'));
-    vi.setSystemTime(new Date(T0.getTime() + 10 * 60 * 1000));
-    reportError('cron.themes', new Error('connection terminated'));
-    reportError('cron.themes', new Error('connection terminated'));
+  it('backs a recurring fingerprint off from hourly to every 4 hours to daily, each alert carrying its backlog', async () => {
+    recurring();
+    await alertsSettled(1);
+    expect(sentEmail(0).text).toContain(`no sooner than ${new Date(T0.getTime() + HOUR).toISOString()}`);
 
+    at(10 * 60 * 1000);
+    recurring();
+    recurring();
+    at(HOUR - 1);
+    recurring();
     expect(sendMock).toHaveBeenCalledTimes(1);
-    expect(getErrorReportSnapshot().fingerprints[0]).toMatchObject({ count: 3, suppressedSinceAlert: 2 });
+    expect(fingerprint()).toMatchObject({ count: 4, suppressedSinceAlert: 3 });
 
-    // One millisecond short of the window: still suppressed.
-    vi.setSystemTime(new Date(T0.getTime() + ALERT_THROTTLE_MS - 1));
-    reportError('cron.themes', new Error('connection terminated'));
-    expect(sendMock).toHaveBeenCalledTimes(1);
-
-    vi.setSystemTime(new Date(T0.getTime() + ALERT_THROTTLE_MS));
-    reportError('cron.themes', new Error('connection terminated'));
-
-    expect(sendMock).toHaveBeenCalledTimes(2);
+    at(HOUR);
+    recurring();
+    await alertsSettled(2);
     expect(sentEmail(1).text).toContain('3 more occurrence(s) were suppressed');
-    expect(getErrorReportSnapshot().fingerprints[0]).toMatchObject({
-      count: 5,
-      suppressedSinceAlert: 0,
-      lastAlertAt: new Date(T0.getTime() + ALERT_THROTTLE_MS).toISOString(),
-    });
-    await vi.waitFor(() => expect(getErrorReportSnapshot().alertsSent).toBe(2));
+    expect(sentEmail(1).text).toContain(`no sooner than ${new Date(T0.getTime() + 5 * HOUR).toISOString()}`);
+    expect(fingerprint()).toMatchObject({ suppressedSinceAlert: 0, lastAlertAt: new Date(T0.getTime() + HOUR).toISOString() });
+
+    // Second step: four hours.
+    at(HOUR + 4 * HOUR - 1);
+    recurring();
+    expect(sendMock).toHaveBeenCalledTimes(2);
+    at(HOUR + 4 * HOUR);
+    recurring();
+    await alertsSettled(3);
+
+    // Third step, and every one after while it keeps recurring: a day. The
+    // occurrences 12 hours apart keep it from ever counting as quiet.
+    at(5 * HOUR + 12 * HOUR);
+    recurring();
+    at(5 * HOUR + 24 * HOUR - 1);
+    recurring();
+    expect(sendMock).toHaveBeenCalledTimes(3);
+    at(5 * HOUR + 24 * HOUR);
+    recurring();
+    await alertsSettled(4);
+    at(29 * HOUR + 12 * HOUR);
+    recurring();
+    at(29 * HOUR + 23 * HOUR);
+    recurring();
+    expect(sendMock).toHaveBeenCalledTimes(4);
+    at(29 * HOUR + 24 * HOUR);
+    recurring();
+    await alertsSettled(5);
+    expect(sentEmail(4).text).toContain('2 more occurrence(s) were suppressed');
   });
 
-  it('throttles each fingerprint independently', () => {
+  it('starts the backoff over once a fingerprint has gone a whole day without occurring', async () => {
+    recurring();
+    await alertsSettled(1);
+    at(HOUR);
+    recurring();
+    await alertsSettled(2);
+
+    // Quiet for exactly a day: a new episode, alerted at once…
+    at(HOUR + 24 * HOUR);
+    recurring();
+    await alertsSettled(3);
+    // …and its next repeat is due after one hour again, not the four the old episode had reached.
+    at(26 * HOUR);
+    recurring();
+    await alertsSettled(4);
+  });
+
+  it('throttles each fingerprint independently', async () => {
     reportError('cron.themes', new Error('connection terminated'));
     reportError('survey.submit', new Error('connection terminated'));
     reportError('cron.themes', new Error('connection terminated'));
+    await drainAlertQueue();
 
     expect(sendMock).toHaveBeenCalledTimes(2);
     expect(sendMock.mock.calls.map(([e]) => (e as { subject: string }).subject)).toEqual([
@@ -421,22 +478,84 @@ describe('reportError — alert email throttle', () => {
     ]);
   });
 
-  it('caps alert emails across all fingerprints per hour, so an outage cannot drain the Resend quota surveys share', () => {
+  it('spaces a burst of first alerts ALERT_SEND_SPACING_MS apart, under Resend’s 2 requests a second', async () => {
+    reportError('cron.themes', new Error('connection terminated'));
+    reportError('cron.digest', new Error('connection terminated'));
+    reportError('cron.purge', new Error('connection terminated'));
+    expect(sendMock).toHaveBeenCalledTimes(1);
+    expect(getErrorReportSnapshot().alertBudget.queued).toBe(2);
+
+    await vi.advanceTimersByTimeAsync(ALERT_SEND_SPACING_MS - 1);
+    expect(sendMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sendMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(ALERT_SEND_SPACING_MS);
+    expect(sendMock).toHaveBeenCalledTimes(3);
+    expect(sendMock.mock.calls.map(([e]) => (e as { subject: string }).subject)).toEqual([
+      expect.stringContaining('cron.themes'),
+      expect.stringContaining('cron.digest'),
+      expect.stringContaining('cron.purge'),
+    ]);
+  });
+
+  it('counts a repeat that arrives while its alert is still queued as suppressed, not as a second alert', async () => {
+    reportError('cron.themes', new Error('first'));
+    reportError('cron.digest', new Error('connection terminated'));
+    reportError('cron.digest', new Error('connection terminated'));
+    await drainAlertQueue();
+
+    expect(sendMock).toHaveBeenCalledTimes(2);
+    expect(sentEmail(1).text).not.toContain('were suppressed');
+    const digest = getErrorReportSnapshot().fingerprints.find((f) => f.context === 'cron.digest')!;
+    expect(digest).toMatchObject({ count: 2, suppressedSinceAlert: 1 });
+  });
+
+  it('caps alert emails across all fingerprints per hour, so an outage cannot drain the Resend quota surveys share', async () => {
     for (let i = 0; i < MAX_ALERTS_PER_HOUR + 3; i++) {
       reportError(`context.${i}`, new Error('connection terminated'));
     }
+    await drainAlertQueue();
 
     expect(sendMock).toHaveBeenCalledTimes(MAX_ALERTS_PER_HOUR);
     const capped = getErrorReportSnapshot().fingerprints.filter((f) => f.lastAlertAt === null);
     expect(capped).toHaveLength(3);
     expect(capped.every((f) => f.suppressedSinceAlert === 1)).toBe(true);
+    expect(warnSpy.mock.calls.filter(([line]) => String(line).includes('per hour'))).toHaveLength(1);
 
     // The budget is a sliding hour: once the first sends age out, a capped
     // fingerprint's next occurrence goes out and carries its backlog.
-    vi.setSystemTime(new Date(T0.getTime() + 60 * 60 * 1000));
+    at(HOUR);
     reportError(capped[0].context, new Error('connection terminated'));
     expect(sendMock).toHaveBeenCalledTimes(MAX_ALERTS_PER_HOUR + 1);
     expect(sentEmail(MAX_ALERTS_PER_HOUR).text).toContain('1 more occurrence(s) were suppressed');
+  });
+
+  it('caps alert emails per rolling day too, however the hours spread them', async () => {
+    // Six new failures an hour stays under the hourly cap every hour, and
+    // used to add up to 240 emails a day.
+    for (let hour = 0; hour < 6; hour++) {
+      at(hour * HOUR);
+      for (let i = 0; i < 6; i++) reportError(`context.${hour}.${i}`, new Error('connection terminated'));
+      await drainAlertQueue();
+    }
+
+    expect(sendMock).toHaveBeenCalledTimes(MAX_ALERTS_PER_DAY);
+    const capped = getErrorReportSnapshot().fingerprints.filter((f) => f.lastAlertAt === null);
+    expect(capped).toHaveLength(36 - MAX_ALERTS_PER_DAY);
+    expect(capped.every((f) => f.suppressedSinceAlert === 1)).toBe(true);
+    expect(warnSpy.mock.calls.filter(([line]) => String(line).includes('per day'))).toHaveLength(1);
+    expect(getErrorReportSnapshot().alertBudget).toMatchObject({
+      maxPerHour: MAX_ALERTS_PER_HOUR,
+      maxPerDay: MAX_ALERTS_PER_DAY,
+      attemptsLastDay: MAX_ALERTS_PER_DAY,
+      queued: 0,
+    });
+
+    // Rolling: once hour 0's six sends are a day old, capped ones go out again.
+    at(24 * HOUR);
+    reportError(capped[0].context, new Error('connection terminated'));
+    expect(sendMock).toHaveBeenCalledTimes(MAX_ALERTS_PER_DAY + 1);
+    expect(sentEmail(MAX_ALERTS_PER_DAY).text).toContain('1 more occurrence(s) were suppressed');
   });
 });
 
@@ -507,15 +626,40 @@ describe('reportError — a failing alert send', () => {
     expect(getErrorReportSnapshot()).toMatchObject({ totalReported: 1, alertsFailed: 1 });
   });
 
-  it('still counts a failed send against the throttle, so a Resend outage is not retried on every error', async () => {
+  it('does not mute a fingerprint whose alert failed: its next occurrence retries, carrying the backlog', async () => {
+    // Stamping lastAlertAt before a send that then failed (a Resend 429 in a
+    // burst, say) silenced that failure for the next hour.
+    sendMock.mockRejectedValueOnce(new Error('rate_limit_exceeded'));
+
+    reportError('cron.themes', new Error('boom'));
+    await vi.waitFor(() => expect(getErrorReportSnapshot().alertsFailed).toBe(1));
+    expect(getErrorReportSnapshot().fingerprints[0]).toMatchObject({ lastAlertAt: null, suppressedSinceAlert: 1 });
+
+    vi.setSystemTime(new Date(T0.getTime() + 60 * 1000));
+    reportError('cron.themes', new Error('boom'));
+    await drainAlertQueue();
+
+    expect(sendMock).toHaveBeenCalledTimes(2);
+    expect(sentEmail(1).text).toContain('1 more occurrence(s) were suppressed');
+    await alertsSettled(1);
+    expect(getErrorReportSnapshot().fingerprints[0]).toMatchObject({
+      lastAlertAt: new Date(T0.getTime() + 60 * 1000).toISOString(),
+      suppressedSinceAlert: 0,
+    });
+  });
+
+  it('still bounds retries during a Resend outage: failed sends count against the hourly cap', async () => {
     sendMock.mockRejectedValue(new Error('fetch failed'));
 
-    reportError('cron.themes', new Error('boom'));
-    reportError('cron.themes', new Error('boom'));
-    reportError('cron.themes', new Error('boom'));
+    for (let minute = 0; minute < 30; minute++) {
+      vi.setSystemTime(new Date(T0.getTime() + minute * 60 * 1000));
+      reportError('cron.themes', new Error('boom'));
+      await drainAlertQueue();
+    }
 
-    expect(sendMock).toHaveBeenCalledTimes(1);
-    await vi.waitFor(() => expect(getErrorReportSnapshot().alertsFailed).toBe(1));
+    expect(sendMock).toHaveBeenCalledTimes(MAX_ALERTS_PER_HOUR);
+    expect(getErrorReportSnapshot()).toMatchObject({ alertsSent: 0, alertsFailed: MAX_ALERTS_PER_HOUR });
+    expect(getErrorReportSnapshot().fingerprints[0].suppressedSinceAlert).toBe(30);
   });
 });
 

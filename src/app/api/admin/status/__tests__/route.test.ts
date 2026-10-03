@@ -286,6 +286,8 @@ describe('GET /api/admin/status — reported errors', () => {
       lastAlertError: null,
       recent: [],
       fingerprints: [],
+      // The monitor shows this so a quiet inbox under a spent cap reads as such.
+      alertBudget: { maxPerHour: 10, maxPerDay: 24, attemptsLastHour: 0, attemptsLastDay: 0, queued: 0 },
     });
   });
 

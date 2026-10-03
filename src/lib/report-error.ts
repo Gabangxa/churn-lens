@@ -13,9 +13,11 @@ import { getResend, FROM_EMAIL } from '@/lib/resend';
  *      `message` out of JSON lines; the rest become searchable attributes);
  *   2. records the error in an in-process ring buffer with per-fingerprint
  *      counts, read by GET /api/admin/status and so by `npm run monitor`;
- *   3. emails ALERT_EMAIL — the first occurrence of a fingerprint at once, then
- *      at most one per fingerprint per hour carrying how many were suppressed,
- *      and never more than MAX_ALERTS_PER_HOUR in total.
+ *   3. emails ALERT_EMAIL — the first occurrence of a fingerprint at once; a
+ *      fingerprint that keeps recurring backs off (ALERT_BACKOFF_MS: 1h, then
+ *      4h, then daily), each alert carrying how many were suppressed; never
+ *      more than MAX_ALERTS_PER_HOUR or MAX_ALERTS_PER_DAY in total; sends
+ *      spaced ALERT_SEND_SPACING_MS apart.
  *
  * PII: callers pass ids only in `meta`, never names, emails or survey text.
  * Error messages and stacks are not under the caller's control (a Postgres
@@ -57,10 +59,23 @@ export interface FingerprintSummary {
   count: number;
   firstSeenAt: string;
   lastSeenAt: string;
-  /** When the last alert email for this fingerprint was attempted; null = never. */
+  /**
+   * The occurrence the last DELIVERED alert email for this fingerprint was
+   * about; null = none delivered yet. A failed send does not set it.
+   */
   lastAlertAt: string | null;
-  /** Occurrences since lastAlertAt that were not emailed (throttle or hourly cap). */
+  /** Occurrences not (yet) carried by a delivered alert: backoff, caps, failed sends. */
   suppressedSinceAlert: number;
+}
+
+export interface AlertBudget {
+  maxPerHour: number;
+  maxPerDay: number;
+  /** Alert sends started or queued in the last hour / day, failed ones included. */
+  attemptsLastHour: number;
+  attemptsLastDay: number;
+  /** Alerts waiting in the send queue for their ALERT_SEND_SPACING_MS slot. */
+  queued: number;
 }
 
 export interface ErrorReportSnapshot {
@@ -76,20 +91,54 @@ export interface ErrorReportSnapshot {
   recent: ReportedError[];
   /** Most recently seen first, at most MAX_FINGERPRINTS. */
   fingerprints: FingerprintSummary[];
+  alertBudget: AlertBudget;
 }
 
-/** One alert email per fingerprint per this window. */
-export const ALERT_THROTTLE_MS = 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+
+/**
+ * How long a fingerprint that keeps recurring waits before its next alert:
+ * after the 1st delivered alert of an episode, after the 2nd, and after the
+ * 3rd and every later one. A broken cron or a dead integration fails the same
+ * way all day; hourly mail about it buries anything new in the inbox and
+ * spends the shared Resend quota, while 1h → 4h → daily still says "still
+ * broken" and each alert carries the suppressed count.
+ */
+export const ALERT_BACKOFF_MS = [HOUR_MS, 4 * HOUR_MS, DAY_MS] as const;
+
+/**
+ * A fingerprint not seen for this long starts a new episode: its next
+ * occurrence alerts at once and the backoff starts over at the first step.
+ * Never shorter than the longest backoff step, so a new episode is always due.
+ */
+export const QUIET_RESET_MS = DAY_MS;
 
 /**
  * Hard ceiling on alert emails across ALL fingerprints per sliding hour. The
- * per-fingerprint throttle alone still lets an outage that fails a dozen
- * different code paths send a dozen emails an hour, all day — and alerts share
- * the Resend account (and its sending quota) with the survey emails that are
- * the product's whole job. Suppressed occurrences are still counted and ride
+ * per-fingerprint backoff alone still lets an outage that fails a dozen
+ * different code paths send a dozen emails at once — and alerts share the
+ * Resend account (and its sending quota) with the survey emails that are the
+ * product's whole job. Suppressed occurrences are still counted and ride
  * along on that fingerprint's next alert.
  */
 export const MAX_ALERTS_PER_HOUR = 10;
+
+/**
+ * …and per sliding day. The hourly cap alone allows 240 a day: a slow trickle
+ * of new fingerprints (or a recurring one per hour across many) would spend
+ * the quota that login links and survey emails need. 24 is still one an hour
+ * on average, far more than one person acts on.
+ */
+export const MAX_ALERTS_PER_DAY = 24;
+
+/**
+ * Minimum gap between two alert sends. Resend's default rate limit is 2
+ * requests a second per account (shared with survey emails and login links);
+ * a burst of new fingerprints sent at once had the extras rejected with 429.
+ * One in-process queue releases them this far apart instead.
+ */
+export const ALERT_SEND_SPACING_MS = 600;
 
 export const RECENT_ERRORS_LIMIT = 50;
 
@@ -97,15 +146,15 @@ export const RECENT_ERRORS_LIMIT = 50;
  * Bounds the per-fingerprint map. A message with an id the normaliser does not
  * recognise would otherwise mint a new fingerprint per occurrence and grow the
  * map forever. The least recently seen fingerprint is evicted, which also
- * forgets its throttle — it may alert again sooner than an hour. Acceptable:
- * at this size an eviction already means something is very noisy.
+ * forgets its backoff — it may alert again sooner than its next step, within
+ * the hourly and daily caps. Acceptable: at this size an eviction already
+ * means something is very noisy.
  */
 const MAX_FINGERPRINTS = 100;
 
 const MAX_MESSAGE_CHARS = 1000;
 const MAX_STACK_CHARS = 4000;
 const MAX_SUBJECT_MESSAGE_CHARS = 120;
-const BUDGET_WINDOW_MS = 60 * 60 * 1000;
 
 /**
  * Email redaction works on runs: maximal stretches of characters an address
@@ -158,6 +207,15 @@ interface FingerprintState {
   lastSeenAt: number;
   lastAlertAt: number | null;
   suppressedSinceAlert: number;
+  /** Alerts delivered since this episode began (see QUIET_RESET_MS); picks the backoff step. */
+  alertsThisEpisode: number;
+  /** An alert for this fingerprint is queued or in flight: later occurrences wait, counted. */
+  alertPending: boolean;
+}
+
+interface QueuedAlert {
+  to: string;
+  alert: AlertContent;
 }
 
 interface ProcessHandlers {
@@ -172,13 +230,20 @@ interface ReportState {
   /** Map iteration order doubles as recency: an entry is re-inserted on every hit. */
   byFingerprint: Map<string, FingerprintState>;
   totalReported: number;
-  /** Attempt times of alert sends inside the current sliding hour. */
-  alertSendTimes: number[];
+  /** Decision times of alert sends inside the sliding day, oldest first; failed sends included. */
+  alertAttemptTimes: number[];
+  /** Alerts waiting for their send slot, oldest first. Bounded by the caps. */
+  sendQueue: QueuedAlert[];
+  /** When the queue last handed an alert to Resend; spacing is measured from it. */
+  lastSendStartedAt: number | null;
+  /** The pending timer that releases the next queued alert, if any. */
+  sendTimer: ReturnType<typeof setTimeout> | null;
   alertsSent: number;
   alertsFailed: number;
   lastAlertError: string | null;
   warnedAlertsDisabled: boolean;
-  budgetWarnedAt: number | null;
+  /** Which cap last refused an alert; cleared by the next alert that gets through. */
+  capWarned: { hour: boolean; day: boolean };
   processHandlers: ProcessHandlers | null;
 }
 
@@ -191,12 +256,15 @@ function freshState(): ReportState {
     recent: [],
     byFingerprint: new Map(),
     totalReported: 0,
-    alertSendTimes: [],
+    alertAttemptTimes: [],
+    sendQueue: [],
+    lastSendStartedAt: null,
+    sendTimer: null,
     alertsSent: 0,
     alertsFailed: 0,
     lastAlertError: null,
     warnedAlertsDisabled: false,
-    budgetWarnedAt: null,
+    capWarned: { hour: false, day: false },
     processHandlers: null,
   };
 }
@@ -383,6 +451,9 @@ function recordOccurrence(state: ReportState, now: number, report: ReportedError
   if (entry) {
     // Re-inserted below so the Map's iteration order stays least- to most-recent.
     state.byFingerprint.delete(report.fingerprint);
+    // Back after a quiet day: a new episode, not more of the old one. Checked
+    // against the PREVIOUS sighting, before lastSeenAt moves to now.
+    if (now - entry.lastSeenAt >= QUIET_RESET_MS) entry.alertsThisEpisode = 0;
   } else {
     entry = {
       fingerprint: report.fingerprint,
@@ -394,6 +465,8 @@ function recordOccurrence(state: ReportState, now: number, report: ReportedError
       lastSeenAt: now,
       lastAlertAt: null,
       suppressedSinceAlert: 0,
+      alertsThisEpisode: 0,
+      alertPending: false,
     };
   }
   entry.count++;
@@ -420,6 +493,8 @@ interface AlertContent {
   entry: FingerprintState;
   suppressed: number;
   previousAlertAt: number | null;
+  /** When this fingerprint may alert again if this alert is delivered (backoff only; caps aside). */
+  nextDueAt: number;
 }
 
 function alertSubject(alert: AlertContent): string {
@@ -443,6 +518,10 @@ function alertText(alert: AlertContent): string {
     const since = alert.previousAlertAt === null ? 'this fingerprint was first seen' : `the last alert at ${iso(alert.previousAlertAt)}`;
     lines.push('', `${alert.suppressed} more occurrence(s) were suppressed since ${since}.`);
   }
+  lines.push(
+    '',
+    `Next alert for this fingerprint: no sooner than ${iso(alert.nextDueAt)}, and only if it recurs.`,
+  );
   const metaEntries = Object.entries(alert.meta);
   if (metaEntries.length > 0) {
     lines.push('', 'Ids:', ...metaEntries.map(([key, value]) => `  ${key}: ${String(value)}`));
@@ -451,7 +530,8 @@ function alertText(alert: AlertContent): string {
   lines.push(
     '',
     '---',
-    `Alerts are throttled to one per fingerprint per hour and ${MAX_ALERTS_PER_HOUR} per hour overall.`,
+    'A recurring fingerprint alerts after 1 hour, then 4 hours, then daily, starting over after a quiet day;',
+    `at most ${MAX_ALERTS_PER_HOUR} alerts an hour and ${MAX_ALERTS_PER_DAY} a day overall.`,
     'Every occurrence is still logged; recent ones are listed by `railway run npm run monitor`.',
     'Anything email-shaped has been redacted from this message.',
   );
@@ -467,7 +547,18 @@ function recordAlertFailure(state: ReportState, reason: string, fingerprint: str
   logLine('error', 'report-error.alert', `alert email send failed: ${safeReason}`, { fingerprint });
 }
 
+/**
+ * Delivered: the backoff clock starts at the occurrence the alert was about.
+ * Failed: nothing is stamped, so the fingerprint's next occurrence tries
+ * again (stamping before the send muted a burst's 429-rejected alerts for an
+ * hour); the hourly and daily caps, which count failed attempts too, are what
+ * stop a Resend outage turning into a request storm. The occurrence and the
+ * backlog this alert carried go back on the suppressed count, so the retry
+ * still reports them.
+ */
 async function sendAlert(state: ReportState, to: string, alert: AlertContent): Promise<void> {
+  const { entry } = alert;
+  let failure: string | null = null;
   try {
     // Resend resolves with `{ data: null, error }` on failure rather than
     // throwing — both shapes have to be treated as a failed send.
@@ -477,14 +568,20 @@ async function sendAlert(state: ReportState, to: string, alert: AlertContent): P
       subject: alertSubject(alert),
       text: alertText(alert),
     });
-    if (error) {
-      recordAlertFailure(state, `${error.name}: ${error.message}`, alert.fingerprint);
-      return;
-    }
-    state.alertsSent++;
+    if (error) failure = `${error.name}: ${error.message}`;
   } catch (err) {
-    recordAlertFailure(state, err instanceof Error ? err.message : 'non-Error thrown by the Resend client', alert.fingerprint);
+    failure = err instanceof Error ? err.message : 'non-Error thrown by the Resend client';
   }
+
+  entry.alertPending = false;
+  if (failure !== null) {
+    entry.suppressedSinceAlert += alert.suppressed + 1;
+    recordAlertFailure(state, failure, alert.fingerprint);
+    return;
+  }
+  state.alertsSent++;
+  entry.lastAlertAt = alert.now;
+  entry.alertsThisEpisode++;
 }
 
 function warnAlertsDisabledOnce(state: ReportState): void {
@@ -497,15 +594,87 @@ function warnAlertsDisabledOnce(state: ReportState): void {
   );
 }
 
+/** How long to wait after the `delivered`-th alert of an episode (1-based). */
+function backoffAfter(delivered: number): number {
+  return ALERT_BACKOFF_MS[Math.min(delivered, ALERT_BACKOFF_MS.length) - 1];
+}
+
+function dueForFingerprint(entry: FingerprintState, now: number): boolean {
+  if (entry.alertsThisEpisode === 0 || entry.lastAlertAt === null) return true;
+  return now - entry.lastAlertAt >= backoffAfter(entry.alertsThisEpisode);
+}
+
+/** Drops attempts older than a day and says which cap, if any, is spent. */
+function spentCap(state: ReportState, now: number): 'hour' | 'day' | null {
+  state.alertAttemptTimes = state.alertAttemptTimes.filter((at) => now - at < DAY_MS);
+  if (state.alertAttemptTimes.length >= MAX_ALERTS_PER_DAY) return 'day';
+  const lastHour = state.alertAttemptTimes.filter((at) => now - at < HOUR_MS).length;
+  return lastHour >= MAX_ALERTS_PER_HOUR ? 'hour' : null;
+}
+
+/** Once per stretch of refusals: the flag clears when an alert next gets through. */
+function warnCapSpent(state: ReportState, cap: 'hour' | 'day', fingerprint: string): void {
+  if (state.capWarned[cap]) return;
+  state.capWarned[cap] = true;
+  const limit = cap === 'hour' ? `${MAX_ALERTS_PER_HOUR} emails per hour` : `${MAX_ALERTS_PER_DAY} emails per day`;
+  logLine(
+    'warn',
+    'report-error',
+    `alert budget of ${limit} is spent; further alerts are counted, not sent, until it frees up`,
+    { fingerprint },
+  );
+}
+
+/**
+ * Hands queued alerts to Resend at most one per ALERT_SEND_SPACING_MS. The
+ * first alert after a quiet spell goes out synchronously (no timer), so a
+ * lone failure is mailed at once. The queue never grows past the caps: an
+ * alert is admitted (and counted) before it is queued.
+ */
+function pumpSendQueue(state: ReportState): void {
+  if (state.sendTimer !== null || state.sendQueue.length === 0) return;
+
+  const now = Date.now();
+  if (state.lastSendStartedAt !== null) {
+    // Clamped so a clock stepped backwards cannot stall the queue.
+    const wait = Math.min(state.lastSendStartedAt + ALERT_SEND_SPACING_MS - now, ALERT_SEND_SPACING_MS);
+    if (wait > 0) {
+      state.sendTimer = setTimeout(() => {
+        state.sendTimer = null;
+        try {
+          pumpSendQueue(state);
+        } catch (internal) {
+          // Outside reportError's own try: a throw here would be an uncaught
+          // exception, which the process monitor reports, which queues…
+          const reason = internal instanceof Error ? scrub(internal.message, 500) : 'non-Error thrown';
+          logLine('error', 'report-error', `alert send queue failed: ${reason}`);
+        }
+      }, wait);
+      return;
+    }
+  }
+
+  const next = state.sendQueue.shift();
+  if (!next) return;
+  state.lastSendStartedAt = now;
+  // Fire-and-forget: callers are request handlers and the cron loop, which
+  // must not wait on (or fail because of) an email to the founder. sendAlert
+  // catches everything itself, so this promise never rejects.
+  void sendAlert(state, next.to, next.alert);
+  pumpSendQueue(state);
+}
+
 /**
  * Decides, synchronously, whether this occurrence is emailed. Synchronous on
- * purpose: the throttle bookkeeping (lastAlertAt, the hourly budget) is
- * updated before the send is even started, so two reports in the same tick
- * cannot both decide they are "first". A failed send still counts against the
- * throttle — retrying on every occurrence during a Resend outage would turn
- * one outage into a request storm against it.
+ * purpose: the bookkeeping (alertPending, the caps) is updated before the
+ * send is even queued, so two reports in the same tick cannot both decide
+ * they are "first". An occurrence that is not emailed is counted on its
+ * fingerprint and rides along on the next alert that is.
  */
-function maybeAlert(state: ReportState, alert: Omit<AlertContent, 'suppressed' | 'previousAlertAt'>): void {
+function maybeAlert(
+  state: ReportState,
+  alert: Omit<AlertContent, 'suppressed' | 'previousAlertAt' | 'nextDueAt'>,
+): void {
   const to = alertRecipient();
   if (!to) {
     warnAlertsDisabledOnce(state);
@@ -513,37 +682,26 @@ function maybeAlert(state: ReportState, alert: Omit<AlertContent, 'suppressed' |
   }
 
   const { entry, now } = alert;
-  const dueForFingerprint = entry.lastAlertAt === null || now - entry.lastAlertAt >= ALERT_THROTTLE_MS;
-  if (!dueForFingerprint) {
+  if (entry.alertPending || !dueForFingerprint(entry, now)) {
     entry.suppressedSinceAlert++;
     return;
   }
 
-  state.alertSendTimes = state.alertSendTimes.filter((sentAt) => now - sentAt < BUDGET_WINDOW_MS);
-  if (state.alertSendTimes.length >= MAX_ALERTS_PER_HOUR) {
+  const cap = spentCap(state, now);
+  if (cap !== null) {
     entry.suppressedSinceAlert++;
-    if (state.budgetWarnedAt === null || now - state.budgetWarnedAt >= BUDGET_WINDOW_MS) {
-      state.budgetWarnedAt = now;
-      logLine(
-        'warn',
-        'report-error',
-        `alert budget of ${MAX_ALERTS_PER_HOUR} emails per hour is spent; further alerts are counted, not sent, until it frees up`,
-        { fingerprint: alert.fingerprint },
-      );
-    }
+    warnCapSpent(state, cap, alert.fingerprint);
     return;
   }
+  state.capWarned = { hour: false, day: false };
 
   const suppressed = entry.suppressedSinceAlert;
-  const previousAlertAt = entry.lastAlertAt;
-  entry.lastAlertAt = now;
   entry.suppressedSinceAlert = 0;
-  state.alertSendTimes.push(now);
-
-  // Fire-and-forget: callers are request handlers and the cron loop, which
-  // must not wait on (or fail because of) an email to the founder. sendAlert
-  // catches everything itself, so this promise never rejects.
-  void sendAlert(state, to, { ...alert, suppressed, previousAlertAt });
+  entry.alertPending = true;
+  state.alertAttemptTimes.push(now);
+  const nextDueAt = now + backoffAfter(entry.alertsThisEpisode + 1);
+  state.sendQueue.push({ to, alert: { ...alert, suppressed, previousAlertAt: entry.lastAlertAt, nextDueAt } });
+  pumpSendQueue(state);
 }
 
 /**
@@ -579,6 +737,7 @@ export function reportError(context: string, err: unknown, meta: ErrorMeta = {})
 /** A copy — callers must not be able to mutate the live buffer. */
 export function getErrorReportSnapshot(): ErrorReportSnapshot {
   const state = slot();
+  const now = Date.now();
   return {
     alertingConfigured: alertRecipient() !== null,
     totalReported: state.totalReported,
@@ -597,6 +756,13 @@ export function getErrorReportSnapshot(): ErrorReportSnapshot {
       lastAlertAt: entry.lastAlertAt === null ? null : iso(entry.lastAlertAt),
       suppressedSinceAlert: entry.suppressedSinceAlert,
     })),
+    alertBudget: {
+      maxPerHour: MAX_ALERTS_PER_HOUR,
+      maxPerDay: MAX_ALERTS_PER_DAY,
+      attemptsLastHour: state.alertAttemptTimes.filter((at) => now - at < HOUR_MS).length,
+      attemptsLastDay: state.alertAttemptTimes.filter((at) => now - at < DAY_MS).length,
+      queued: state.sendQueue.length,
+    },
   };
 }
 
@@ -647,9 +813,11 @@ export function installProcessErrorHandlers(): void {
   if (!alertRecipient()) warnAlertsDisabledOnce(state);
 }
 
-/** Test-only: wipe the shared slot and detach any process handlers it installed. */
+/** Test-only: wipe the shared slot, drop queued alerts and detach any process handlers it installed. */
 export function resetErrorReports(): void {
   const g = globalThis as GlobalWithSlot;
+  const sendTimer = g[SLOT]?.sendTimer;
+  if (sendTimer) clearTimeout(sendTimer);
   const handlers = g[SLOT]?.processHandlers;
   if (handlers) {
     process.off('uncaughtExceptionMonitor', handlers.onUncaughtMonitor);
