@@ -14,6 +14,11 @@ const ACCOUNT_LOOKUP_TIMEOUT_MS = 5_000;
  * so a survey can say which business is asking (POPIA s18) when the founder
  * has set no display name. See SurveyPresentation.businessName.
  *
+ * business_profile.name only — the name Stripe shows customers on receipts
+ * and checkout. settings.dashboard.display_name is NOT a fallback: it is the
+ * founder's own label for the account inside Stripe's dashboard ("Acme TEST",
+ * "old-acct-2"), never meant for a customer to read.
+ *
  * Reading the account (GET /v1/account) needs a restricted-key permission
  * that onboarding does NOT ask for — it asks for customers:read,
  * subscriptions:read and webhooks:write only, and adding a requirement would
@@ -35,10 +40,7 @@ export async function fetchStripeBusinessName(
       {},
       { timeout: ACCOUNT_LOOKUP_TIMEOUT_MS, maxNetworkRetries: 0 },
     );
-    return (
-      normalizeBusinessName(account.business_profile?.name) ??
-      normalizeBusinessName(account.settings?.dashboard?.display_name)
-    );
+    return normalizeBusinessName(account.business_profile?.name);
   } catch (err) {
     if (err instanceof Stripe.errors.StripePermissionError) {
       console.warn(
@@ -53,15 +55,28 @@ export async function fetchStripeBusinessName(
 }
 
 /**
- * Caches a name fetchStripeBusinessName found, for the survey page (which
- * never calls Stripe) and later sends. Returns whether it was stored, so a
- * caller that must name the same business everywhere can use the name only
- * once the page will see it too. Never throws.
+ * Caches a name fetchStripeBusinessName found, for later sends and the
+ * dashboard. Returns whether it was stored; a caller uses the name only when
+ * it was. Never throws.
+ *
+ * Keyed to keyCiphertext, the stored key the name was read with (the same
+ * condition the webhook's key-invalid flag uses). If the founder reconnected
+ * while the lookup was in flight, the row now holds another key — perhaps
+ * another Stripe account, a different business — and connect has already
+ * written that key's name, so this matches no row and returns false rather
+ * than putting the previous account's name back.
  */
-export async function cacheStripeBusinessName(orgId: string, name: string): Promise<boolean> {
+export async function cacheStripeBusinessName(
+  orgId: string,
+  keyCiphertext: string,
+  name: string,
+): Promise<boolean> {
   try {
-    await execute('UPDATE organizations SET stripe_business_name = $1 WHERE id = $2', [name, orgId]);
-    return true;
+    const updated = await execute(
+      'UPDATE organizations SET stripe_business_name = $1 WHERE id = $2 AND stripe_api_key_enc = $3',
+      [name, orgId, keyCiphertext],
+    );
+    return updated > 0;
   } catch (err) {
     // A database write failing, not Stripe saying no (fetchStripeBusinessName
     // owns those, as warnings): the caller falls back to the generic copy.

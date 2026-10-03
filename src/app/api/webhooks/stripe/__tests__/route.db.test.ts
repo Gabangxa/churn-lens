@@ -757,17 +757,44 @@ suite('Stripe webhook against a real database', () => {
       expect(await cachedBusinessName(orgId)).toBe('Acme Analytics');
     });
 
-    it("falls back to the account's dashboard display name when the business profile has none", async () => {
+    it("never names the business from the account's dashboard label, which is internal, not public", async () => {
+      // settings.dashboard.display_name is what the founder calls the account
+      // inside Stripe's dashboard ("Acme TEST", "old-acct-2"); only
+      // business_profile.name is meant for customers.
       const orgId = await seedOrg();
       fakeStripeApi.respond = keyWithAccountRead({
         business_profile: { name: null },
-        settings: { dashboard: { display_name: 'Acme Dashboard Name' } },
+        settings: { dashboard: { display_name: 'acme-internal-label' } },
       });
 
       await deliver(orgId, cancelledSubscription());
 
-      expect(sentEmails[0].text).toContain('Sent on behalf of Acme Dashboard Name by ChurnLens.');
-      expect(await cachedBusinessName(orgId)).toBe('Acme Dashboard Name');
+      expect(sentEmails[0].text).toContain('Sent on behalf of the business you cancelled with by ChurnLens.');
+      expect(sentEmails[0].text).not.toContain('acme-internal-label');
+      expect(await cachedBusinessName(orgId)).toBeNull();
+    });
+
+    it('does not cache, or email, a name read with a key the founder replaced mid-lookup', async () => {
+      // The founder reconnects with another Stripe account's key while this
+      // delivery's account lookup (made with the old key) is in flight;
+      // connect stores the new key and resets the cached name. The old
+      // account's name must not land on the row after that.
+      const orgId = await seedOrg();
+      fakeStripeApi.respond = async (req) => {
+        if (req.path !== '/v1/account') return onboardingScopedKey(req);
+        await pool().query(
+          'UPDATE organizations SET stripe_api_key_enc = $1, stripe_business_name = NULL WHERE id = $2',
+          [encryptApiKey('rk_live_other_account_key'), orgId],
+        );
+        return stripeJson(200, { id: 'acct_old', object: 'account', business_profile: { name: 'Old Account Ltd' } });
+      };
+
+      const res = await deliver(orgId, cancelledSubscription());
+
+      expect(res.body).toEqual({ received: true });
+      expect(await cachedBusinessName(orgId)).toBeNull();
+      // Not in the email either: the survey page could not have named it.
+      expect(sentEmails[0].text).not.toContain('Old Account Ltd');
     });
 
     it('uses the configured display name first, without asking Stripe for the account at all', async () => {

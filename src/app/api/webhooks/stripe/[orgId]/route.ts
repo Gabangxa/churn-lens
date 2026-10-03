@@ -533,11 +533,14 @@ export async function POST(
   if (presentation.businessName === null) {
     // No display name configured and no Stripe name cached yet: try the
     // account once more (it fails harmlessly for keys without the account
-    // permission). The name is used only once it is cached, because the survey
-    // page reads the cache, never Stripe — the email and the page it links to
-    // must name the same business, or none.
+    // permission). The name is used only once it is cached against the key
+    // that read it: a false means the founder replaced that key mid-lookup,
+    // and the name may be another business's.
     const stripeName = await fetchStripeBusinessName(stripeClient, org.id);
-    if (stripeName !== null && (await cacheStripeBusinessName(org.id, stripeName))) {
+    if (
+      stripeName !== null &&
+      (await cacheStripeBusinessName(org.id, org.stripe_api_key_enc, stripeName))
+    ) {
       presentation = { ...presentation, businessName: stripeName };
     }
   }
