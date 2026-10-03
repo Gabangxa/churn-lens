@@ -636,7 +636,7 @@ describe('POST /api/settings/account/delete — teardown order and cookie', () =
 });
 
 describe('POST /api/settings/account/delete — error reporting', () => {
-  it('reports a failed Stripe disconnect with the org id — surveys may keep firing', async () => {
+  it('reports a failed Stripe disconnect with the org id — its key and webhook endpoint stay live', async () => {
     disconnectStripeMock.mockRejectedValue(new Error('stripe teardown boom'));
 
     await POST(deleteRequest());
