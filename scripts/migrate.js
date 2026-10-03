@@ -501,22 +501,25 @@ async function migrate() {
   `);
 
   // When Stripe first rejected the org's stored key (401: revoked or rolled;
-  // 403: a restricted key missing a permission). The Stripe webhook used to
-  // 500 on that, so Stripe retried for days with a key that could never work
-  // and nobody told the founder. It now answers 200 and stamps this, and the
-  // dashboard status line (src/lib/survey-status.ts) tells the founder to
-  // reconnect. NULL means "no known problem": cleared by /api/onboarding/connect
-  // when a key is saved, and by the webhook when a later call with the same key
-  // succeeds. Nullable with no default and no backfill, so every existing org
-  // reads as fine and a rollback to code that ignores the column is harmless.
+  // 403: a restricted key missing a permission), or the webhook found the key
+  // belongs to another Stripe account or mode than its events. The Stripe
+  // webhook used to 500 on that, so Stripe retried for days with a key that
+  // could never work and nobody told the founder. It now answers 200 and
+  // stamps this, and the dashboard status line (src/lib/survey-status.ts)
+  // tells the founder to reconnect. NULL means "no known problem": cleared by
+  // /api/onboarding/connect when a key is saved, by a disconnect, and by the
+  // webhook when a later call with the same key succeeds. Nullable with no
+  // default and no backfill, so every existing org reads as fine and a
+  // rollback to code that ignores the column is harmless.
   await pool.query(`
     ALTER TABLE organizations
       ADD COLUMN IF NOT EXISTS stripe_key_invalid_at timestamptz;
   `);
 
-  // The connected Stripe account's public business name (business_profile.name,
-  // else settings.dashboard.display_name), cached so the survey email and the
-  // survey page can say which business is asking (POPIA s18) when the founder
+  // The connected Stripe account's public business name (business_profile.name
+  // only — settings.dashboard.display_name is the founder's internal label and
+  // is never shown to customers), cached so the survey email and the survey
+  // page can say which business is asking (POPIA s18) when the founder
   // has set no display name. Reading it needs an account permission onboarding
   // does not ask the restricted key for, so it is best-effort: written by
   // /api/onboarding/connect on every key save (NULL when the key cannot read
