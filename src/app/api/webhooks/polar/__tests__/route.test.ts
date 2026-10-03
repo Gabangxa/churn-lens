@@ -1,29 +1,23 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  polarEventBody,
+  polarSubscriptionJson,
+  signedPolarDelivery,
+} from '@/__tests__/helpers/polar-fixtures';
 
-// vi.mock factories are hoisted above the module body, and the factory
-// references the error class eagerly (unlike the lazily-called mock fns), so it
-// must be created inside vi.hoisted or it is still in its temporal dead zone.
-const { validateEventMock, FakeVerificationError } = vi.hoisted(() => {
-  class FakeVerificationError extends Error {}
-  return { validateEventMock: vi.fn(), FakeVerificationError };
-});
-
-vi.mock('@polar-sh/sdk/webhooks', () => ({
-  validateEvent: (...args: unknown[]) => validateEventMock(...args),
-  WebhookVerificationError: FakeVerificationError,
-}));
-
-// Which subscription a revoke may touch, and why a skipped one is reported as
-// it is, are pinned against a real database in route.db.test.ts.
-const executeMock = vi.fn();
-const queryOneMock = vi.fn();
+/**
+ * The Polar webhook's paths that end before the database: signature and
+ * configuration failures, and payloads it cannot attribute to an org. The
+ * signature is real (the SDK's validateEvent over a correctly signed body);
+ * what each delivery does to the plan is pinned against a real database in
+ * route.db.test.ts.
+ *
+ * Every test here must leave the database alone, so the db module throws
+ * unless a test says otherwise.
+ */
+const withTransactionMock = vi.fn();
 vi.mock('@/lib/db', () => ({
-  execute: (...args: unknown[]) => executeMock(...args),
-  queryOne: (...args: unknown[]) => queryOneMock(...args),
-}));
-
-vi.mock('@/lib/polar', () => ({
-  getPolarWebhookSecret: () => 'whsec_test',
+  withTransaction: (...args: unknown[]) => withTransactionMock(...args),
 }));
 
 import { POST } from '../route';
@@ -31,307 +25,135 @@ import { POST } from '../route';
 // empty for every suite (vitest.config.ts), so nothing is emailed.
 import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 
+const SECRET = 'polar_whs_unit_secret';
 const ORG_ID = '11111111-1111-1111-1111-111111111111';
 const STARTER = 'prod_starter';
-const GROWTH = 'prod_growth';
 
-function request(body = '{}') {
-  return new Request('http://localhost/api/webhooks/polar', {
-    method: 'POST',
-    headers: { 'webhook-id': 'msg_1', 'webhook-signature': 'v1,sig' },
-    body,
-  });
+function subscriptionEvent(
+  type: string,
+  over: Partial<Parameters<typeof polarSubscriptionJson>[0]> = {},
+): string {
+  return polarEventBody(
+    type,
+    polarSubscriptionJson({
+      id: 'sub_1',
+      status: 'active',
+      productId: STARTER,
+      externalId: ORG_ID,
+      createdAt: '2026-08-01T00:00:00Z',
+      modifiedAt: '2026-08-20T00:00:00Z',
+      ...over,
+    }),
+  );
 }
 
-function subscription(over: Record<string, unknown> = {}) {
-  return {
-    id: 'sub_1',
-    status: 'active',
-    productId: STARTER,
-    customerId: 'cus_1',
-    createdAt: new Date('2026-08-01T00:00:00Z'),
-    modifiedAt: new Date('2026-08-20T00:00:00Z'),
-    customer: { id: 'cus_1', externalId: ORG_ID },
-    ...over,
-  };
+async function post(body: string, secret = SECRET) {
+  const res = await POST(signedPolarDelivery(body, secret));
+  return { status: res.status, body: (await res.json()) as Record<string, unknown> };
 }
-
-function emit(type: string, over: Record<string, unknown> = {}) {
-  validateEventMock.mockReturnValue({ type, data: subscription(over) });
-}
-
-/** Params of the UPDATE the route issued. */
-const updateParams = () => executeMock.mock.calls[0][1];
 
 beforeEach(() => {
-  validateEventMock.mockReset();
-  executeMock.mockReset().mockResolvedValue(1);
-  queryOneMock.mockReset().mockResolvedValue(null);
-  process.env.POLAR_PRODUCT_STARTER = STARTER;
-  process.env.POLAR_PRODUCT_GROWTH = GROWTH;
+  withTransactionMock.mockReset().mockImplementation(() => {
+    throw new Error('this test must not reach the database');
+  });
+  vi.stubEnv('POLAR_WEBHOOK_SECRET', SECRET);
+  vi.stubEnv('POLAR_PRODUCT_STARTER', STARTER);
   vi.spyOn(console, 'log').mockImplementation(() => {});
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'error').mockImplementation(() => {});
+  resetErrorReports();
 });
 
 afterEach(() => {
-  delete process.env.POLAR_PRODUCT_STARTER;
-  delete process.env.POLAR_PRODUCT_GROWTH;
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
 });
 
-describe('POST /api/webhooks/polar — signature', () => {
-  it('returns 403 on a bad signature and writes nothing', async () => {
-    validateEventMock.mockImplementation(() => {
-      throw new FakeVerificationError('bad signature');
-    });
-
-    const res = await POST(request());
+describe('POST /api/webhooks/polar — signature and configuration', () => {
+  it('returns 403 on a bad signature, writes nothing and reports nothing — anyone can send one', async () => {
+    const res = await post(subscriptionEvent('subscription.active'), 'polar_whs_wrong');
 
     expect(res.status).toBe(403);
-    expect(executeMock).not.toHaveBeenCalled();
-  });
-
-  it('returns 500 when the secret is missing, so Polar retries after the fix', async () => {
-    validateEventMock.mockImplementation(() => {
-      throw new Error('POLAR_WEBHOOK_SECRET is not set');
-    });
-
-    const res = await POST(request());
-
-    expect(res.status).toBe(500);
-    expect(executeMock).not.toHaveBeenCalled();
-  });
-
-  it('verifies against the raw body bytes', async () => {
-    emit('subscription.active');
-    const body = '{"type":"subscription.active"}';
-
-    await POST(request(body));
-
-    const passed = validateEventMock.mock.calls[0][0];
-    expect(Buffer.isBuffer(passed)).toBe(true);
-    expect(passed.toString()).toBe(body);
-  });
-});
-
-describe('POST /api/webhooks/polar — entitlement is driven by status, not event type', () => {
-  it('grants the mapped plan on an active subscription', async () => {
-    emit('subscription.active');
-
-    const res = await POST(request());
-
-    expect(res.status).toBe(200);
-    expect(updateParams()[0]).toBe('starter');
-  });
-
-  it('grants growth for the growth product', async () => {
-    emit('subscription.active', { productId: GROWTH });
-
-    await POST(request());
-
-    expect(updateParams()[0]).toBe('growth');
-  });
-
-  it('does NOT revoke on subscription.canceled while the status is still active', async () => {
-    // The customer requested cancellation but has paid through the period end.
-    // Revoking here would cut off access they are still owed — the single most
-    // likely integration bug, so it is pinned explicitly.
-    emit('subscription.canceled', { status: 'active' });
-
-    await POST(request());
-
-    expect(updateParams()[0]).toBe('starter');
-  });
-
-  it('revokes only once the status is terminal', async () => {
-    emit('subscription.revoked', { status: 'canceled' });
-
-    await POST(request());
-
-    expect(updateParams()[0]).toBe('free');
-  });
-
-  it('keeps a past_due subscription entitled', async () => {
-    emit('subscription.past_due', { status: 'past_due' });
-
-    await POST(request());
-
-    expect(updateParams()[0]).toBe('starter');
-  });
-
-  it('restores the plan on uncancel', async () => {
-    emit('subscription.uncanceled', { status: 'active' });
-
-    await POST(request());
-
-    expect(updateParams()[0]).toBe('starter');
-  });
-
-  it.each(['unpaid', 'incomplete_expired', 'paused'])(
-    'revokes on the terminal status %s',
-    async (status) => {
-      emit('subscription.updated', { status });
-
-      await POST(request());
-
-      expect(updateParams()[0]).toBe('free');
-    },
-  );
-
-  it('leaves the plan untouched for an incomplete subscription', async () => {
-    emit('subscription.created', { status: 'incomplete' });
-
-    const res = await POST(request());
-
-    expect(res.status).toBe(200);
-    expect(executeMock).not.toHaveBeenCalled();
-  });
-});
-
-describe('POST /api/webhooks/polar — refuses to guess', () => {
-  it('does not grant a plan for an unrecognized product', async () => {
-    emit('subscription.active', { productId: 'prod_unknown' });
-
-    const res = await POST(request());
-
-    expect(res.status).toBe(200);
-    expect((await res.json()).skipped).toBe('unknown_product');
-    expect(executeMock).not.toHaveBeenCalled();
-  });
-
-  it('still revokes even when the product is unknown', async () => {
-    // Revocation does not depend on knowing the tier, and failing to revoke
-    // would leave a non-paying org on a paid plan.
-    emit('subscription.revoked', { status: 'canceled', productId: 'prod_unknown' });
-
-    await POST(request());
-
-    expect(updateParams()[0]).toBe('free');
-  });
-
-  it('acknowledges a subscription with no external id rather than retrying forever', async () => {
-    emit('subscription.active', { customer: { id: 'cus_1', externalId: null } });
-
-    const res = await POST(request());
-
-    expect(res.status).toBe(200);
-    expect((await res.json()).skipped).toBe('no_external_id');
-    expect(executeMock).not.toHaveBeenCalled();
-  });
-
-  it('acknowledges unhandled event types without touching the database', async () => {
-    validateEventMock.mockReturnValue({ type: 'benefit.created', data: {} });
-
-    const res = await POST(request());
-
-    expect(res.status).toBe(200);
-    expect(executeMock).not.toHaveBeenCalled();
-  });
-});
-
-describe('POST /api/webhooks/polar — out-of-order delivery', () => {
-  it('guards the write with a watermark on the event timestamp', async () => {
-    emit('subscription.active');
-
-    await POST(request());
-
-    const [sql, params] = executeMock.mock.calls[0];
-    expect(sql).toMatch(/polar_synced_at IS NULL OR polar_synced_at < \$4/);
-    expect(params[3]).toEqual(new Date('2026-08-20T00:00:00Z'));
-  });
-
-  it('falls back to createdAt when modifiedAt is null', async () => {
-    emit('subscription.created', { modifiedAt: null });
-
-    await POST(request());
-
-    expect(updateParams()[3]).toEqual(new Date('2026-08-01T00:00:00Z'));
-  });
-
-  it('acknowledges a stale event that the watermark rejected', async () => {
-    executeMock.mockResolvedValue(0);
-    emit('subscription.updated', { status: 'active' });
-
-    const res = await POST(request());
-
-    expect(res.status).toBe(200);
-    expect((await res.json()).skipped).toBe('stale_or_unknown_org');
-  });
-
-  it('records the Polar ids alongside the plan', async () => {
-    emit('subscription.active');
-
-    await POST(request());
-
-    const params = updateParams();
-    expect(params[1]).toBe('cus_1');
-    expect(params[2]).toBe('sub_1');
-    expect(params[4]).toBe(ORG_ID);
-  });
-});
-
-describe('POST /api/webhooks/polar — error reporting', () => {
-  beforeEach(() => {
-    resetErrorReports();
-  });
-
-  it('does not report a bad signature — anyone can send one', async () => {
-    validateEventMock.mockImplementation(() => {
-      throw new FakeVerificationError('bad signature');
-    });
-
-    await POST(request());
-
+    expect(withTransactionMock).not.toHaveBeenCalled();
     expect(getErrorReportSnapshot().totalReported).toBe(0);
   });
 
-  it('reports a webhook that cannot be validated at all — no plan changes land until it is fixed', async () => {
-    validateEventMock.mockImplementation(() => {
-      throw new Error('POLAR_WEBHOOK_SECRET is not set');
-    });
+  it('returns 500 and reports when the secret is missing, so Polar retries after the fix', async () => {
+    vi.stubEnv('POLAR_WEBHOOK_SECRET', '');
 
-    await POST(request());
+    const res = await post(subscriptionEvent('subscription.active'));
 
+    expect(res.status).toBe(500);
+    expect(withTransactionMock).not.toHaveBeenCalled();
     expect(getErrorReportSnapshot().recent).toEqual([
       expect.objectContaining({
         context: 'webhook.polar',
-        message: 'POLAR_WEBHOOK_SECRET is not set',
+        message: expect.stringContaining('POLAR_WEBHOOK_SECRET is not set'),
         meta: { step: 'validate' },
       }),
     ]);
   });
 
-  it('reports a subscription it cannot attribute — someone may have paid for nothing', async () => {
-    emit('subscription.active', { customer: { id: 'cus_1', externalId: null } });
+  it('verifies against the raw body bytes, not a re-serialization of them', async () => {
+    // Whitespace JSON.stringify would never produce: re-serializing before
+    // verifying would change the bytes and fail the signature.
+    const body = '{ "type" : "customer.brand_new_thing",\n  "data" : {} }';
 
-    await POST(request());
+    const res = await post(body);
 
+    expect(res).toEqual({ status: 200, body: { received: true, skipped: 'unparsed_event' } });
+  });
+});
+
+describe('POST /api/webhooks/polar — payloads that cannot be applied', () => {
+  it('acknowledges an incomplete subscription without touching the database', async () => {
+    const res = await post(subscriptionEvent('subscription.created', { status: 'incomplete' }));
+
+    expect(res).toEqual({ status: 200, body: { received: true, skipped: 'status_incomplete' } });
+  });
+
+  it('acknowledges and reports a subscription event missing a field the plan needs', async () => {
+    const data = polarSubscriptionJson({
+      id: 'sub_1', status: 'active', productId: STARTER, externalId: ORG_ID,
+      createdAt: '2026-08-01T00:00:00Z', modifiedAt: 'yesterday',
+    });
+
+    const res = await post(polarEventBody('subscription.cycled', data));
+
+    expect(res).toEqual({ status: 200, body: { received: true, skipped: 'malformed_event' } });
     expect(getErrorReportSnapshot().recent).toEqual([
       expect.objectContaining({
         context: 'webhook.polar',
-        meta: { subscriptionId: 'sub_1', step: 'no_external_id' },
+        meta: { subscriptionId: 'sub_1', step: 'malformed_event' },
       }),
     ]);
   });
 
-  it('reports a product that maps to no plan, with the ids needed to fix the mapping', async () => {
-    emit('subscription.active', { productId: 'prod_unknown' });
+  it.each([
+    ['an email', 'someone@example.com'],
+    ['an arbitrary string', 'acme-customer-42'],
+    ['a uuid with trailing text', `${ORG_ID}x`],
+  ])('acknowledges an external_id that is %s without passing it to Postgres', async (_label, externalId) => {
+    const res = await post(subscriptionEvent('subscription.active', { externalId }));
 
-    await POST(request());
+    expect(res).toEqual({ status: 200, body: { received: true, skipped: 'bad_external_id' } });
+    expect(getErrorReportSnapshot().recent[0].meta).toEqual({ subscriptionId: 'sub_1', step: 'bad_external_id' });
+  });
+});
 
+describe('POST /api/webhooks/polar — database failure', () => {
+  it('answers 500 so Polar retries, and reports with ids', async () => {
+    withTransactionMock.mockReset().mockRejectedValue(new Error('connection terminated'));
+
+    const res = await post(subscriptionEvent('subscription.active'));
+
+    expect(res.status).toBe(500);
     expect(getErrorReportSnapshot().recent).toEqual([
       expect.objectContaining({
         context: 'webhook.polar',
-        meta: { orgId: ORG_ID, productId: 'prod_unknown', subscriptionId: 'sub_1', step: 'unknown_product' },
+        message: 'connection terminated',
+        meta: { orgId: ORG_ID, subscriptionId: 'sub_1', step: 'apply' },
       }),
     ]);
-  });
-
-  it('reports nothing for an ordinary grant', async () => {
-    emit('subscription.active');
-
-    await POST(request());
-
-    expect(getErrorReportSnapshot().totalReported).toBe(0);
   });
 });
