@@ -136,6 +136,10 @@ describe('POST /api/webhooks/polar — Polar webhooks not configured', () => {
     vi.resetModules();
     freshPOST = (await import('../route')).POST;
     vi.stubEnv('POLAR_WEBHOOK_SECRET', '');
+    // Billing entirely unconfigured: no token, no products.
+    vi.stubEnv('POLAR_ACCESS_TOKEN', '');
+    vi.stubEnv('POLAR_PRODUCT_STARTER', '');
+    vi.stubEnv('POLAR_PRODUCT_GROWTH', '');
   });
 
   function polarWarnings(): unknown[][] {
@@ -165,6 +169,26 @@ describe('POST /api/webhooks/polar — Polar webhooks not configured', () => {
     await freshPOST(signedPolarDelivery(subscriptionEvent('subscription.revoked'), SECRET));
 
     expect(polarWarnings()).toHaveLength(1);
+  });
+
+  // Checkout live but the secret missing: real subscriptions' events are being
+  // refused, so no plan will ever change. Worth one alert per process.
+  it.each([
+    ['POLAR_ACCESS_TOKEN', 'polar_oat_test'],
+    ['POLAR_PRODUCT_STARTER', STARTER],
+  ])('reports once per process when %s is set but the secret is not', async (name, value) => {
+    vi.stubEnv(name, value);
+
+    await freshPOST(signedPolarDelivery(subscriptionEvent('subscription.active'), SECRET));
+    const res = await freshPOST(
+      new Request('http://localhost/api/webhooks/polar', { method: 'POST', body: '{"type":"anything"}' }),
+    );
+
+    expect(res.status).toBe(503);
+    expect(withTransactionMock).not.toHaveBeenCalled();
+    const snapshot = getErrorReportSnapshot();
+    expect(snapshot.totalReported).toBe(1);
+    expect(snapshot.recent[0]).toMatchObject({ context: 'webhook.polar', meta: { step: 'not_configured' } });
   });
 });
 

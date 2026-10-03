@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { validateEvent, WebhookVerificationError } from '@polar-sh/sdk/webhooks';
 import { SDKValidationError } from '@polar-sh/sdk/models/errors/sdkvalidationerror.js';
 import { withTransaction } from '@/lib/db';
-import { getPolarWebhookSecret, isPolarWebhookConfigured } from '@/lib/polar';
+import { getPolarWebhookSecret, isPolarConfigured, isPolarWebhookConfigured } from '@/lib/polar';
 import { entitlementForStatus, planForProduct } from '@/lib/plan';
 import { lockOrganization, recomputeOrgPlan } from '@/lib/org-plan';
 import { reportError } from '@/lib/report-error';
@@ -91,7 +91,16 @@ async function handlePolarWebhook(req: Request) {
   if (!isPolarWebhookConfigured()) {
     if (!warnedNotConfigured) {
       warnedNotConfigured = true;
-      console.warn('Polar webhook received but POLAR_WEBHOOK_SECRET is not set — answering 503 until it is.');
+      const message = 'Polar webhook received but POLAR_WEBHOOK_SECRET is not set — answering 503 until it is.';
+      // Half-configured billing is the exception: with checkout live, a real
+      // subscription's events are being refused and no plan will ever change.
+      // That is worth one alert per process — strangers cannot raise it more
+      // often than that.
+      if (isPolarConfigured() || process.env.POLAR_PRODUCT_STARTER || process.env.POLAR_PRODUCT_GROWTH) {
+        reportError('webhook.polar', new Error(message), { step: 'not_configured' });
+      } else {
+        console.warn(message);
+      }
     }
     return NextResponse.json({ error: 'Polar webhooks not configured' }, { status: 503 });
   }
