@@ -1,13 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+/**
+ * POST /api/admin/plan — the paths that end before the database: auth and
+ * input validation. What a comp does to the org's plan is pinned against a
+ * real database in route.db.test.ts.
+ */
 const verifyCronSecretMock = vi.fn();
 vi.mock('@/lib/auth', () => ({
   verifyCronSecret: (...args: unknown[]) => verifyCronSecretMock(...args),
 }));
 
-const executeMock = vi.fn();
+const withTransactionMock = vi.fn();
 vi.mock('@/lib/db', () => ({
-  execute: (...args: unknown[]) => executeMock(...args),
+  withTransaction: (...args: unknown[]) => withTransactionMock(...args),
 }));
 
 import { POST } from '../route';
@@ -22,12 +27,11 @@ function request(body: unknown, auth = 'Bearer secret') {
   });
 }
 
-/** Params of the UPDATE the route issued. */
-const updateParams = () => executeMock.mock.calls[0][1];
-
 beforeEach(() => {
   verifyCronSecretMock.mockReset().mockReturnValue(true);
-  executeMock.mockReset().mockResolvedValue(1);
+  withTransactionMock.mockReset().mockImplementation(() => {
+    throw new Error('this test must not reach the database');
+  });
   vi.spyOn(console, 'log').mockImplementation(() => {});
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
@@ -39,7 +43,7 @@ describe('POST /api/admin/plan — auth', () => {
     const res = await POST(request({ orgId: ORG_ID, plan: 'starter' }));
 
     expect(res.status).toBe(401);
-    expect(executeMock).not.toHaveBeenCalled();
+    expect(withTransactionMock).not.toHaveBeenCalled();
   });
 
   it('checks auth before parsing the body', async () => {
@@ -57,18 +61,19 @@ describe('POST /api/admin/plan — validation', () => {
     const res = await POST(request('{{{'));
 
     expect(res.status).toBe(400);
-    expect(executeMock).not.toHaveBeenCalled();
   });
 
   it.each([
     ['a missing orgId', { plan: 'starter' }],
     ['an empty orgId', { orgId: '', plan: 'starter' }],
     ['a non-string orgId', { orgId: 42, plan: 'starter' }],
+    // Postgres raises a cast error for a malformed uuid instead of matching no
+    // rows; it is an operator typo, not a server failure.
+    ['an orgId that is not a uuid', { orgId: 'not-a-uuid', plan: 'starter' }],
   ])('rejects %s', async (_label, body) => {
     const res = await POST(request(body));
 
     expect(res.status).toBe(400);
-    expect(executeMock).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -83,40 +88,14 @@ describe('POST /api/admin/plan — validation', () => {
     // The message must name the valid values, since this is an operator tool
     // with no UI to discover them from.
     expect((await res.json()).error).toMatch(/free.*starter.*growth/);
-    expect(executeMock).not.toHaveBeenCalled();
   });
 });
 
-describe('POST /api/admin/plan — writes', () => {
-  it.each(['free', 'starter', 'growth'])('sets the plan to %s', async (plan) => {
-    const res = await POST(request({ orgId: ORG_ID, plan }));
-
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ orgId: ORG_ID, plan });
-    expect(updateParams()).toEqual([plan, ORG_ID]);
-  });
-
-  it('downgrades to free, so the route can revoke as well as grant', async () => {
-    const res = await POST(request({ orgId: ORG_ID, plan: 'free' }));
-
-    expect(res.status).toBe(200);
-    expect(updateParams()[0]).toBe('free');
-  });
-
-  it('returns 404 when the org does not exist', async () => {
-    executeMock.mockResolvedValue(0);
+describe('POST /api/admin/plan — database failure', () => {
+  it('answers 500 rather than throwing', async () => {
+    withTransactionMock.mockReset().mockRejectedValue(new Error('connection terminated'));
 
     const res = await POST(request({ orgId: ORG_ID, plan: 'starter' }));
-
-    expect(res.status).toBe(404);
-  });
-
-  it('returns 500 rather than throwing when the orgId is not a valid uuid', async () => {
-    // Postgres raises a cast error for a malformed uuid instead of matching no
-    // rows, so this must be handled rather than surfacing as an unhandled throw.
-    executeMock.mockRejectedValue(new Error('invalid input syntax for type uuid'));
-
-    const res = await POST(request({ orgId: 'not-a-uuid', plan: 'starter' }));
 
     expect(res.status).toBe(500);
   });
