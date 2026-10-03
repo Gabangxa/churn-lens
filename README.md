@@ -248,6 +248,14 @@ almost always well past even the 8h-capped backoff window, so the next poll (wit
    ```
 
    All variables in `src/lib/env.ts` are required — the server refuses to boot without them.
+
+   Also set `ALERT_EMAIL=<an inbox you read>` (optional, but nothing pages you without it).
+   `src/lib/report-error.ts` emails it when a cron job, the scheduler, a survey save, a
+   login-link send, account deletion, onboarding or the process itself fails: first
+   occurrence at once, then at most one per error fingerprint per hour (carrying how many
+   were suppressed) and 10 per hour overall, since alerts share the Resend quota with
+   survey emails. Anything email-shaped is redacted. Unset, errors are still logged as one
+   JSON line each and listed by the monitor below; the server warns once at boot.
 4. **Settings → Networking → Generate Domain** (populates `RAILWAY_PUBLIC_DOMAIN`), then deploy.
    The pre-deploy step runs `scripts/migrate.js`; the healthcheck waits on `/api/health`.
 

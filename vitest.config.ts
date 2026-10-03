@@ -14,6 +14,12 @@ export default defineConfig({
     // Serialise files only when that database is in play so the default
     // (mocked) run keeps its parallelism.
     fileParallelism: !process.env.TEST_DATABASE_URL,
+    // Route suites drive failure paths on purpose, and those now call
+    // reportError, which emails ALERT_EMAIL through the real Resend client
+    // wherever a suite does not mock it. Pinned empty so a shell that exports
+    // ALERT_EMAIL and RESEND_API_KEY (`railway run`, direnv) cannot turn a test
+    // run into real alert emails. Suites that test alerting stub it per test.
+    env: { ALERT_EMAIL: '' },
   },
   resolve: {
     alias: {
