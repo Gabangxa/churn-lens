@@ -4,7 +4,7 @@
 // 127.0.0.1 only — this holds a secret capable of triggering cron routes
 // (see /api/admin/status), so it must never be reachable off-box.
 //
-// CommonJS + Node 20 APIs only, no new dependencies (matches scripts/migrate.js).
+// CommonJS + Node 22 APIs only, no new dependencies (matches scripts/migrate.js).
 'use strict';
 
 const http = require('node:http');
