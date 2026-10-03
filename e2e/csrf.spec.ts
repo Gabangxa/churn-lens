@@ -15,6 +15,17 @@ test.describe('cross-site request rejection', () => {
     await closeDb();
   });
 
+  test('no page can be framed, the sign-in confirmation above all', async ({ request }) => {
+    // /login/confirm's one button spends a magic link; framed invisibly on
+    // another site it could be clickjacked. next.config.js refuses framing
+    // everywhere, so the login page (which renders for anyone) shows it.
+    const res = await request.get('/login');
+
+    expect(res.status()).toBe(200);
+    expect(res.headers()['x-frame-options']).toBe('DENY');
+    expect(res.headers()['content-security-policy']).toContain("frame-ancestors 'none'");
+  });
+
   test('connecting Stripe without a session is unauthorized', async ({ request }) => {
     const res = await request.post('/api/onboarding/connect', {
       data: { apiKey: 'rk_live_whatever' },

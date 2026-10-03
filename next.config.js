@@ -3,6 +3,23 @@ const nextConfig = {
   experimental: {
     instrumentationHook: true,
   },
+  // No page of this app is meant to be framed — not by another site, not by
+  // itself. Above all /login/confirm: its one button spends a magic link, and
+  // a page that framed it invisibly could get it pressed (clickjacking).
+  // SameSite=Lax already keeps a framed cross-site sign-in from storing its
+  // cookie; this refuses the frame outright. frame-ancestors is the modern
+  // control, X-Frame-Options the one older browsers still read.
+  async headers() {
+    return [
+      {
+        source: '/:path*',
+        headers: [
+          { key: 'X-Frame-Options', value: 'DENY' },
+          { key: 'Content-Security-Policy', value: "frame-ancestors 'none'" },
+        ],
+      },
+    ];
+  },
   webpack(config, { nextRuntime }) {
     // instrumentation.ts is compiled for BOTH the Node and the Edge server
     // bundles, and its dynamic import of ./lib/cron reaches src/lib/db.ts and
