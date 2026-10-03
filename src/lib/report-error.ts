@@ -1,4 +1,3 @@
-import { createHash } from 'crypto';
 import { getResend, FROM_EMAIL } from '@/lib/resend';
 
 /**
@@ -248,13 +247,29 @@ function describeError(err: unknown): DescribedError {
 }
 
 /**
+ * FNV-1a, 32-bit, as 8 hex chars. A grouping key, not a security boundary:
+ * with at most MAX_FINGERPRINTS live keys a collision is around one in a
+ * million, and its cost is two errors sharing a count. Pure JS on purpose —
+ * node's `crypto` breaks the Edge compile of instrumentation.ts, which
+ * reaches this module ("Module not found: Can't resolve 'crypto'").
+ */
+function fnv1a32(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+/**
  * Groups occurrences that differ only in ids: UUIDs and digit runs are
  * normalised (emails are already redacted by the time this runs). The stack
  * is left out so a redeploy that shifts line numbers does not split a group.
  */
 function fingerprintOf(context: string, name: string, message: string): string {
   const normalised = message.replace(UUID_SHAPED, '<id>').replace(/\d+/g, '<n>');
-  return createHash('sha1').update(`${context}\n${name}\n${normalised}`).digest('hex').slice(0, 12);
+  return fnv1a32(`${context}\n${name}\n${normalised}`);
 }
 
 /** RAILWAY_ENVIRONMENT_NAME, else NODE_ENV — `||` because an empty value names nothing. */
@@ -271,8 +286,20 @@ function iso(ms: number): string {
   return new Date(ms).toISOString();
 }
 
-function logLine(fields: Record<string, unknown>, level: 'error' | 'warn' = 'error'): void {
-  const line = JSON.stringify({ level, ...fields });
+/**
+ * One JSON line. `message` carries a `[context]` prefix, the codebase's
+ * existing "[cron] …" convention, because Railway's log view and the
+ * monitor's log tail show only `message`: a bare "connection terminated"
+ * says nothing about where. It is also what the monitor's "cron only" filter
+ * matches on. `context` stays a field of its own for filtering in Railway.
+ */
+function logLine(
+  level: 'error' | 'warn',
+  context: string,
+  message: string,
+  extra: Record<string, unknown> = {},
+): void {
+  const line = JSON.stringify({ level, context, message: `[${context}] ${message}`, ...extra });
   if (level === 'warn') console.warn(line);
   else console.error(line);
 }
@@ -367,7 +394,7 @@ function recordAlertFailure(state: ReportState, reason: string, fingerprint: str
   const safeReason = scrub(reason, 500);
   state.alertsFailed++;
   state.lastAlertError = safeReason;
-  logLine({ context: 'report-error.alert', message: `alert email send failed: ${safeReason}`, fingerprint });
+  logLine('error', 'report-error.alert', `alert email send failed: ${safeReason}`, { fingerprint });
 }
 
 async function sendAlert(state: ReportState, to: string, alert: AlertContent): Promise<void> {
@@ -394,12 +421,9 @@ function warnAlertsDisabledOnce(state: ReportState): void {
   if (state.warnedAlertsDisabled) return;
   state.warnedAlertsDisabled = true;
   logLine(
-    {
-      context: 'report-error',
-      message:
-        'ALERT_EMAIL is not set — error alert emails are disabled. Errors are still logged and listed in GET /api/admin/status.',
-    },
     'warn',
+    'report-error',
+    'ALERT_EMAIL is not set — error alert emails are disabled. Errors are still logged and listed in GET /api/admin/status.',
   );
 }
 
@@ -431,12 +455,10 @@ function maybeAlert(state: ReportState, alert: Omit<AlertContent, 'suppressed' |
     if (state.budgetWarnedAt === null || now - state.budgetWarnedAt >= BUDGET_WINDOW_MS) {
       state.budgetWarnedAt = now;
       logLine(
-        {
-          context: 'report-error',
-          message: `alert budget of ${MAX_ALERTS_PER_HOUR} emails per hour is spent; further alerts are counted, not sent, until it frees up`,
-          fingerprint: alert.fingerprint,
-        },
         'warn',
+        'report-error',
+        `alert budget of ${MAX_ALERTS_PER_HOUR} emails per hour is spent; further alerts are counted, not sent, until it frees up`,
+        { fingerprint: alert.fingerprint },
       );
     }
     return;
@@ -469,7 +491,7 @@ export function reportError(context: string, err: unknown, meta: ErrorMeta = {})
     const safeMeta = scrubMeta(meta);
     const fingerprint = fingerprintOf(context, name, message);
 
-    logLine({ context, name, message, fingerprint, environment, meta: safeMeta, stack });
+    logLine('error', context, message, { name, fingerprint, environment, meta: safeMeta, stack });
 
     const state = slot();
     const entry = recordOccurrence(state, now, { at: iso(now), context, name, message, fingerprint, meta: safeMeta });
@@ -479,10 +501,8 @@ export function reportError(context: string, err: unknown, meta: ErrorMeta = {})
     // block (or crash the process from the uncaughtException monitor). Only
     // this module's own failure is described — not the original error, whose
     // contents never made it through scrubbing.
-    const reason = internal instanceof Error ? redactEmails(internal.message) : 'non-Error thrown';
-    console.error(
-      JSON.stringify({ level: 'error', context: 'report-error', message: `reportError failed while reporting ${context}: ${reason}` }),
-    );
+    const reason = internal instanceof Error ? scrub(internal.message, 500) : 'non-Error thrown';
+    logLine('error', 'report-error', `reportError failed while reporting ${context}: ${reason}`);
   }
 }
 

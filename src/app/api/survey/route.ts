@@ -4,6 +4,7 @@ import { verifySurveyToken } from '@/lib/crypto';
 import { redirectUrl } from '@/lib/app-url';
 import { BUILTIN_CANCELLATION_REASONS, loadSurveyConfig } from '@/lib/survey-config';
 import { MAX_COMEBACK_TEXT, MAX_OPEN_TEXT, MAX_REASON, truncateFreeText } from '@/lib/survey-limits';
+import { reportError } from '@/lib/report-error';
 
 export async function POST(req: NextRequest) {
   const body = await req.formData();
@@ -106,7 +107,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Survey not found or already submitted' }, { status: 404 });
     }
   } catch (err) {
-    console.error('Survey update error:', err);
+    // The link is single-use and the customer has already cancelled, so
+    // a lost answer does not come back. Org id only: the token is a
+    // credential and the answer is the customer's own words.
+    reportError('survey.submit', err, { orgId: payload.orgId });
     return NextResponse.json({ error: 'Failed to save response' }, { status: 500 });
   }
 

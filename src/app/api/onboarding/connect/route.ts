@@ -4,6 +4,7 @@ import { query, queryOne } from '@/lib/db';
 import { encryptApiKey } from '@/lib/crypto';
 import { assertSameOrigin, requireOrgId, clearOrgCookie } from '@/lib/auth';
 import { checkRateLimit, clientIp } from '@/lib/ratelimit';
+import { reportError } from '@/lib/report-error';
 
 /**
  * Attach (or replace) the signed-in org's Stripe restricted key and register
@@ -84,8 +85,14 @@ export async function POST(req: NextRequest) {
     // instead of surfacing a confusing Stripe error to the user.
     const appUrl = process.env.NEXT_PUBLIC_APP_URL;
     if (!appUrl || !appUrl.startsWith('https://')) {
-      console.error(
-        `NEXT_PUBLIC_APP_URL is ${appUrl ? `"${appUrl}" (must start with https://)` : 'not set'} — cannot register Stripe webhook.`,
+      // Server misconfiguration: every founder's onboarding fails until
+      // someone fixes the variable, so this is reported, not just logged.
+      reportError(
+        'onboarding.connect',
+        new Error(
+          `NEXT_PUBLIC_APP_URL is ${appUrl ? `"${appUrl}" (must start with https://)` : 'not set'} — cannot register Stripe webhook.`,
+        ),
+        { orgId, step: 'app_url' },
       );
       return NextResponse.json(
         { error: 'Server misconfiguration: app URL is missing or not https. Contact support.' },
@@ -104,12 +111,18 @@ export async function POST(req: NextRequest) {
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Unknown error';
-        console.error('Stripe webhook registration failed:', err);
         // Only blame the key when Stripe actually reported an auth/permission
         // problem — other failures (bad URL, network) are not the user's fault.
         const isKeyProblem =
           err instanceof Stripe.errors.StripeAuthenticationError ||
           err instanceof Stripe.errors.StripePermissionError;
+        if (isKeyProblem) {
+          // The founder's input, answered with a hint below — not an alert.
+          // Stripe masks the key in this message.
+          console.warn(`Stripe rejected the key during webhook registration for org ${orgId}: ${message}`);
+        } else {
+          reportError('onboarding.connect', err, { orgId, step: 'stripe_webhook' });
+        }
         const hint = isKeyProblem
           ? ' Check that your key is valid and has Webhook Endpoints write permission.'
           : '';
@@ -129,7 +142,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ success: true });
   } catch (err) {
-    console.error('Onboarding connect error:', err);
+    reportError('onboarding.connect', err, { orgId });
     return NextResponse.json({ error: 'Internal server error.' }, { status: 500 });
   }
 }

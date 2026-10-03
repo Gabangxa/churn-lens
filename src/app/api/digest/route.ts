@@ -4,6 +4,7 @@ import { getResend, FROM_EMAIL } from '@/lib/resend';
 import { verifyCronSecret } from '@/lib/auth';
 import { reportingWeek } from '@/lib/week';
 import { claimCronRun, cronRunRecord, finishCronRun, MAX_ATTEMPTS, STALE_RUNNING_MS } from '@/lib/cron';
+import { reportError } from '@/lib/report-error';
 
 interface ThemeRow {
   org_id: string;
@@ -180,7 +181,11 @@ Manage preferences: ${settingsUrl}`;
           });
 
           if (error) {
-            console.error(`Digest: send failed for org ${org.id}, week ${weekOfStr}:`, error);
+            // Its own context so a Resend problem (unverified domain, spent
+            // quota) reads as exactly that in the alert. reportError redacts
+            // the message, which for a validation error can quote the founder's
+            // address.
+            reportError('cron.digest.send', error, { orgId: org.id, weekOf: weekOfStr });
             failed++;
             continue;
           }
@@ -195,14 +200,14 @@ Manage preferences: ${settingsUrl}`;
         } catch (err) {
           // One org's DB error (or anything else unexpected) must not abort the
           // rest of the run — every other founder still gets their digest.
-          console.error(`Digest: org ${org.id} failed for week ${weekOfStr}:`, err);
+          reportError('cron.digest', err, { orgId: org.id, weekOf: weekOfStr });
           failed++;
         }
       }
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`Digest: run failed for week ${weekOfStr}:`, err);
+    reportError('cron.digest', err, { weekOf: weekOfStr });
     await finishCronRun('digest', weekOfStr, {
       status: 'failed',
       processed: sent,

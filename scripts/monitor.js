@@ -570,7 +570,9 @@ function renderPage() {
   function matchesFilter(line) {
     var cronOnly = document.getElementById('cronOnly').checked;
     var errorsOnly = document.getElementById('errorsOnly').checked;
-    if (cronOnly && line.message.indexOf('[cron]') === -1) return false;
+    // '[cron' rather than '[cron]': reportError lines are tagged by context,
+    // '[cron.scheduler]', '[cron.themes]' and so on (src/lib/report-error.ts).
+    if (cronOnly && line.message.indexOf('[cron') === -1) return false;
     if (errorsOnly && line.level !== 'error') return false;
     return true;
   }

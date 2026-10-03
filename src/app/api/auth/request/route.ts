@@ -6,6 +6,7 @@ import { getResend, FROM_EMAIL } from '@/lib/resend';
 import { checkRateLimit, clientIp } from '@/lib/ratelimit';
 import { assertSameOrigin } from '@/lib/auth';
 import { sanitizeNext } from '@/lib/next-paths';
+import { reportError } from '@/lib/report-error';
 
 const TOKEN_TTL_MS = 15 * 60 * 1000;
 
@@ -166,11 +167,13 @@ didn't request this, you can safely ignore this email — nothing will happen.
         throw new Error(`Resend send failed: ${error.name}: ${error.message}`);
       }
     } catch (err) {
-      // Log but don't leak send status to the caller.
-      console.error('Login email send failed:', err);
+      // Reported, never surfaced to the caller (enumeration safety) — which
+      // makes this report the only sign that nobody can sign in. Org id
+      // only; reportError also redacts the address if Resend's error quotes it.
+      reportError('auth.login-email', err, { orgId });
     }
   } catch (err) {
-    console.error('Login request failed after rate limits passed:', err);
+    reportError('auth.login-request', err);
   }
 
   return NextResponse.json({ ok: true });

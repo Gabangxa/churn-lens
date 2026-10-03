@@ -4,6 +4,7 @@ import { verifyCronSecret } from '@/lib/auth';
 import { claimCronRun, finishCronRun, todayDateStr } from '@/lib/cron';
 import { disconnectStripe } from '@/lib/stripe-disconnect';
 import { LEGAL } from '@/lib/legal';
+import { reportError } from '@/lib/report-error';
 
 /**
  * Daily retention purge.
@@ -54,7 +55,7 @@ export async function POST(req: Request) {
       [LEGAL.surveyResponseRetentionMonths],
     );
   } catch (err) {
-    console.error(`Purge ${dateStr}: survey_responses retention step failed:`, err);
+    reportError('cron.purge', err, { step: 'survey_responses', date: dateStr });
     failed.push('survey_responses');
   }
 
@@ -64,7 +65,7 @@ export async function POST(req: Request) {
       [LEGAL.surveyResponseRetentionMonths],
     );
   } catch (err) {
-    console.error(`Purge ${dateStr}: themes retention step failed:`, err);
+    reportError('cron.purge', err, { step: 'themes', date: dateStr });
     failed.push('themes');
   }
 
@@ -76,7 +77,7 @@ export async function POST(req: Request) {
       `DELETE FROM login_tokens WHERE expires_at < now() - interval '1 day'`,
     );
   } catch (err) {
-    console.error(`Purge ${dateStr}: login_tokens cleanup step failed:`, err);
+    reportError('cron.purge', err, { step: 'login_tokens', date: dateStr });
     failed.push('login_tokens');
   }
 
@@ -101,12 +102,14 @@ export async function POST(req: Request) {
         await execute('DELETE FROM organizations WHERE id = $1', [org.id]);
         orgsDeleted++;
       } catch (err) {
-        console.error(`Purge ${dateStr}: hard-delete failed for org ${org.id}:`, err);
+        // An erasure the privacy policy promised has not happened; the org
+        // is retried tomorrow, but someone should know why it failed today.
+        reportError('cron.purge', err, { step: 'org_delete', orgId: org.id, date: dateStr });
         failed.push(`org_delete:${org.id}`);
       }
     }
   } catch (err) {
-    console.error(`Purge ${dateStr}: querying orgs due for deletion failed:`, err);
+    reportError('cron.purge', err, { step: 'org_delete_query', date: dateStr });
     failed.push('org_delete_query');
   }
 
@@ -134,7 +137,7 @@ export async function POST(req: Request) {
          )`,
     );
   } catch (err) {
-    console.error(`Purge ${dateStr}: abandoned-signup cleanup step failed:`, err);
+    reportError('cron.purge', err, { step: 'abandoned_signups', date: dateStr });
     failed.push('abandoned_signups');
   }
 
@@ -151,7 +154,7 @@ export async function POST(req: Request) {
        WHERE NOT EXISTS (SELECT 1 FROM organizations o WHERE o.id = u.org_id)`,
     );
   } catch (err) {
-    console.error(`Purge ${dateStr}: orphaned unsubscribes cleanup step failed:`, err);
+    reportError('cron.purge', err, { step: 'orphaned_unsubscribes', date: dateStr });
     failed.push('orphaned_unsubscribes');
   }
 
@@ -162,7 +165,7 @@ export async function POST(req: Request) {
   try {
     cronRunsPurged = await execute(`DELETE FROM cron_runs WHERE ran_at < now() - interval '90 days'`);
   } catch (err) {
-    console.error(`Purge ${dateStr}: cron_runs cleanup step failed:`, err);
+    reportError('cron.purge', err, { step: 'cron_runs', date: dateStr });
     failed.push('cron_runs');
   }
 

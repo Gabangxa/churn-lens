@@ -21,6 +21,9 @@ vi.mock('../lib/cron', async (importOriginal) => {
 
 import { register } from '../instrumentation';
 import { getSchedulerState, resetSchedulerState } from '../lib/scheduler-state';
+// Real, not mocked: these tests assert on what reportError recorded. ALERT_EMAIL
+// is pinned empty for every suite (vitest.config.ts), so nothing is emailed.
+import { getErrorReportSnapshot, resetErrorReports } from '../lib/report-error';
 
 const FIRST_POLL_MS = 30 * 1000;
 const POLL_INTERVAL_MS = 10 * 60 * 1000;
@@ -71,6 +74,8 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(MONDAY_0800);
   resetSchedulerState();
+  // Also detaches the process listeners an earlier test's register() installed.
+  resetErrorReports();
 
   validateEnvMock.mockReset();
   validateEnvMock.mockImplementation(() => {});
@@ -90,6 +95,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  resetErrorReports();
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.unstubAllGlobals();
@@ -589,5 +595,104 @@ describe('register — scheduler-state (read by /api/admin/status)', () => {
 
     expect(getSchedulerState().lastPollError).toBeNull();
     expect(getSchedulerState().lastPollAt).not.toBe(firstPollAt);
+  });
+});
+
+describe('register — error reporting (src/lib/report-error.ts)', () => {
+  /** The fingerprint summaries reportError holds for one context. */
+  function reported(context: string) {
+    return getErrorReportSnapshot().fingerprints.filter((f) => f.context === context);
+  }
+
+  /** Node passes `origin` to monitor listeners; @types/node's emit() overload omits it. */
+  function emitUncaughtMonitor(err: Error) {
+    const emit = process.emit.bind(process) as (event: string, ...args: unknown[]) => boolean;
+    emit('uncaughtExceptionMonitor', err, 'uncaughtException');
+  }
+
+  it('hooks process-level failures into reportError on boot', async () => {
+    await register();
+
+    emitUncaughtMonitor(new Error('kaboom'));
+
+    expect(reported('process.uncaughtException')).toEqual([expect.objectContaining({ message: 'kaboom', count: 1 })]);
+  });
+
+  it('hooks them even when E2E_DISABLE_SCHEDULER=1 — they have nothing to do with the scheduler', async () => {
+    vi.stubEnv('E2E_DISABLE_SCHEDULER', '1');
+    await register();
+
+    emitUncaughtMonitor(new Error('kaboom'));
+
+    expect(reported('process.uncaughtException')).toHaveLength(1);
+  });
+
+  it('does not hook anything outside the nodejs runtime', async () => {
+    vi.stubEnv('NEXT_RUNTIME', 'edge');
+    const before = process.listenerCount('uncaughtExceptionMonitor');
+
+    await register();
+
+    expect(process.listenerCount('uncaughtExceptionMonitor')).toBe(before);
+  });
+
+  it('reports a cron route answering non-2xx with its path and the body that says why', async () => {
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({}),
+      text: async () => '{"error":"connection terminated","weekOf":"2026-03-09"}',
+    });
+
+    await bootAndPoll();
+
+    const [themes] = reported('cron.scheduler').filter((f) => f.message.startsWith('/api/themes'));
+    expect(themes.message).toBe('/api/themes returned 500: {"error":"connection terminated","weekOf":"2026-03-09"}');
+    expect(getErrorReportSnapshot().recent.find((r) => r.message.startsWith('/api/themes'))?.meta).toEqual({
+      path: '/api/themes',
+      weekOf: WEEK_OF,
+    });
+    // The scheduler-state message the status endpoint shows stays the short form.
+    expect(getSchedulerState().lastPollError).toBe('/api/digest returned 500');
+  });
+
+  it('reports a cron route call that throws (timeout, connection refused)', async () => {
+    fetchMock.mockRejectedValue(new Error('fetch failed'));
+
+    await bootAndPoll();
+
+    expect(reported('cron.scheduler')).toEqual([expect.objectContaining({ message: 'fetch failed', count: 2 })]);
+  });
+
+  it('reports a cron_runs read failure with the job it was evaluating', async () => {
+    cronRunRecordMock.mockImplementation(async (job: string) => {
+      if (job === 'themes') throw new Error('connection terminated');
+      return PURGE_INERT;
+    });
+
+    await bootAndPoll();
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({ context: 'cron.scheduler', message: 'connection terminated', meta: { job: 'themes' } }),
+    ]);
+  });
+
+  it('reports an exhausted week once per boot, not on every poll', async () => {
+    stubWeeklyRecord({ status: 'failed', ranAt: new Date('2026-03-16T06:05:00Z'), attempts: 5 });
+
+    await bootAndPoll();
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 3);
+
+    expect(getErrorReportSnapshot().recent.map((r) => [r.message, r.meta])).toEqual([
+      [`digest for week ${WEEK_OF} has failed 5 times — giving up until it's manually retried.`, { job: 'digest', weekOf: WEEK_OF }],
+      [`themes for week ${WEEK_OF} has failed 5 times — giving up until it's manually retried.`, { job: 'themes', weekOf: WEEK_OF }],
+    ]);
+  });
+
+  it('reports nothing on a clean poll', async () => {
+    await bootAndPoll();
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
   });
 });

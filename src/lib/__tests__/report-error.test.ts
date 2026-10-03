@@ -74,11 +74,12 @@ describe('reportError — the log line', () => {
       level: 'error',
       context: 'cron.themes',
       name: 'Error',
-      message: 'connection terminated',
+      // Prefixed for Railway's log view and the monitor's tail, which show only `message`.
+      message: '[cron.themes] connection terminated',
       environment: 'production',
       meta: { orgId: 'org_123', weekOf: '2026-09-28' },
     });
-    expect(line.fingerprint).toMatch(/^[0-9a-f]{12}$/);
+    expect(line.fingerprint).toMatch(/^[0-9a-f]{8}$/);
     expect(String(line.stack)).toContain('connection terminated');
   });
 
@@ -97,8 +98,8 @@ describe('reportError — the log line', () => {
     reportError('cron.scheduler', 'a bare string');
 
     const [resendLine, stringLine] = errorLines();
-    expect(resendLine).toMatchObject({ name: 'rate_limit_exceeded', message: 'Too many requests' });
-    expect(stringLine).toMatchObject({ message: 'a bare string' });
+    expect(resendLine).toMatchObject({ name: 'rate_limit_exceeded', message: '[cron.digest.send] Too many requests' });
+    expect(stringLine).toMatchObject({ message: '[cron.scheduler] a bare string' });
   });
 
   it('never throws, even when the thing thrown cannot be stringified', () => {
@@ -143,7 +144,7 @@ describe('reportError — PII redaction', () => {
     expect(raw).not.toContain('jane.doe');
     expect(raw).not.toContain('customer.example');
     const [line] = errorLines();
-    expect(line.message).toBe('Key (lower(email))=([redacted email]) already exists');
+    expect(line.message).toBe('[auth.login-request] Key (lower(email))=([redacted email]) already exists');
     expect(String(line.stack)).toContain('[redacted email]');
   });
 
@@ -359,7 +360,7 @@ describe('reportError — alerting not configured', () => {
 
 describe('reportError — a failing alert send', () => {
   const failureLogged = () =>
-    errorLines().find((l) => String(l.message).startsWith('alert email send failed'));
+    errorLines().find((l) => String(l.message).startsWith('[report-error.alert] alert email send failed'));
 
   it('logs a Resend { error } resolution and never re-enters reportError', async () => {
     sendMock.mockResolvedValue({

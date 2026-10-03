@@ -29,6 +29,9 @@ vi.mock('@/lib/survey-config', async (importOriginal) => {
 });
 
 import { POST } from '../route';
+// Real: these tests assert on what the route reported. ALERT_EMAIL is pinned
+// empty for every suite (vitest.config.ts), so nothing is emailed.
+import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 import { BUILTIN_CANCELLATION_REASONS } from '@/lib/survey-config';
 import { MAX_COMEBACK_TEXT, MAX_OPEN_TEXT, MAX_REASON } from '@/lib/survey-limits';
 
@@ -373,5 +376,38 @@ describe('POST /api/survey — write outcomes', () => {
     expect(sql).toMatch(/UPDATE survey_responses/);
     expect(params[4]).toBe(TOKEN);
     expect(params[5]).toBe(ORG_ID);
+  });
+});
+
+describe('POST /api/survey — error reporting', () => {
+  beforeEach(() => {
+    resetErrorReports();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("reports a failed save with the org id, never the token or the customer's answer", async () => {
+    // The response is single-use and the customer has already cancelled: a
+    // lost answer is gone for good, so this one must reach a human.
+    executeMock.mockRejectedValue(new Error('connection reset'));
+
+    const res = await POST(surveyRequest({ token: TOKEN, reason: BUILTIN_REASON, open_text: 'the export kept failing' }));
+
+    expect(res.status).toBe(500);
+    const { recent } = getErrorReportSnapshot();
+    expect(recent).toEqual([
+      expect.objectContaining({ context: 'survey.submit', message: 'connection reset', meta: { orgId: ORG_ID } }),
+    ]);
+    expect(JSON.stringify(recent)).not.toContain(TOKEN);
+    expect(JSON.stringify(recent)).not.toContain('export kept failing');
+  });
+
+  it('reports nothing for a normal submission', async () => {
+    await POST(surveyRequest({ token: TOKEN, reason: BUILTIN_REASON }));
+
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
   });
 });

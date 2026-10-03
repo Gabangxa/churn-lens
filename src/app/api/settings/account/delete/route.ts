@@ -4,6 +4,7 @@ import { assertSameOrigin, requireOrgId, clearOrgCookie, revokeAllSessions } fro
 import { disconnectStripe } from '@/lib/stripe-disconnect';
 import { getPolar } from '@/lib/polar';
 import { LEGAL } from '@/lib/legal';
+import { reportError } from '@/lib/report-error';
 
 /**
  * Founder-initiated account deletion (POPIA/GDPR erasure right).
@@ -61,7 +62,9 @@ export async function POST(req: NextRequest) {
   try {
     await disconnectStripe(orgId);
   } catch (err) {
-    console.error(`Stripe disconnect failed during account deletion for org ${orgId}:`, err);
+    // Until the purge retries it, this org's webhook can keep firing surveys
+    // for an account its founder asked to delete.
+    reportError('settings.account-delete', err, { orgId, step: 'stripe_disconnect' });
     stripeDisconnectFailed = true;
   }
 
@@ -74,7 +77,7 @@ export async function POST(req: NextRequest) {
       // disconnected either way. Reported in the response so the UI can tell
       // the founder to also cancel from the billing portal — otherwise Polar
       // keeps billing a subscription we failed to revoke.
-      console.error(`Polar subscription revoke failed for org ${orgId}:`, err);
+      reportError('settings.account-delete', err, { orgId, step: 'polar_revoke' });
       billing = 'revoke_failed';
     }
   }

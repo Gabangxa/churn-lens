@@ -32,6 +32,17 @@ export async function register() {
   const { validateEnv } = await import('./lib/env');
   validateEnv();
 
+  // Before the E2E early return below: a crash or a stray rejection is worth
+  // reporting whether or not the scheduler runs. Imported here, inside the
+  // nodejs branch, like ./lib/cron below: report-error pulls in the Resend
+  // SDK and hooks `process` events, neither of which belongs on Edge. (Edge
+  // still COMPILES this import, which is why report-error avoids node-only
+  // modules like `crypto`; `next build` fails otherwise.) See
+  // installProcessErrorHandlers for why this never changes whether the
+  // process survives an uncaught exception.
+  const { installProcessErrorHandlers, reportError } = await import('./lib/report-error');
+  installProcessErrorHandlers();
+
   // Escape hatch for the end-to-end suite (e2e/env.ts sets this on the server
   // it boots). The poll loop fires themes, digest and purge ~30s after boot
   // and every 10 minutes after, which on a reused server lands mid-run and
@@ -88,9 +99,16 @@ export async function register() {
         signal: AbortSignal.timeout(15 * 60 * 1000),
       });
       if (!res.ok) {
+        const failure = new Error(`${path} returned ${res.status}`);
+        // The body says why (the route's own { error } JSON, or a proxy's
+        // HTML page), so the report carries its head. scheduler-state keeps
+        // the short form: the status endpoint shows that one verbatim.
         const text = await res.text();
-        console.error(`[cron] ${path} returned ${res.status}:`, text);
-        return new Error(`${path} returned ${res.status}`);
+        reportError('cron.scheduler', new Error(`${failure.message}: ${text.slice(0, 500)}`), {
+          path,
+          weekOf: weekOfStr,
+        });
+        return failure;
       }
       const json: unknown = await res.json();
 
@@ -106,7 +124,7 @@ export async function register() {
       console.log(`[cron] ${path} →`, json);
       return null;
     } catch (err) {
-      console.error(`[cron] ${path} failed:`, err);
+      reportError('cron.scheduler', err, { path, weekOf: weekOfStr });
       return err instanceof Error ? err : new Error(String(err));
     }
   }
@@ -144,9 +162,16 @@ export async function register() {
           const key = `${job.job}:${weekOfStr}`;
           if (!exhaustedLogged.has(key)) {
             exhaustedLogged.add(key);
-            console.error(
-              `[cron] ${job.job} for week ${weekOfStr} has failed ${record?.attempts ?? MAX_ATTEMPTS} ` +
-                `times — giving up until it's manually retried.`,
+            // Reported, not just logged: a week the scheduler has given up on
+            // stays given up until someone resets it by hand (README), so it
+            // is exactly the failure that must reach a human.
+            reportError(
+              'cron.scheduler',
+              new Error(
+                `${job.job} for week ${weekOfStr} has failed ${record?.attempts ?? MAX_ATTEMPTS} ` +
+                  `times — giving up until it's manually retried.`,
+              ),
+              { job: job.job, weekOf: weekOfStr },
             );
           }
           continue;
@@ -156,7 +181,7 @@ export async function register() {
         // 'failed' row whose backoff window has elapsed.
         pollError = (await callCronEndpoint(job.path, weekOfStr)) ?? pollError;
       } catch (err) {
-        console.error(`[cron] evaluating ${job.job} failed:`, err);
+        reportError('cron.scheduler', err, { job: job.job });
         pollError = err;
       }
     }
@@ -181,9 +206,13 @@ export async function register() {
           const key = `purge:${dateStr}`;
           if (!exhaustedLogged.has(key)) {
             exhaustedLogged.add(key);
-            console.error(
-              `[cron] purge for ${dateStr} has failed ${record?.attempts ?? MAX_ATTEMPTS} ` +
-                `times — giving up until it's manually retried.`,
+            reportError(
+              'cron.scheduler',
+              new Error(
+                `purge for ${dateStr} has failed ${record?.attempts ?? MAX_ATTEMPTS} ` +
+                  `times — giving up until it's manually retried.`,
+              ),
+              { job: 'purge', date: dateStr },
             );
           }
         } else if (action === 'call') {
@@ -191,7 +220,7 @@ export async function register() {
         }
       }
     } catch (err) {
-      console.error('[cron] evaluating purge failed:', err);
+      reportError('cron.scheduler', err, { job: 'purge' });
       pollError = err;
     }
 
@@ -205,12 +234,12 @@ export async function register() {
   // but nothing should ever turn a poll tick into an unhandled rejection.
   const firstPoll = setTimeout(() => {
     void pollOnce().catch((err) => {
-      console.error('[cron] poll failed:', err);
+      reportError('cron.scheduler', err);
       markPoll(err);
     });
     const interval = setInterval(() => {
       void pollOnce().catch((err) => {
-        console.error('[cron] poll failed:', err);
+        reportError('cron.scheduler', err);
         markPoll(err);
       });
     }, POLL_INTERVAL_MS);

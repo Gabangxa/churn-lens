@@ -30,6 +30,9 @@ vi.mock('@/lib/polar', () => ({
 }));
 
 import { POST } from '../route';
+// Real: these tests assert on what the route reported. ALERT_EMAIL is pinned
+// empty for every suite (vitest.config.ts), so nothing is emailed.
+import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 
 const ORG_ID = 'org-1';
 
@@ -350,5 +353,45 @@ describe('POST /api/settings/account/delete — teardown order and cookie', () =
     const body = await res.json();
 
     expect(body).not.toHaveProperty('stripe');
+  });
+});
+
+describe('POST /api/settings/account/delete — error reporting', () => {
+  beforeEach(() => {
+    resetErrorReports();
+  });
+
+  it('reports a failed Polar revoke with the org id — the founder may still be billed', async () => {
+    queryOneMock.mockResolvedValue({
+      deletion_requested_at: '2026-09-01T00:00:00.000Z',
+      polar_subscription_id: 'sub_polar_1',
+    });
+    revokeMock.mockRejectedValue(new Error('Polar 503'));
+
+    await POST(deleteRequest());
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'settings.account-delete',
+        message: 'Polar 503',
+        meta: { orgId: ORG_ID, step: 'polar_revoke' },
+      }),
+    ]);
+  });
+
+  it('reports a failed Stripe disconnect with the org id — surveys may keep firing', async () => {
+    disconnectStripeMock.mockRejectedValue(new Error('stripe teardown boom'));
+
+    await POST(deleteRequest());
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({ context: 'settings.account-delete', meta: { orgId: ORG_ID, step: 'stripe_disconnect' } }),
+    ]);
+  });
+
+  it('reports nothing when the deletion goes through cleanly', async () => {
+    await POST(deleteRequest());
+
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
   });
 });

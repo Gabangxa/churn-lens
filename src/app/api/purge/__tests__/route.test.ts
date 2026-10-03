@@ -34,6 +34,9 @@ const DATE_STR = '2026-09-01';
 
 import { POST } from '../route';
 import { LEGAL } from '@/lib/legal';
+// Real: these tests assert on what the route reported. ALERT_EMAIL is pinned
+// empty for every suite (vitest.config.ts), so nothing is emailed.
+import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 
 function purgeRequest() {
   return new Request('http://localhost/api/purge', {
@@ -489,5 +492,60 @@ describe('POST /api/purge — guards', () => {
       // + 8 expired dedupe snapshots
       expect.objectContaining({ status: 'succeeded', processed: 36, failed: 0 }),
     );
+  });
+});
+
+describe('POST /api/purge — error reporting', () => {
+  beforeEach(() => {
+    resetErrorReports();
+  });
+
+  it('reports a failing step by name and date, the same label it records in `failed`', async () => {
+    executeMock.mockImplementation(async (sql: string) => {
+      if (sql.includes('DELETE FROM themes')) throw new Error('themes delete boom');
+      return 0;
+    });
+
+    await POST(purgeRequest());
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'cron.purge',
+        message: 'themes delete boom',
+        meta: { step: 'themes', date: DATE_STR },
+      }),
+    ]);
+  });
+
+  it('reports a failed hard-delete with the org id — an erasure the policy promised did not happen', async () => {
+    queryMock.mockImplementation(async (sql: string) =>
+      sql.includes('deletion_requested_at') ? [{ id: 'org-a' }] : [],
+    );
+    disconnectStripeMock.mockRejectedValue(new Error('stripe teardown boom'));
+
+    await POST(purgeRequest());
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'cron.purge',
+        meta: { step: 'org_delete', orgId: 'org-a', date: DATE_STR },
+      }),
+    ]);
+  });
+
+  it('reports a failed lookup of orgs due for deletion', async () => {
+    queryMock.mockRejectedValue(new Error('connection terminated'));
+
+    await POST(purgeRequest());
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({ context: 'cron.purge', meta: { step: 'org_delete_query', date: DATE_STR } }),
+    ]);
+  });
+
+  it('reports nothing on a clean run', async () => {
+    await POST(purgeRequest());
+
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
   });
 });

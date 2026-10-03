@@ -38,6 +38,9 @@ vi.mock('@/lib/resend', () => ({
 }));
 
 import { POST } from '../request/route';
+// Real: these tests assert on what the route reported. ALERT_EMAIL is pinned
+// empty for every suite (vitest.config.ts), so nothing is emailed.
+import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 
 const NEW_ORG_ID = 'org-new';
 const EXISTING_ORG_ID = 'org-existing';
@@ -445,5 +448,56 @@ describe('POST /api/auth/request — email delivery failures stay invisible to t
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
+  });
+});
+
+describe('POST /api/auth/request — error reporting', () => {
+  beforeEach(() => {
+    resetErrorReports();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('reports a failed login-link send with the org id, never the address it was for', async () => {
+    // Nobody can sign in while this is failing, and the caller is told "ok"
+    // regardless (enumeration safety), so the report is the only signal.
+    sendMock.mockResolvedValue({
+      data: null,
+      error: { name: 'validation_error', message: 'Invalid to field: founder@example.com' },
+    });
+    queryOneMock.mockResolvedValueOnce({ org_id: EXISTING_ORG_ID });
+
+    const res = await POST(requestBody({ email: 'founder@example.com' }));
+
+    expect(await res.json()).toEqual({ ok: true });
+    const { recent } = getErrorReportSnapshot();
+    expect(recent).toEqual([
+      expect.objectContaining({ context: 'auth.login-email', meta: { orgId: EXISTING_ORG_ID } }),
+    ]);
+    expect(recent[0].message).toContain('[redacted email]');
+    expect(JSON.stringify(recent)).not.toContain('founder@example.com');
+  });
+
+  it('reports a failure after the rate limits passed, still answering ok', async () => {
+    withTransactionMock.mockRejectedValue(new Error('insert failed'));
+
+    const res = await POST(requestBody({ email: 'new-founder@example.com' }));
+
+    expect(await res.json()).toEqual({ ok: true });
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({ context: 'auth.login-request', message: 'insert failed', meta: {} }),
+    ]);
+    expect(JSON.stringify(getErrorReportSnapshot())).not.toContain('new-founder@example.com');
+  });
+
+  it('does not report a rate-limited request — that is the limiter working', async () => {
+    checkRateLimitMock.mockReturnValue({ allowed: false, retryAfterSec: 60 });
+
+    await POST(requestBody({ email: 'founder@example.com' }));
+
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
   });
 });

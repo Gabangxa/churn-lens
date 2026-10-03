@@ -40,7 +40,11 @@ vi.mock('stripe', () => {
   return { default: MockStripe };
 });
 
+import Stripe from 'stripe';
 import { POST } from '../connect/route';
+// Real: these tests assert on what the route reported. ALERT_EMAIL is pinned
+// empty for every suite (vitest.config.ts), so nothing is emailed.
+import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 
 const ORG_ID = 'org-abc';
 const APP_URL = 'https://app.churnlens.com';
@@ -333,5 +337,66 @@ describe('POST /api/onboarding/connect — malformed body', () => {
     expect(res.status).toBe(400);
     expect(queryMock).not.toHaveBeenCalled();
     expect(queryOneMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/onboarding/connect — error reporting', () => {
+  beforeEach(() => {
+    resetErrorReports();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('reports a webhook registration failure that is not the founder\'s key', async () => {
+    webhookEndpointsCreateMock.mockRejectedValue(new Error('connect ETIMEDOUT'));
+
+    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY }));
+
+    expect(res.status).toBe(422);
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({ context: 'onboarding.connect', meta: { orgId: ORG_ID, step: 'stripe_webhook' } }),
+    ]);
+  });
+
+  it('does not alert on a key Stripe rejected — that is the founder\'s input, answered with a hint', async () => {
+    // The vi.mock above swaps Stripe's error classes for plain Error
+    // subclasses; construct one the way the mock, not the real typings, expects.
+    const MockAuthenticationError = Stripe.errors.StripeAuthenticationError as unknown as new (message: string) => Error;
+    webhookEndpointsCreateMock.mockRejectedValue(
+      new MockAuthenticationError('Invalid API Key provided: rk_live_****c123'),
+    );
+
+    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY }));
+
+    expect(res.status).toBe(422);
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+  });
+
+  it('reports a server whose app URL cannot carry a Stripe webhook — every onboarding fails until fixed', async () => {
+    process.env.NEXT_PUBLIC_APP_URL = 'http://app.churnlens.com';
+
+    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY }));
+
+    expect(res.status).toBe(500);
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({ context: 'onboarding.connect', meta: { orgId: ORG_ID, step: 'app_url' } }),
+    ]);
+  });
+
+  it('reports an unexpected failure with the org id, and never the key', async () => {
+    queryMock.mockRejectedValue(new Error('connection terminated'));
+
+    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY }));
+
+    expect(res.status).toBe(500);
+    const { recent } = getErrorReportSnapshot();
+    expect(recent).toEqual([
+      expect.objectContaining({ context: 'onboarding.connect', message: 'connection terminated', meta: { orgId: ORG_ID } }),
+    ]);
+    expect(JSON.stringify(recent)).not.toContain(RESTRICTED_KEY);
   });
 });
