@@ -517,6 +517,23 @@ describe('POST /api/purge — error reporting', () => {
     ]);
   });
 
+  it('reports the users_dedupe_backup step like every other step — it is the one holding email addresses', async () => {
+    executeMock.mockImplementation(async (sql: string) => {
+      if (sql.includes('DELETE FROM users_dedupe_backup')) throw new Error('dedupe backup delete boom');
+      return 0;
+    });
+
+    await POST(purgeRequest());
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'cron.purge',
+        message: 'dedupe backup delete boom',
+        meta: { step: 'users_dedupe_backup', date: DATE_STR },
+      }),
+    ]);
+  });
+
   it('reports a failed hard-delete with the org id — an erasure the policy promised did not happen', async () => {
     queryMock.mockImplementation(async (sql: string) =>
       sql.includes('deletion_requested_at') ? [{ id: 'org-a' }] : [],

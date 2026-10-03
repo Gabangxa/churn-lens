@@ -181,7 +181,7 @@ export async function POST(req: Request) {
       `DELETE FROM users_dedupe_backup WHERE removed_at < now() - interval '30 days'`,
     );
   } catch (err) {
-    console.error(`Purge ${dateStr}: users_dedupe_backup cleanup step failed:`, err);
+    reportError('cron.purge', err, { step: 'users_dedupe_backup', date: dateStr });
     failed.push('users_dedupe_backup');
   }
 
