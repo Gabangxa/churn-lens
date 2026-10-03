@@ -279,6 +279,57 @@ almost always well past even the 8h-capped backoff window, so the next poll (wit
 DB TLS is handled automatically: no SSL over Railway's `*.railway.internal` private network
 (override with `DATABASE_SSL=require`), verified TLS elsewhere when `DATABASE_CA_CERT` is set.
 
+### Deploying fix/launch-hardening
+
+The first deploy of this branch over `main`:
+
+1. **Set `ALERT_EMAIL`** (see step 3 above). Alerts are sent from `RESEND_FROM_EMAIL`, like
+   survey emails, login links and the digest, and both its default (`src/lib/resend.ts`) and
+   the example above use `churnlens.com`, a domain that does not resolve. Resend only sends
+   from a domain verified in the Resend account, so verify one there and set
+   `RESEND_FROM_EMAIL` to an address on it, or no alert, survey or login mail goes out.
+2. **Polar only when billing goes live.** The `POLAR_*` variables and the webhook registration
+   (`.env.example`, Polar section) are not needed before then; without them checkout answers
+   503 "Billing is not configured for this plan yet." and reports nothing.
+3. **Expect every founder to be signed out once.** The session cookie format changed
+   (`<orgId>.<issuedAt>.<hmac>`), and the old `<orgId>.<hmac>` cookies are refused. Every org
+   also sees the Terms/DPA banner on the dashboard, since none has an acceptance on record;
+   acceptances are recorded as `<LEGAL_DOCS_VERSION>-draft` until `src/lib/legal.ts` is filled.
+4. **Before deploying, run against production:**
+
+   ```sql
+   -- Expect 0. A row is an org paid through Polar before the per-subscription ledger
+   -- existed: a recompute never lowers its plan, and reports billing.recompute when it
+   -- would have, until an event for that subscription lands in polar_subscriptions.
+   SELECT id, plan FROM organizations WHERE plan <> 'free' AND polar_subscription_id IS NOT NULL;
+
+   -- Orgs with a Stripe key but no webhook endpoint. They will show "Stripe setup is
+   -- incomplete" and be sent to /onboarding on sign-in to finish connecting.
+   SELECT id FROM organizations
+   WHERE stripe_api_key_enc IS NOT NULL
+     AND (stripe_webhook_id IS NULL OR stripe_webhook_secret_enc IS NULL);
+   ```
+5. **If the pre-deploy migrate fails with "Gave up waiting for a table lock"**, another session
+   held a lock past the 5 s `lock_timeout`. Nothing is half-applied and the old build keeps
+   serving: find the `idle in transaction` session in `pg_stat_activity`, end it
+   (`pg_terminate_backend(pid)`), and redeploy.
+6. **Confirm no Railway variable pins Node 20.** `engines.node` is now `22.x`, which Railpack
+   reads, but a `RAILPACK_NODE_VERSION` (or, on the older Nixpacks builder,
+   `NIXPACKS_NODE_VERSION`) variable overrides it.
+7. **When filling in `src/lib/legal.ts`**, bump `LEGAL_DOCS_VERSION` and `LEGAL_DOCS_SHA256`
+   in `src/lib/legal-version.ts` in the same commit. The guard test
+   (`src/lib/__tests__/legal-version.test.ts`) fails until the hash matches the new text.
+   Filling it in also drops the `-draft` label, so every org is asked to accept again.
+8. **Rolling back:** never past the session rewrite (next section). Also:
+   - across a `LEGAL_DOCS_VERSION` change, the acceptance history stops being reliable: the
+     older build asks for and records its own version, so acceptances of two wordings
+     interleave (and `main` records none: its connect asks for no acceptance).
+   - Polar state an older build writes needs a resync after rolling forward. `main` writes
+     `plan` and `polar_subscription_id` but no `polar_subscriptions` row, and writes an admin
+     comp straight into `plan` rather than `comp_plan`: re-grant such comps through
+     `/api/admin/plan`, and expect the `billing.recompute` report from step 4 for those
+     subscriptions.
+
 ### Rolling back
 
 Migrations are additive and idempotent, so older code generally runs against the newer
