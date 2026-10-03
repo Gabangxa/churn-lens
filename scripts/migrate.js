@@ -604,6 +604,74 @@ async function migrate() {
     );
   `);
 
+  // Polar billing, per subscription. organizations.plan used to follow one
+  // pointer and one watermark per org (polar_subscription_id, polar_synced_at),
+  // which cannot order events across two subscriptions: a revoke delivered
+  // before its own grant was skipped and the late grant then left the org paid
+  // indefinitely, and a paying subscription could sit on free until its next
+  // event. Each subscription now keeps its own latest-known state here, ordered
+  // by its own modified_at, and the org's plan is recomputed from every row
+  // (src/lib/org-plan.ts) — so delivery order across subscriptions no longer
+  // matters. Holds Polar ids, a status and a timestamp only: no personal data,
+  // and it goes with the org on erasure (ON DELETE CASCADE).
+  //
+  // The org columns stay: polar_subscription_id still marks an org that has
+  // touched Polar (the purge's abandoned-signup check reads it), and both are
+  // kept current so a rollback to the watermark code finds sane values.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS polar_subscriptions (
+      id text PRIMARY KEY,
+      org_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      status text NOT NULL,
+      product_id text NOT NULL,
+      modified_at timestamptz NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS polar_subscriptions_org_id ON polar_subscriptions (org_id);
+  `);
+
+  // A plan granted by hand through POST /api/admin/plan. It used to be written
+  // straight into organizations.plan, where the next Polar event for the org
+  // (a renewal, an expired checkout) overwrote it. Now it is one input to the
+  // same recompute as the subscriptions: the org gets the higher of the two.
+  // NULL = no comp. 'free' is not a comp — that is the absence of one.
+  //
+  // The backfill runs ONLY when the column is introduced, guarded like
+  // last_login_at above. Until now the admin route was the only writer of a
+  // paid plan for an org that never reached Polar, so a paid plan with no
+  // Polar subscription on record IS a comp; without carrying it over, the
+  // first recompute would silently take it away. Re-running it on later
+  // deploys would instead turn any hand-edited plan into a permanent comp.
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'organizations' AND column_name = 'comp_plan'
+      ) THEN
+        ALTER TABLE organizations ADD COLUMN IF NOT EXISTS comp_plan text;
+        UPDATE organizations SET comp_plan = plan
+        WHERE plan IN ('starter', 'growth') AND polar_subscription_id IS NULL;
+      END IF;
+    END $$;
+  `);
+
+  // Catalog-guarded because ADD CONSTRAINT has no IF NOT EXISTS. NULL passes a
+  // CHECK, so "no comp" needs no special case.
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'organizations_comp_plan_check'
+          AND conrelid = 'organizations'::regclass
+      ) THEN
+        ALTER TABLE organizations
+          ADD CONSTRAINT organizations_comp_plan_check
+          CHECK (comp_plan IN ('starter', 'growth'));
+      END IF;
+    END $$;
+  `);
+
   console.log('Database migration complete');
   await pool.end();
 }
