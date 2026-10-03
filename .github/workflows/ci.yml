@@ -67,13 +67,17 @@ jobs:
         run: npx next lint
 
       # TEST_DATABASE_URL is set, so the DB-gated *.db.test.ts suites (purge,
-      # admin/status, the Stripe and Polar webhooks, onboarding connect, legal
-      # acceptance and its history, session revocation, migrate.js giving up on
-      # a held lock) RUN here rather than skipping —
-      # retention/erasure SQL, the monitor's aggregate queries, the survey
-      # send path's claim/cap SQL, the plan watermark and the session check
-      # are exactly the code that must not be verified only against mocks. vitest.config.ts serialises files when
-      # this variable is set because those suites TRUNCATE the same database.
+      # admin/status, admin/plan comps, the Stripe and Polar webhooks,
+      # onboarding connect, Stripe disconnect, legal acceptance and its
+      # history, session revocation, magic-link sign-in (verify) and login
+      # request, survey submission, the route error wrapper's bad-input
+      # classification, migrate.js giving up on a held lock) RUN here rather
+      # than skipping — retention/erasure SQL, the monitor's aggregate queries,
+      # the survey send path's claim/cap SQL, the per-subscription Polar ledger
+      # and plan recompute, and the session check are exactly the code that
+      # must not be verified only against mocks. vitest.config.ts serialises
+      # files when this variable is set because those suites TRUNCATE the same
+      # database.
       - name: Migrate the test database
         run: node scripts/migrate.js
         env:
