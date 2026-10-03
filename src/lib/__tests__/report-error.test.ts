@@ -181,6 +181,64 @@ describe('reportError — PII redaction', () => {
     expect(String(errorLines()[0].message)).not.toContain('@');
   });
 
+  it.each([
+    ['a non-ASCII local part and domain', 'jöhn.dœ@exämple.de', ['jöhn', 'exämple']],
+    ['a fully non-Latin address', 'андрей@почта.рф', ['андрей', 'почта']],
+    ['an ideographic address', '用户@例子.广告', ['用户', '例子']],
+    ['a fullwidth at sign', 'jane＠customer.example', ['jane', 'customer.example']],
+    ['a double-encoded at sign (%2540)', 'jane%2540customer.example', ['jane', 'customer.example']],
+    ['a percent-encoded non-ASCII domain', 'jane%40caf%C3%A9.example', ['jane', 'caf%C3%A9']],
+  ])('redacts %s', (_label, address, fragments) => {
+    reportError('auth.login-request', new Error(`lookup failed for ${address} (retrying)`), { who: address });
+
+    const raw = errorSpy.mock.calls.map(([line]) => String(line)).join('\n') + JSON.stringify(getErrorReportSnapshot());
+    for (const fragment of fragments) expect(raw).not.toContain(fragment);
+    expect(errorLines()[0].message).toBe('[auth.login-request] lookup failed for [redacted email] (retrying)');
+    expect(sentEmail().text).not.toContain(fragments[0]);
+  });
+
+  it('stays fast on separator-shaped junk, since request input reaches these messages', () => {
+    // Postgres quotes a rejected value into its message ("invalid input syntax
+    // for type uuid: …"). One backtracking address pattern over "%2540" runs
+    // took ~1.8 s per 2000 chars; the bound is generous so only that regression trips it.
+    const started = performance.now();
+    reportError('webhook.stripe', new Error(`invalid input syntax for type uuid: "${'%2540'.repeat(400)}"`));
+    reportError('webhook.stripe', new Error('%40'.repeat(700)));
+
+    expect(performance.now() - started).toBeLessThan(250);
+    expect(getErrorReportSnapshot().totalReported).toBe(2);
+  });
+
+  it('leaves version strings and scoped package paths alone', () => {
+    reportError('cron.themes', new Error('resolved @scope+pkg@1.2.3 from node_modules/@vitest/runner'));
+
+    expect(errorLines()[0].message).toBe('[cron.themes] resolved @scope+pkg@1.2.3 from node_modules/@vitest/runner');
+  });
+
+  it('drops a non-ASCII address the length bound splits, not just an ASCII one', () => {
+    // Same geometry as the ASCII split test above: few, long addresses, so
+    // redaction shrinks the bounded text under the 1000-char final cut and
+    // whatever the 2000-char bound left at the end is output as-is. The walk
+    // back from the cut has to step over non-ASCII letters too, or it stops
+    // at the 'ä' and leaves "jöhn.dœ.with.a.long.name38@ex" behind.
+    const prefix = `${'p'.repeat(59)} `;
+    const addresses = Array.from(
+      { length: 39 },
+      (_, i) => `jöhn.dœ.with.a.long.name${String(i).padStart(2, '0')}@exämple-domain.example`,
+    );
+    const message = prefix + addresses.join(' ');
+    const lastStart = message.lastIndexOf('jöhn.dœ.with.a.long.name38');
+    // Sanity: the bound falls after the last address's '@' and before its end.
+    expect(message.indexOf('@', lastStart)).toBeLessThan(2000);
+    expect(lastStart + addresses[38].length).toBeGreaterThan(2000);
+
+    reportError('cron.themes', new Error(message));
+
+    const loggedMessage = String(errorLines()[0].message);
+    expect(loggedMessage).not.toMatch(/jöhn|exämple|name38/);
+    expect(loggedMessage).not.toContain('@');
+  });
+
   it('redacts a caller that mistakenly passes an email as a meta value', () => {
     reportError('survey.submit', new Error('boom'), { orgId: 'org_1', who: 'jane@customer.example' });
 

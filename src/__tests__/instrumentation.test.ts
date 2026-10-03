@@ -656,6 +656,47 @@ describe('register — error reporting (src/lib/report-error.ts)', () => {
     expect(getSchedulerState().lastPollError).toBe('/api/digest returned 500');
   });
 
+  it('hands reportError the whole body, so an address near the old 500-char cut is redacted, not halved', async () => {
+    // '{"error":"' + 480 x's + ' ' puts 'jane.doe' at 491 and its '@' at 499:
+    // cut at 500 before redaction, the local part no longer looked like an
+    // address and went out verbatim.
+    const body = JSON.stringify({ error: `${'x'.repeat(480)} jane.doe@customer.example could not be saved` });
+    expect(body.indexOf('jane.doe@')).toBe(491);
+    fetchMock.mockResolvedValue({ ok: false, status: 500, json: async () => ({}), text: async () => body });
+    const errorLog = vi.mocked(console.error);
+
+    await bootAndPoll();
+
+    const [themes] = reported('cron.scheduler').filter((f) => f.message.startsWith('/api/themes'));
+    expect(themes.message).toContain('[redacted email] could not be saved');
+    expect(JSON.stringify(getErrorReportSnapshot())).not.toContain('jane');
+    const logged = errorLog.mock.calls.map(([line]) => String(line)).join('\n');
+    expect(logged).not.toContain('jane');
+  });
+
+  it('bounds a huge non-2xx body in the report and leaves the synthetic stack out of it', async () => {
+    // A proxy's HTML error page can be any size. The stack of the Error the
+    // scheduler builds would only repeat the body and point at its own fetch
+    // wrapper; the path in meta already says which route failed.
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: async () => ({}),
+      text: async () => `<html>${'bad gateway '.repeat(10_000)}</html>`,
+    });
+    const errorLog = vi.mocked(console.error);
+
+    await bootAndPoll();
+
+    const [themes] = reported('cron.scheduler').filter((f) => f.message.startsWith('/api/themes'));
+    expect(themes.message.length).toBeLessThanOrEqual(1000 + '…[truncated]'.length);
+    expect(themes.message).toMatch(/…\[truncated\]$/);
+    const line = errorLog.mock.calls
+      .map(([raw]) => JSON.parse(String(raw)) as { message: string; stack: string | null })
+      .find((l) => l.message.startsWith('[cron.scheduler] /api/themes returned 502'));
+    expect(line?.stack).toBeNull();
+  });
+
   it('reports a cron route call that throws (timeout, connection refused)', async () => {
     fetchMock.mockRejectedValue(new Error('fetch failed'));
 

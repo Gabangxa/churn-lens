@@ -108,14 +108,39 @@ const MAX_SUBJECT_MESSAGE_CHARS = 120;
 const BUDGET_WINDOW_MS = 60 * 60 * 1000;
 
 /**
- * Email-shaped, including the URL-encoded `%40` form that shows up when an
- * address was a query parameter of a failed request. Deliberately broad: a
- * false positive costs a redacted token in a log line, a false negative leaks
- * a churned customer's address into logs and an inbox.
+ * Email redaction works on runs: maximal stretches of characters an address
+ * can contain. A run is redacted WHOLE when it holds a separator with
+ * something before it and, somewhere after that, a dot followed by two
+ * letters (the TLD). Deliberately broad: a false positive costs a redacted
+ * token in a log line, a false negative leaks a churned customer's address
+ * into logs and an inbox. Beyond plain ASCII that means:
+ *   - any letter, digit or combining mark (`\p{L}\p{N}\p{M}`), because
+ *     internationalised addresses (jöhn@exämple.de, андрей@почта.рф) are
+ *     real and Stripe and Resend pass them through;
+ *   - the separator as `@`, fullwidth `＠` (U+FF20), URL-encoded `%40` (an
+ *     address that was a query parameter of a failed request) and
+ *     double-encoded `%2540` (one that went through two encoders);
+ *   - `%` anywhere, so a percent-encoded IDN (caf%C3%A9.example) stays one
+ *     run, and the fullwidth and ideographic full stops browsers accept as dots.
+ *
+ * Why runs and not one address regex: with `%` and digits allowed on both
+ * sides of a separator that is itself spelled with `%` and digits, a single
+ * backtracking pattern goes cubic — 2000 chars of "%2540" took ~1.8 s, and
+ * request input reaches these messages (Postgres quotes a rejected value).
+ * Every pattern below is a single linear scan.
+ *
+ * Kept off the TLD rule: version strings (pkg@1.2.3) and scoped package paths
+ * in stacks (node_modules/@vitest/…), which have no letters after a dot.
  */
-const EMAIL_SHAPED = /[A-Za-z0-9._%+-]+(?:@|%40)[A-Za-z0-9.-]+\.[A-Za-z]{2,}/gi;
-/** Every character EMAIL_SHAPED can match — used to drop a token a length cut split. */
-const EMAIL_CHAR = /[A-Za-z0-9._%+@-]/;
+const EMAIL_CHAR_RUN = /[\p{L}\p{N}\p{M}._%+@＠．。-]+/gu;
+const ADDRESS_SEPARATOR = /@|＠|%40|%2540/u;
+const DOT_THEN_TLD = /[.．。][\p{L}\p{M}]{2}/u;
+/**
+ * One UTF-16 code unit of a run — used to drop a token a length cut split.
+ * Any surrogate half counts too: a cut through an astral-plane letter must
+ * not stop the walk-back early.
+ */
+const EMAIL_CHAR = /[\p{L}\p{N}\p{M}._%+@＠．。-]|[\uD800-\uDFFF]/u;
 const REDACTED_EMAIL = '[redacted email]';
 
 const UUID_SHAPED = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
@@ -180,7 +205,12 @@ function slot(): ReportState {
 }
 
 function redactEmails(text: string): string {
-  return text.replace(EMAIL_SHAPED, REDACTED_EMAIL);
+  return text.replace(EMAIL_CHAR_RUN, (run) => {
+    // Searched from the second character: an address needs a local part.
+    const separatorAt = run.slice(1).search(ADDRESS_SEPARATOR);
+    if (separatorAt === -1) return run;
+    return DOT_THEN_TLD.test(run.slice(separatorAt + 1)) ? REDACTED_EMAIL : run;
+  });
 }
 
 /**

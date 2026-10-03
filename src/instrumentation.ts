@@ -101,13 +101,18 @@ export async function register() {
       if (!res.ok) {
         const failure = new Error(`${path} returned ${res.status}`);
         // The body says why (the route's own { error } JSON, or a proxy's
-        // HTML page), so the report carries its head. scheduler-state keeps
-        // the short form: the status endpoint shows that one verbatim.
+        // HTML page), so the report carries it. Whole: reportError bounds the
+        // message itself, AFTER redacting, and drops an address its own cut
+        // splits. A cut here, before redaction, could halve an address so
+        // that the local part no longer looked like one and went out as-is.
+        // scheduler-state keeps the short form: the status endpoint shows
+        // that one verbatim.
         const text = await res.text();
-        reportError('cron.scheduler', new Error(`${failure.message}: ${text.slice(0, 500)}`), {
-          path,
-          weekOf: weekOfStr,
-        });
+        const report = new Error(`${failure.message}: ${text}`);
+        // The stack would only repeat the body after "Error: " and point at
+        // this fetch wrapper, not at the route that failed — `path` says that.
+        report.stack = undefined;
+        reportError('cron.scheduler', report, { path, weekOf: weekOfStr });
         return failure;
       }
       const json: unknown = await res.json();
