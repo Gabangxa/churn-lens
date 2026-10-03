@@ -3,6 +3,7 @@ import { surveySendStatus } from '../survey-status';
 
 const ready = {
   stripeConnected: true,
+  stripeWebhookRegistered: true,
   deletionRequested: false,
   stripeKeyInvalidSince: null,
   legalFooterReady: true,
@@ -20,6 +21,33 @@ describe('surveySendStatus', () => {
     expect(
       surveySendStatus({ ...ready, stripeConnected: false, deletionRequested: true, legalFooterReady: false }),
     ).toEqual({ kind: 'stripe_not_connected' });
+  });
+
+  describe('a key stored with no webhook endpoint beside it', () => {
+    // Nothing can deliver a cancellation to an org without an endpoint (the
+    // webhook answers 404 for it), so it must never read as sending. Left
+    // behind by a first connect whose registration failed, before connect
+    // stopped storing the key on its own.
+
+    it('tells the founder to finish connecting instead of reporting sending', () => {
+      expect(surveySendStatus({ ...ready, stripeWebhookRegistered: false })).toEqual({ kind: 'setup_incomplete' });
+    });
+
+    it('ranks just below a missing connection, ahead of everything else', () => {
+      expect(
+        surveySendStatus({ ...ready, stripeConnected: false, stripeWebhookRegistered: false }),
+      ).toEqual({ kind: 'stripe_not_connected' });
+      expect(
+        surveySendStatus({
+          ...ready,
+          stripeWebhookRegistered: false,
+          deletionRequested: true,
+          stripeKeyInvalidSince: new Date(2026, 8, 20),
+          legalFooterReady: false,
+          surveysThisMonth: 10,
+        }),
+      ).toEqual({ kind: 'setup_incomplete' });
+    });
   });
 
   it('reports a pending deletion ahead of the legal pause and the free-tier cap', () => {

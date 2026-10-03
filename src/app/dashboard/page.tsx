@@ -50,13 +50,15 @@ async function getDashboardData(orgId: string) {
   const org = await queryOne<{
     stripe_api_key_enc: string | null;
     stripe_account_id: string | null;
+    stripe_webhook_id: string | null;
+    stripe_webhook_secret_enc: string | null;
     plan: string;
     deletion_requested_at: string | null;
     stripe_key_invalid_at: Date | null;
     legal_accepted_version: string | null;
   }>(
-    `SELECT stripe_api_key_enc, stripe_account_id, plan, deletion_requested_at, stripe_key_invalid_at,
-            legal_accepted_version
+    `SELECT stripe_api_key_enc, stripe_account_id, stripe_webhook_id, stripe_webhook_secret_enc, plan,
+            deletion_requested_at, stripe_key_invalid_at, legal_accepted_version
      FROM organizations WHERE id = $1`,
     [orgId],
   );
@@ -64,6 +66,8 @@ async function getDashboardData(orgId: string) {
   const plan = org?.plan ?? 'free';
   const sendStatus = surveySendStatus({
     stripeConnected,
+    // Both, as the Stripe webhook needs the secret to accept anything.
+    stripeWebhookRegistered: !!(org?.stripe_webhook_id && org?.stripe_webhook_secret_enc),
     deletionRequested: !!org?.deletion_requested_at,
     // node-postgres parses timestamptz into a Date.
     stripeKeyInvalidSince: org?.stripe_key_invalid_at ?? null,
@@ -135,6 +139,18 @@ function SendStatusLine({ status }: { status: SurveySendStatus }) {
           {dot('warn')} Stripe not connected — no surveys will send.{' '}
           <Link href="/settings" className="underline underline-offset-2 hover:text-zinc-900 dark:hover:text-white">
             Connect it in settings
+          </Link>
+        </p>
+      );
+    case 'setup_incomplete':
+      // A key with no webhook endpoint: Stripe has nowhere to send
+      // cancellations. Saving a key on /onboarding registers one.
+      return (
+        <p className="text-sm font-medium text-muted">
+          {dot('warn')} Stripe setup is incomplete — cancellations can&apos;t reach ChurnLens yet, so
+          no surveys will send.{' '}
+          <Link href="/onboarding" className="underline underline-offset-2 hover:text-zinc-900 dark:hover:text-white">
+            Finish connecting Stripe
           </Link>
         </p>
       );

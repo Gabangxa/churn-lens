@@ -19,6 +19,7 @@ import { FREE_TIER_MONTHLY_SURVEYS, freeTierWindowStart } from '@/lib/plan';
 export type SurveySendStatus =
   | { kind: 'sending' }
   | { kind: 'stripe_not_connected' }
+  | { kind: 'setup_incomplete' }
   | { kind: 'deletion_pending' }
   | { kind: 'stripe_key_invalid'; since: Date }
   | { kind: 'paused_by_churnlens' }
@@ -26,6 +27,14 @@ export type SurveySendStatus =
 
 export function surveySendStatus(input: {
   stripeConnected: boolean;
+  /**
+   * Whether the org has a webhook endpoint registered with Stripe
+   * (stripe_webhook_id and its signing secret). Without one the webhook
+   * answers 404 "Unknown organization" to anything that arrives — in
+   * practice nothing does, since no endpoint posts to it — so no
+   * cancellation can be surveyed however the rest of the setup looks.
+   */
+  stripeWebhookRegistered: boolean;
   deletionRequested: boolean;
   /**
    * organizations.stripe_key_invalid_at: when the webhook first found the
@@ -42,6 +51,10 @@ export function surveySendStatus(input: {
   now?: Date;
 }): SurveySendStatus {
   if (!input.stripeConnected) return { kind: 'stripe_not_connected' };
+  // A key with no endpoint: what a failed first connect used to leave (it
+  // stored the key before registering). Ahead of the rest because none of
+  // them matters until events can arrive, and /onboarding fixes it.
+  if (!input.stripeWebhookRegistered) return { kind: 'setup_incomplete' };
   if (input.deletionRequested) return { kind: 'deletion_pending' };
   // Ahead of the platform pause, whose copy tells the founder nothing in their
   // setup needs fixing — untrue while their key is rejected — and of the

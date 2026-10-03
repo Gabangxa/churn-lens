@@ -76,17 +76,20 @@ export interface SeedOrgOptions {
    * column for NULL. Keeping it opaque also means no test can accidentally
    * reach Stripe.
    *
-   * On its own this is a HALF-connected org (connect saved the key, then
-   * failed to register the webhook), which sign-in sends to /onboarding
-   * whatever redirect_to says. Add withStripeWebhook for a connected org.
+   * On its own this is a HALF-connected org (what a connect that saved the
+   * key and then failed to register the webhook used to leave behind), which
+   * sign-in sends to /onboarding whatever redirect_to says and the dashboard
+   * calls "setup incomplete". Add withStripeWebhook for a connected org.
    */
   withStripeKey?: boolean;
   /**
-   * Also record a registered webhook (opaque id), completing the connection:
-   * sign-in then honours redirect_to and defaults to /dashboard. Requires
-   * withStripeKey. Do not use it in a flow that disconnects Stripe (account
-   * deletion, Settings disconnect): disconnectStripe would try to decrypt the
-   * placeholder key to delete the endpoint, fail, and report an error.
+   * Also record a registered webhook endpoint (stripe_webhook_id and its
+   * signing secret, opaque placeholders like the key), completing the
+   * connection: sign-in then honours redirect_to and defaults to /dashboard,
+   * and the dashboard reports surveys as sending. Requires withStripeKey. Do
+   * not use it in a flow that disconnects Stripe (account deletion, Settings
+   * disconnect): disconnectStripe would try to decrypt the placeholder key to
+   * delete the endpoint, fail, and report an error.
    */
   withStripeWebhook?: boolean;
   createdAt?: Date;
@@ -96,14 +99,15 @@ export interface SeedOrgOptions {
 
 export async function seedOrg(options: SeedOrgOptions): Promise<{ orgId: string }> {
   if (options.withStripeWebhook && !options.withStripeKey) {
-    // No real org is in that state: connect stores the key before it registers the webhook.
+    // No real org is in that state: connect never stores one without the other.
     throw new Error('seedOrg: withStripeWebhook requires withStripeKey');
   }
   const orgId = randomUUID();
   await query(
     `INSERT INTO organizations
-       (id, name, created_at, last_login_at, deletion_requested_at, stripe_api_key_enc, stripe_webhook_id)
-     VALUES ($1, $2, COALESCE($3::timestamptz, now()), $4, $5, $6, $7)`,
+       (id, name, created_at, last_login_at, deletion_requested_at, stripe_api_key_enc,
+        stripe_webhook_id, stripe_webhook_secret_enc)
+     VALUES ($1, $2, COALESCE($3::timestamptz, now()), $4, $5, $6, $7, $8)`,
     [
       orgId,
       options.name ?? 'E2E Organization',
@@ -112,6 +116,7 @@ export async function seedOrg(options: SeedOrgOptions): Promise<{ orgId: string 
       options.deletionRequestedAt ?? null,
       options.withStripeKey ? 'e2e-placeholder-not-real-ciphertext' : null,
       options.withStripeWebhook ? 'we_e2e_placeholder_not_registered' : null,
+      options.withStripeWebhook ? 'e2e-placeholder-not-real-ciphertext' : null,
     ],
   );
   await query(

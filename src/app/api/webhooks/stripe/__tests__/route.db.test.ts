@@ -513,6 +513,7 @@ suite('Stripe webhook against a real database', () => {
       const statusNow = async () =>
         surveySendStatus({
           stripeConnected: true,
+          stripeWebhookRegistered: true,
           deletionRequested: false,
           stripeKeyInvalidSince: null,
           legalFooterReady: true,
@@ -654,6 +655,7 @@ suite('Stripe webhook against a real database', () => {
     async function dashboardStatus(orgId: string) {
       return surveySendStatus({
         stripeConnected: true,
+        stripeWebhookRegistered: true,
         deletionRequested: false,
         stripeKeyInvalidSince: await keyInvalidAt(orgId),
         legalFooterReady: true,

@@ -35,6 +35,22 @@ test.describe('dashboard status', () => {
     }
   });
 
+  test('an org with a key but no webhook endpoint is told to finish connecting, not that surveys are sending', async ({ page }) => {
+    // What a first connect whose webhook registration failed used to leave
+    // behind: the key stored, no endpoint, so no event can ever arrive.
+    const email = uniqueEmail('setupincomplete');
+    const { orgId } = await seedOrg({ email, withStripeKey: true });
+
+    await loginAs(page, { orgId, email, redirectTo: '/dashboard' });
+    // Straight to the dashboard whichever page sign-in chose for this org.
+    await page.goto('/dashboard');
+
+    // Shown whether or not legal.ts is filled: it outranks the platform pause.
+    await expect(page.getByText(/Stripe setup is incomplete/)).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Finish connecting Stripe' })).toHaveAttribute('href', '/onboarding');
+    await expect(page.getByText('surveys sending automatically')).toHaveCount(0);
+  });
+
   test('an org whose Stripe key was rejected is told to reconnect', async ({ page }) => {
     const email = uniqueEmail('keyrejected');
     const { orgId } = await seedOrg({ email, withStripeKey: true, withStripeWebhook: true });
