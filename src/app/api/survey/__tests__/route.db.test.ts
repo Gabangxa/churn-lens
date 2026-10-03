@@ -33,7 +33,9 @@ vi.mock('@/lib/db', () => ({
     (await pool().query(text, params)).rows[0] ?? null,
 }));
 
+import { renderToStaticMarkup } from 'react-dom/server';
 import { POST } from '../route';
+import SurveyPage from '@/app/survey/[token]/page';
 import { signSurveyToken } from '@/lib/crypto';
 import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 
@@ -135,6 +137,45 @@ suite('POST /api/survey against a real database', () => {
     });
     expect(stored.surveyed_at).not.toBeNull();
     // A stranger with a survey link must not be able to page the operator.
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+  });
+
+  // A survey link with junk after the signature used to verify (the base64url
+  // decoder skipped it) and the raw string, NUL and all, was bound into the
+  // UPDATE: Postgres refused it, the route answered 500 and paged the
+  // operator, as often as anyone holding a link cared to POST.
+  it.each([
+    ['a NUL', '\u0000'],
+    ['a "!"', '!'],
+    ['a space', ' '],
+  ])('answers 400 to a genuine token with %s appended, saves nothing and reports nothing', async (_label, junk) => {
+    const { token } = await seedPendingSurvey();
+
+    const res = await submit({ token: `${token}${junk}`, reason: BUILTIN_REASON });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'Invalid token' });
+    expect((await storedAnswer(token)).surveyed_at).toBeNull();
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+  });
+
+  it('still saves the answer for the genuine token afterwards', async () => {
+    const { token } = await seedPendingSurvey();
+    await submit({ token: `${token}\u0000`, reason: BUILTIN_REASON });
+
+    const res = await submit({ token, reason: BUILTIN_REASON });
+
+    expect(res.status).toBe(303);
+    expect((await storedAnswer(token)).reason_category).toBe(BUILTIN_REASON);
+  });
+
+  it('shows the expired-link page for /survey/<token>%00 and reports nothing', async () => {
+    const { token } = await seedPendingSurvey();
+
+    // Next hands the page its params decoded, so %00 arrives as a NUL.
+    const page = renderToStaticMarkup(await SurveyPage({ params: { token: `${token}\u0000` } }));
+
+    expect(page).toContain('This link has expired');
     expect(getErrorReportSnapshot().totalReported).toBe(0);
   });
 

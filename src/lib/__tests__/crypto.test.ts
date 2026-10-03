@@ -257,6 +257,38 @@ describe('signSurveyToken / verifySurveyToken', () => {
     expect(verifySurveyToken('nodothere')).toBeNull();
   });
 
+  // Node's base64url decoder skips characters outside the alphabet, so these
+  // used to decode to the genuine signature bytes and verify. The token is
+  // then bound into SQL as-is, and a NUL in it fails the query (500 + alert).
+  it.each([
+    ['a NUL', '\u0000'],
+    ['a "!"', '!'],
+    ['a space', ' '],
+    ['"=" padding', '='],
+    ['a newline', '\n'],
+  ])('returns null when %s is appended to a genuine signature', (_label, junk) => {
+    const token = signSurveyToken(VALID_PAYLOAD);
+    expect(verifySurveyToken(`${token}${junk}`)).toBeNull();
+  });
+
+  it('returns null when junk is inserted inside a genuine signature', () => {
+    const token = signSurveyToken(VALID_PAYLOAD);
+    expect(verifySurveyToken(`${token.slice(0, -5)}\u0000${token.slice(-5)}`)).toBeNull();
+  });
+
+  it('returns null for a signature that decodes to the same bytes but is spelled differently', () => {
+    // 32 bytes need 43 base64url chars, leaving two unused low bits in the
+    // last one: flipping them changes the string, not the decoded signature.
+    const token = signSurveyToken(VALID_PAYLOAD);
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    const last = alphabet.indexOf(token[token.length - 1]);
+    const variant = `${token.slice(0, -1)}${alphabet[last ^ 1]}`;
+    const sig = (t: string) => Buffer.from(t.slice(t.lastIndexOf('.') + 1), 'base64url');
+    expect(sig(variant).equals(sig(token))).toBe(true);
+
+    expect(verifySurveyToken(variant)).toBeNull();
+  });
+
   // The ciphertext version prefix also uses '.', but survey tokens are a
   // separate format and must not have picked one up.
   it('is unaffected by the ciphertext version prefix', () => {

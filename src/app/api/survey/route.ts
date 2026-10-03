@@ -4,7 +4,7 @@ import { verifySurveyToken } from '@/lib/crypto';
 import { redirectUrl } from '@/lib/app-url';
 import { BUILTIN_CANCELLATION_REASONS, loadSurveyConfig } from '@/lib/survey-config';
 import { MAX_COMEBACK_TEXT, MAX_OPEN_TEXT, MAX_REASON, truncateFreeText } from '@/lib/survey-limits';
-import { reportError } from '@/lib/report-error';
+import { isBadInputDbError, reportError, warnBadInput } from '@/lib/report-error';
 import { withErrorReporting } from '@/lib/with-error-reporting';
 
 async function submitSurvey(req: NextRequest) {
@@ -123,14 +123,20 @@ async function submitSurvey(req: NextRequest) {
       return NextResponse.json({ error: 'Survey not found or already submitted' }, { status: 404 });
     }
   } catch (err) {
-    // The link is single-use and the customer has already cancelled, so
-    // a lost answer does not come back. Org id only: the token is a
-    // credential and the answer is the customer's own words.
-    //
-    // Reported even for a Postgres data exception, which other routes answer
-    // as bad input (isBadInputDbError): every value bound here is ours or has
-    // been through truncateFreeText, so one means that sanitising missed
-    // something and a customer's answer was lost. That needs a human.
+    // Postgres refusing a bound value as malformed (isBadInputDbError) should
+    // not happen here: the answers went through truncateFreeText, and the
+    // token is the exact string signSurveyToken issued (verifySurveyToken
+    // accepts nothing else). Should one get through anyway, it came in a
+    // request anyone holding a link can repeat at will, so it is a 400 and
+    // one warning line, not a way to page the operator.
+    if (isBadInputDbError(err)) {
+      warnBadInput('survey.submit', err, { orgId: payload.orgId });
+      return NextResponse.json({ error: 'Invalid request' }, { status: 400 });
+    }
+    // Anything else is the database. The link is single-use and the customer
+    // has already cancelled, so a lost answer does not come back. Org id
+    // only: the token is a credential and the answer is the customer's own
+    // words.
     reportError('survey.submit', err, { orgId: payload.orgId });
     return NextResponse.json({ error: 'Failed to save response' }, { status: 500 });
   }

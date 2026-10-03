@@ -416,6 +416,22 @@ describe('POST /api/survey — error reporting', () => {
     expect(JSON.stringify(recent)).not.toContain('export kept failing');
   });
 
+  it('answers 400 to a value Postgres refuses as malformed, logs one warning and reports nothing', async () => {
+    // Every bound value is sanitised or the verified token, so this should not
+    // happen; if it does, the value still arrived in a request anyone holding
+    // a link can repeat, so it must not be a way to page the operator.
+    executeMock.mockRejectedValue(
+      Object.assign(new Error('invalid byte sequence for encoding "UTF8": 0x00'), { code: '22021' }),
+    );
+
+    const res = await POST(surveyRequest({ token: TOKEN, reason: BUILTIN_REASON }));
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'Invalid request' });
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('rejected request input'));
+  });
+
   it('reports nothing for a normal submission', async () => {
     await POST(surveyRequest({ token: TOKEN, reason: BUILTIN_REASON }));
 
