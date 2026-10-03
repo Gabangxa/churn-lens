@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { queryOne } from '@/lib/db';
+import { withTransaction } from '@/lib/db';
 import { assertSameOrigin, requireOrgId, clearOrgCookie } from '@/lib/auth';
 import { currentLegalDocsVersion } from '@/lib/legal-version';
+import { recordLegalAcceptance } from '@/lib/legal-acceptance';
 import { reportError } from '@/lib/report-error';
 
 /**
@@ -50,24 +51,18 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    // Idempotent: re-accepting the version already on record keeps the
-    // original time, so a double click or a second tab cannot move the record
-    // of when the founder agreed to this wording. In a SET clause the
-    // right-hand columns are the row's values BEFORE this update, and the
-    // organizations_legal_acceptance_pair_check constraint guarantees a
-    // matching version always has a time beside it. now() is the database's
-    // clock, never anything the client sent. /api/onboarding/connect applies
-    // the same rule.
-    const org = await queryOne<{ legal_accepted_at: Date; legal_accepted_version: string }>(
-      `UPDATE organizations
-       SET legal_accepted_at = CASE WHEN legal_accepted_version = $1 THEN legal_accepted_at ELSE now() END,
-           legal_accepted_version = $1
-       WHERE id = $2
-       RETURNING legal_accepted_at, legal_accepted_version`,
-      [currentVersion, orgId],
+    // recordLegalAcceptance adds this version to the org's acceptance history
+    // and updates the organizations cache in one statement, on the database
+    // clock. Idempotent: re-accepting the version already on record adds no
+    // row and keeps the original time, so a double click or a second tab
+    // cannot move the record of when the founder agreed to this wording.
+    // withTransaction is only how db.ts lends the dedicated client it writes
+    // through — the connect route makes the same call next to its key write.
+    const acceptance = await withTransaction((client) =>
+      recordLegalAcceptance(client, orgId, 'banner'),
     );
 
-    if (!org) {
+    if (!acceptance) {
       // requireOrgId already refuses a session whose org row is gone, so this
       // is only reachable if the org was deleted between that check and this
       // write. Nothing to record against; evict the dead session, as
@@ -81,8 +76,8 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       ok: true,
-      version: org.legal_accepted_version,
-      acceptedAt: new Date(org.legal_accepted_at).toISOString(),
+      version: acceptance.version,
+      acceptedAt: acceptance.acceptedAt.toISOString(),
     });
   } catch (err) {
     // The version was already validated, so this is the database failing to

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { NextRequest, NextResponse } from 'next/server';
-import { Pool } from 'pg';
+import { Pool, PoolClient } from 'pg';
 import { assertThrowawayDatabase } from '../../../../../../e2e/helpers/throwaway-db';
 
 /**
@@ -8,9 +8,12 @@ import { assertThrowawayDatabase } from '../../../../../../e2e/helpers/throwaway
  * PostgreSQL.
  *
  * This is how the orgs that connected before acceptance existed (and every org
- * after a LEGAL_DOCS_VERSION bump) get an acceptance on record, so what matters
- * is what lands in the row: written only for the session's own org, only from
- * our own origin, on the database clock, and never moved by a repeat click.
+ * after the current version changes) get an acceptance on record, so what
+ * matters is what lands in the database: written only for the session's own
+ * org, only from our own origin, on the database clock, never moved by a
+ * repeat click, and never overwriting the record of an earlier version — the
+ * legal_acceptances history is read alongside the organizations cache in
+ * every assertion below.
  * Auth is the real module with a genuinely signed cookie, so these also prove
  * the route is wired to the real session and same-origin checks. Skipped
  * unless TEST_DATABASE_URL points at a migrated throwaway database.
@@ -29,6 +32,22 @@ vi.mock('@/lib/db', () => ({
     (await pool().query(text, params)).rowCount ?? 0,
   queryOne: async (text: string, params?: unknown[]) =>
     (await pool().query(text, params)).rows[0] ?? null,
+  // db.ts's withTransaction, on this suite's pool: a real BEGIN/COMMIT on one
+  // dedicated connection, rolled back on any error.
+  withTransaction: async <T,>(fn: (client: PoolClient) => Promise<T>): Promise<T> => {
+    const client = await pool().connect();
+    try {
+      await client.query('BEGIN');
+      const result = await fn(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  },
 }));
 
 import { POST } from '../route';
@@ -65,11 +84,23 @@ function acceptRequest(opts: {
   });
 }
 
+interface HistoryRow {
+  version: string;
+  accepted_at: Date;
+  source: string;
+}
+
+/** The organizations cache columns, plus every legal_acceptances row for the org. */
 interface Acceptance {
   legal_accepted_at: Date | null;
   legal_accepted_version: string | null;
+  history: HistoryRow[];
 }
 
+/**
+ * An org, optionally with an earlier acceptance on record the way the app
+ * leaves one: the cache columns and the matching history row.
+ */
 async function seedOrg(acceptance?: { version: string; acceptedAt: Date }): Promise<string> {
   const { rows } = await pool().query<{ id: string }>(
     `INSERT INTO organizations (name, legal_accepted_version, legal_accepted_at)
@@ -77,15 +108,27 @@ async function seedOrg(acceptance?: { version: string; acceptedAt: Date }): Prom
      RETURNING id`,
     [acceptance?.version ?? null, acceptance?.acceptedAt ?? null],
   );
+  if (acceptance) {
+    await pool().query(
+      `INSERT INTO legal_acceptances (org_id, version, accepted_at, source)
+       VALUES ($1, $2, $3, 'connect')`,
+      [rows[0].id, acceptance.version, acceptance.acceptedAt],
+    );
+  }
   return rows[0].id;
 }
 
 async function readAcceptance(orgId: string): Promise<Acceptance> {
-  const { rows } = await pool().query<Acceptance>(
+  const { rows } = await pool().query<Omit<Acceptance, 'history'>>(
     'SELECT legal_accepted_at, legal_accepted_version FROM organizations WHERE id = $1',
     [orgId],
   );
-  return rows[0];
+  const history = await pool().query<HistoryRow>(
+    `SELECT version, accepted_at, source FROM legal_acceptances
+     WHERE org_id = $1 ORDER BY accepted_at, version`,
+    [orgId],
+  );
+  return { ...rows[0], history: history.rows };
 }
 
 /** The database's own clock, read outside any statement under test. */
@@ -94,7 +137,11 @@ async function dbClock(): Promise<Date> {
   return rows[0].now;
 }
 
-const NOTHING_RECORDED: Acceptance = { legal_accepted_at: null, legal_accepted_version: null };
+const NOTHING_RECORDED: Acceptance = {
+  legal_accepted_at: null,
+  legal_accepted_version: null,
+  history: [],
+};
 
 const suite = TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -102,11 +149,8 @@ suite('POST /api/legal/accept against a real database', () => {
   beforeAll(async () => {
     assertThrowawayDatabase(TEST_DATABASE_URL!);
     dbState.pool = new Pool({ connectionString: TEST_DATABASE_URL, ssl: false });
-    const { rows } = await pool().query(
-      `SELECT 1 FROM information_schema.columns
-       WHERE table_name = 'organizations' AND column_name = 'legal_accepted_version'`,
-    );
-    if (rows.length === 0) {
+    const { rows } = await pool().query(`SELECT to_regclass('legal_acceptances') AS history`);
+    if (rows[0].history === null) {
       throw new Error(
         'TEST_DATABASE_URL is not migrated — run `node scripts/migrate.js` against it first.',
       );
@@ -234,6 +278,7 @@ suite('POST /api/legal/accept against a real database', () => {
       expect(await readAcceptance(orgId)).toEqual({
         legal_accepted_at: prior.acceptedAt,
         legal_accepted_version: prior.version,
+        history: [{ version: prior.version, accepted_at: prior.acceptedAt, source: 'connect' }],
       });
     });
 
@@ -295,6 +340,10 @@ suite('POST /api/legal/accept against a real database', () => {
       expect(recorded.legal_accepted_version).toBe(CURRENT_VERSION);
       expect(recorded.legal_accepted_at!.getTime()).toBeGreaterThanOrEqual(before.getTime());
       expect(recorded.legal_accepted_at!.getTime()).toBeLessThanOrEqual(after.getTime());
+      // The history row and the cache are one write: same version, same time.
+      expect(recorded.history).toEqual([
+        { version: CURRENT_VERSION, accepted_at: recorded.legal_accepted_at, source: 'banner' },
+      ]);
       expect(await res.json()).toEqual({
         ok: true,
         version: CURRENT_VERSION,
@@ -313,6 +362,8 @@ suite('POST /api/legal/accept against a real database', () => {
 
       expect(second.status).toBe(200);
       expect(await second.json()).toEqual(first);
+      // Cache and history alike: still exactly one row for this version.
+      expect(afterFirst.history).toHaveLength(1);
       expect(await readAcceptance(orgId)).toEqual(afterFirst);
     });
 
@@ -326,11 +377,15 @@ suite('POST /api/legal/accept against a real database', () => {
       expect(await readAcceptance(orgId)).toEqual({
         legal_accepted_at: firstAcceptedAt,
         legal_accepted_version: CURRENT_VERSION,
+        history: [{ version: CURRENT_VERSION, accepted_at: firstAcceptedAt, source: 'connect' }],
       });
     });
 
-    it('moves an org that accepted an older version onto the current one, with a fresh time', async () => {
-      const orgId = await seedOrg({ version: OLD_VERSION, acceptedAt: new Date('2025-01-01T00:00:00Z') });
+    it('moves an org that accepted an older version onto the current one and keeps the old record', async () => {
+      // The older acceptance is the wording that covered everything processed
+      // before today. Overwriting it was the only record of that agreement.
+      const prior = { version: OLD_VERSION, acceptedAt: new Date('2025-01-01T00:00:00Z') };
+      const orgId = await seedOrg(prior);
       const before = await dbClock();
 
       const res = await POST(acceptRequest({ orgId }));
@@ -339,6 +394,10 @@ suite('POST /api/legal/accept against a real database', () => {
       const recorded = await readAcceptance(orgId);
       expect(recorded.legal_accepted_version).toBe(CURRENT_VERSION);
       expect(recorded.legal_accepted_at!.getTime()).toBeGreaterThanOrEqual(before.getTime());
+      expect(recorded.history).toEqual([
+        { version: OLD_VERSION, accepted_at: prior.acceptedAt, source: 'connect' },
+        { version: CURRENT_VERSION, accepted_at: recorded.legal_accepted_at, source: 'banner' },
+      ]);
     });
 
     it("only ever touches the session's own org", async () => {

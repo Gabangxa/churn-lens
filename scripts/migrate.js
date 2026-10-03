@@ -571,6 +571,39 @@ async function migrate() {
     END $$;
   `);
 
+  // Every Terms/DPA acceptance an org has made: one row per version, inserted
+  // and never updated. The organizations.legal_accepted_* columns above say
+  // only which version an org accepted most recently, so accepting a new
+  // version overwrote the one record of the earlier agreement — the wording
+  // that covered everything processed in between. Those columns stay as the
+  // cache of the current acceptance (they hold currentLegalDocsVersion() from
+  // src/lib/legal-version.ts, '-draft' suffix included); this is the history.
+  // Both are written by recordLegalAcceptance (src/lib/legal-acceptance.ts) in
+  // one statement, so they cannot disagree about the current one.
+  //
+  // accepted_at is always the database's now() at acceptance (or the cache's
+  // kept original time), never a client's. source says which door it came
+  // through: 'connect' (the onboarding checkbox, alongside a Stripe key) or
+  // 'banner' (the dashboard's "I agree", POST /api/legal/accept).
+  //
+  // ON DELETE CASCADE: erasing an account erases its acceptance history too,
+  // like every other per-org table. Whether acceptance evidence should outlive
+  // erasure is a question for a lawyer; this keeps today's erasure promise.
+  //
+  // No backfill: this table ships in the same release as the cache columns,
+  // so no deployed database holds an acceptance without a row here. A local
+  // database that recorded one before this table existed recorded it without
+  // the '-draft' label, so that org is simply asked again.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS legal_acceptances (
+      org_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      version text NOT NULL,
+      accepted_at timestamptz NOT NULL DEFAULT now(),
+      source text NOT NULL CHECK (source IN ('connect', 'banner')),
+      PRIMARY KEY (org_id, version)
+    );
+  `);
+
   console.log('Database migration complete');
   await pool.end();
 }

@@ -87,6 +87,10 @@ test.describe('dashboard status', () => {
     );
     expect(org!.legal_accepted_version).toBe(currentLegalDocsVersion());
     expect(org!.legal_accepted_at).not.toBeNull();
+    // And in the history that later versions never overwrite.
+    expect(
+      await query('SELECT version, source FROM legal_acceptances WHERE org_id = $1', [orgId]),
+    ).toEqual([{ version: currentLegalDocsVersion(), source: 'banner' }]);
 
     // Recorded, not merely hidden: a fresh load does not ask again.
     await page.reload();
