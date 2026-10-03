@@ -22,6 +22,32 @@ function isUniqueViolation(err: unknown): boolean {
 }
 
 /**
+ * The WHATWG "valid email address" — exactly what the login form's
+ * <input type="email"> already enforces in the browser before it lets the
+ * form submit, so this refuses nothing a founder typing into it could send.
+ * Only a hand-made request is turned away. (Both forms that ever created a
+ * users row used type="email", so no existing account fails it either.)
+ *
+ * It matters because this route is unauthenticated and everything after it
+ * trusts the address. Its character classes admit no control character and
+ * no DEL: a NUL byte reaching Postgres is error 22021, which the catch-all
+ * below reports, so before this check anyone could page the operator once
+ * per request. The rest would be stored as part of an account's address and
+ * handed to Resend. Display names, address lists, spaces and a second @
+ * would reach Resend too, which rejects them — another report on demand.
+ *
+ * 254 is the longest address SMTP can deliver to (RFC 5321's 256-octet path
+ * minus its angle brackets). It also bounds the rate limiter's per-email keys.
+ */
+const MAX_EMAIL_LENGTH = 254;
+const WHATWG_VALID_EMAIL =
+  /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+
+function isPlausibleEmail(email: string): boolean {
+  return email.length <= MAX_EMAIL_LENGTH && WHATWG_VALID_EMAIL.test(email);
+}
+
+/**
  * Request a magic-link login email. Doubles as signup: an email with no
  * existing account gets one created (an org + its owner user) before the
  * link is issued, so this is the only door into ChurnLens — there is no
@@ -56,10 +82,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid request body.' }, { status: 400 });
   }
 
-  if (typeof email !== 'string' || !email.includes('@')) {
+  // Checked after trimming, so the stray whitespace a paste can carry is
+  // still forgiven, and before anything else sees the address — the
+  // per-email rate-limit bucket, the database, Resend.
+  const normEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+  if (!isPlausibleEmail(normEmail)) {
     return NextResponse.json({ error: 'A valid email address is required.' }, { status: 400 });
   }
-  const normEmail = email.trim().toLowerCase();
   const redirectTo = sanitizeNext(next);
 
   // Per-email throttle. On breach we still return ok (no enumeration) but skip
