@@ -65,6 +65,9 @@ function formatDate(iso: string): string {
 export default function SettingsPage() {
   const router = useRouter();
   const [connected, setConnected] = useState<boolean | null>(null);
+  // The status could not be read. Shown instead of "Not connected", which
+  // would tell a connected founder to connect again.
+  const [statusError, setStatusError] = useState<string | null>(null);
   const [disconnecting, setDisconnecting] = useState(false);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -126,11 +129,17 @@ export default function SettingsPage() {
           router.push('/login?next=/settings');
           return;
         }
+        if (!res.ok) {
+          setStatusError('Could not load your Stripe connection status. Reload the page to try again.');
+          return;
+        }
         const data = await res.json();
         setConnected(data.connected ?? false);
         setDeletionRequestedAt(data.deletionRequestedAt ?? null);
       } catch {
-        setConnected(false);
+        // The request itself failed (offline, a dropped connection): as
+        // unknown as a 500, and no more a reason to say "Not connected".
+        setStatusError('Could not load your Stripe connection status. Reload the page to try again.');
       }
     }
     fetchStatus();
@@ -614,7 +623,14 @@ export default function SettingsPage() {
             ChurnLens uses your restricted API key to listen for cancellation events.
           </p>
 
-          {connected === null ? (
+          {statusError ? (
+            <p
+              role="alert"
+              className="rounded-2xl border-2 border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-sm font-bold text-rose-700 dark:text-rose-400"
+            >
+              {statusError}
+            </p>
+          ) : connected === null ? (
             <div className="flex items-center gap-2 text-sm font-medium text-muted">
               <div className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-200 dark:border-zinc-700 border-t-teal-600" />
               Loading…
