@@ -55,12 +55,18 @@ export async function disconnectStripe(orgId: string): Promise<void> {
     }
   }
 
+  // Everything that described the connected account goes with its key: the
+  // business name read from it (or survey copy keeps naming a business that
+  // is no longer connected, and the dashboard never asks for a name) and the
+  // record that Stripe rejected its key (a flag about a key no longer stored).
   await query(
     `UPDATE organizations
      SET stripe_api_key_enc = NULL,
          stripe_account_id = NULL,
          stripe_webhook_id = NULL,
-         stripe_webhook_secret_enc = NULL
+         stripe_webhook_secret_enc = NULL,
+         stripe_business_name = NULL,
+         stripe_key_invalid_at = NULL
      WHERE id = $1`,
     [orgId],
   );

@@ -75,15 +75,14 @@ describe('disconnectStripe', () => {
     expect(webhookDelMock).toHaveBeenCalledTimes(1);
   });
 
-  it('clears every stored Stripe credential column for that org', async () => {
+  it('clears every stored Stripe column for that org, and only that org', async () => {
+    // What the row looks like afterwards is pinned against a real database in
+    // stripe-disconnect.db.test.ts; this pins the scope.
     await disconnectStripe(ORG_ID);
 
     const update = clearingUpdate();
     expect(update).not.toBeNull();
-    expect(update!.sql).toBe(
-      'UPDATE organizations SET stripe_api_key_enc = NULL, stripe_account_id = NULL, ' +
-        'stripe_webhook_id = NULL, stripe_webhook_secret_enc = NULL WHERE id = $1',
-    );
+    expect(update!.sql).toMatch(/^UPDATE organizations SET .* WHERE id = \$1$/);
     expect(update!.params).toEqual([ORG_ID]);
   });
 
