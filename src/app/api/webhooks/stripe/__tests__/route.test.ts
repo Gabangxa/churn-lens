@@ -666,6 +666,20 @@ describe('pre-send guards', () => {
     expect(executeMock).not.toHaveBeenCalled();
   });
 
+  it('skips involuntary churn without retrieving the customer or recording anything', async () => {
+    // route.db.test.ts covers this end to end; this keeps it pinned without a DB.
+    constructEventMock.mockReturnValue(
+      deletedEvent({ cancellationDetails: { reason: 'payment_failed', feedback: null, comment: null } }),
+    );
+
+    const res = await callPost();
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ received: true, skipped: 'involuntary_churn' });
+    expect(customersRetrieveMock).not.toHaveBeenCalled();
+    expect(executeMock).not.toHaveBeenCalled();
+  });
+
   it('skips a customer who previously opted out', async () => {
     queryCountMock.mockReset();
     queryCountMock.mockResolvedValue(1); // unsubscribes hit

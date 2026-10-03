@@ -22,6 +22,13 @@ const PORTAL_FEEDBACK_TO_REASON: Record<string, string> = {
   other: 'Other',
 };
 
+// cancellation_details.reason values meaning Stripe ended the subscription
+// itself, not the customer: dunning gave up on a failed payment, or a charge
+// was disputed. An exit survey asks "why did you leave?", which is the wrong
+// question for someone whose card bounced — they never chose to. The only other
+// value, 'cancellation_requested', is a deliberate cancel and is surveyed.
+const INVOLUNTARY_CANCELLATION_REASONS = new Set(['payment_failed', 'payment_disputed']);
+
 // How many times we let Stripe retry a survey email before giving up. A
 // permanently-failing address (hard bounce, blocked domain) would otherwise
 // make this route 500 on every retry for the whole of Stripe's retry window.
@@ -182,6 +189,18 @@ export async function POST(
       reason: string | null;
     } | null;
   };
+
+  // Involuntary churn is skipped before anything else happens to the event:
+  // before the customer's email and name are retrieved from Stripe (data
+  // minimisation — there is no reason to pull personal data for someone we
+  // will not contact) and before either survey_responses write path, so not
+  // even a portal-prefilled row is recorded. 200 so Stripe does not retry.
+  // A payload with no cancellation_details (accounts pinned to an old API
+  // version) cannot be shown to be involuntary and is surveyed as before.
+  const cancellationReason = subscription.cancellation_details?.reason ?? null;
+  if (cancellationReason !== null && INVOLUNTARY_CANCELLATION_REASONS.has(cancellationReason)) {
+    return NextResponse.json({ received: true, skipped: 'involuntary_churn' });
+  }
 
   if (org.plan === 'free') {
     // Shared with the dashboard's status line, so the founder sees the cap

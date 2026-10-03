@@ -9,6 +9,12 @@ import { FREE_TIER_MONTHLY_SURVEYS, freeTierWindowStart } from '@/lib/plan';
  * events with a 200 for each of these reasons, and nothing else reported
  * them — the dashboard said "surveys firing automatically" while every event
  * was being dropped. This mirrors those gates so the two cannot disagree.
+ *
+ * Only org-wide gates are states here. Skips decided by the individual
+ * cancellation (involuntary churn, an opted-out or email-less customer, a
+ * duplicate delivery) say nothing about whether the *next* one will be
+ * surveyed; the dashboard's 'sending' line names involuntary churn in its copy
+ * instead, because that is a whole class of cancellations rather than a rare one.
  */
 export type SurveySendStatus =
   | { kind: 'sending' }

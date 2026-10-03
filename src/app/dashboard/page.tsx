@@ -112,7 +112,15 @@ function SendStatusLine({ status }: { status: SurveySendStatus }) {
   );
   switch (status.kind) {
     case 'sending':
-      return <p className="text-sm font-medium text-muted">{dot('ok')} Stripe connected · surveys sending automatically</p>;
+      // The webhook skips cancellations Stripe made itself after a failed or
+      // disputed payment (involuntary churn). Said here so a founder comparing
+      // Stripe's cancellation count with surveys sent is not left guessing.
+      return (
+        <p className="text-sm font-medium text-muted">
+          {dot('ok')} Stripe connected · surveys sending automatically. Cancellations caused by a
+          failed or disputed payment are not surveyed.
+        </p>
+      );
     case 'stripe_not_connected':
       return (
         <p className="text-sm font-medium text-muted">

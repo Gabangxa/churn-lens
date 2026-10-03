@@ -26,6 +26,8 @@ test.describe('dashboard status', () => {
     // real launch task) flips which line is correct, not whether this passes.
     if (legalFooterReady()) {
       await expect(page.getByText('surveys sending automatically')).toBeVisible();
+      // The webhook skips involuntary churn; "automatically" must not imply every cancellation.
+      await expect(page.getByText(/failed or disputed payment are not surveyed/)).toBeVisible();
     } else {
       await expect(page.getByText(/Surveys are paused on our side/)).toBeVisible();
       await expect(page.getByText('surveys sending automatically')).toHaveCount(0);
