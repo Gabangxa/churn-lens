@@ -70,6 +70,10 @@ export async function GET(req: NextRequest) {
       // Copied onto the resulting subscription, so the plan this checkout was
       // for stays legible in Polar's dashboard next to the raw product id.
       metadata: { orgId, plan },
+    }, {
+      // The SDK sets no deadline of its own, so without this a stalled Polar
+      // API holds the founder's tab and a Node socket open for minutes.
+      timeoutMs: 10_000,
     });
 
     return NextResponse.redirect(checkout.url, { status: 303 });
