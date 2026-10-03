@@ -7,9 +7,14 @@ import ConfirmSignInForm from './ConfirmSignInForm';
 
 export const metadata: Metadata = {
   title: 'Confirm sign-in',
-  // The token is in this page's URL until it is used. Nothing here links
-  // off-site, but no-referrer keeps it that way whatever the header grows.
-  referrer: 'no-referrer',
+  // The token is in this page's URL until it is used. strict-origin sends at
+  // most the bare origin as Referer — never the path or query — to anyone,
+  // this app included, whatever the header grows to link to.
+  //
+  // NOT no-referrer: under that policy browsers send `Origin: null` on a
+  // POST, so the confirm form's own same-origin submission would be refused
+  // by assertSameOrigin in /api/auth/verify and nobody could sign in.
+  referrer: 'strict-origin',
   robots: { index: false, follow: false },
 };
 

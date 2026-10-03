@@ -22,6 +22,7 @@ vi.mock('@/lib/db', () => {
 
 import * as route from '../verify/route';
 import { GET, POST } from '../verify/route';
+import { metadata as confirmPageMetadata } from '@/app/login/confirm/page';
 
 const APP_URL = 'https://app.churnlens.com';
 
@@ -101,5 +102,16 @@ describe('POST /api/auth/verify — refused before the token is looked up', () =
 
     expect(res.status).toBe(403);
     expect(databaseCalls.count).toBe(0);
+  });
+});
+
+describe('/login/confirm — the page whose form is the only way to POST here', () => {
+  it('keeps its token out of Referer without making the browser send Origin: null', () => {
+    // Browsers serialize the Origin of a POST as "null" when the page's
+    // referrer policy is no-referrer, and assertSameOrigin above refuses
+    // "null" — so that policy made the confirm button a 403 for everyone.
+    // strict-origin never sends the path or query (where the token is) as
+    // Referer, and leaves Origin intact for a same-origin POST.
+    expect(confirmPageMetadata.referrer).toBe('strict-origin');
   });
 });
