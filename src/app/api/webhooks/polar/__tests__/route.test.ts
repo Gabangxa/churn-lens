@@ -101,19 +101,14 @@ describe('POST /api/webhooks/polar — signature and configuration', () => {
     expect(getErrorReportSnapshot().totalReported).toBe(0);
   });
 
-  it('returns 500 and reports when the secret is missing, so Polar retries after the fix', async () => {
-    vi.stubEnv('POLAR_WEBHOOK_SECRET', '');
+  it('answers 500 and reports a body signed with our secret that is not JSON', async () => {
+    // Only someone holding the secret can produce this, so it is not noise.
+    const res = await post('this is not json');
 
-    const res = await post(subscriptionEvent('subscription.active'));
-
-    expect(res.status).toBe(500);
+    expect(res).toEqual({ status: 500, body: { error: 'Could not verify the event' } });
     expect(withTransactionMock).not.toHaveBeenCalled();
     expect(getErrorReportSnapshot().recent).toEqual([
-      expect.objectContaining({
-        context: 'webhook.polar',
-        message: expect.stringContaining('POLAR_WEBHOOK_SECRET is not set'),
-        meta: { step: 'validate' },
-      }),
+      expect.objectContaining({ context: 'webhook.polar', meta: { step: 'validate' } }),
     ]);
   });
 
@@ -125,6 +120,51 @@ describe('POST /api/webhooks/polar — signature and configuration', () => {
     const res = await post(body);
 
     expect(res).toEqual({ status: 200, body: { received: true, skipped: 'unparsed_event' } });
+  });
+});
+
+describe('POST /api/webhooks/polar — Polar webhooks not configured', () => {
+  // Billing is not live in every environment (README, deploy step 2), and this
+  // URL is public. It used to report and answer 500 for any POST at all, so a
+  // stranger could fill the operator's inbox. Now it is the same answer as an
+  // unconfigured checkout: 503, nothing reported.
+
+  // A fresh module per test: the warning is once per process, so a test that
+  // ran first would otherwise have used it up.
+  let freshPOST: typeof POST;
+  beforeEach(async () => {
+    vi.resetModules();
+    freshPOST = (await import('../route')).POST;
+    vi.stubEnv('POLAR_WEBHOOK_SECRET', '');
+  });
+
+  function polarWarnings(): unknown[][] {
+    return vi.mocked(console.warn).mock.calls.filter((args) => String(args[0]).includes('POLAR_WEBHOOK_SECRET'));
+  }
+
+  it('answers 503 to a signed delivery, writes nothing and reports nothing', async () => {
+    const res = await freshPOST(signedPolarDelivery(subscriptionEvent('subscription.active'), SECRET));
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: 'Polar webhooks not configured' });
+    expect(withTransactionMock).not.toHaveBeenCalled();
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+  });
+
+  it('answers 503 to an anonymous POST with no signature headers, reporting nothing', async () => {
+    const res = await freshPOST(
+      new Request('http://localhost/api/webhooks/polar', { method: 'POST', body: '{"type":"anything"}' }),
+    );
+
+    expect(res.status).toBe(503);
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+  });
+
+  it('warns once per process, not once per request', async () => {
+    await freshPOST(signedPolarDelivery(subscriptionEvent('subscription.active'), SECRET));
+    await freshPOST(signedPolarDelivery(subscriptionEvent('subscription.revoked'), SECRET));
+
+    expect(polarWarnings()).toHaveLength(1);
   });
 });
 

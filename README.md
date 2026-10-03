@@ -290,7 +290,11 @@ The first deploy of this branch over `main`:
    `RESEND_FROM_EMAIL` to an address on it, or no alert, survey or login mail goes out.
 2. **Polar only when billing goes live.** The `POLAR_*` variables and the webhook registration
    (`.env.example`, Polar section) are not needed before then; without them checkout answers
-   503 "Billing is not configured for this plan yet." and reports nothing.
+   503 "Billing is not configured for this plan yet." and reports nothing, and
+   `/api/webhooks/polar` answers 503 "Polar webhooks not configured", logs one warning per
+   process and reports nothing. Set `POLAR_WEBHOOK_SECRET` in the same change that registers
+   the webhook: Polar's deliveries get that 503 until it is set. Once it is set, a delivery
+   whose signature does not verify gets 403.
 3. **Expect every founder to be signed out once.** The session cookie format changed
    (`<orgId>.<issuedAt>.<hmac>`), and the old `<orgId>.<hmac>` cookies are refused. Every org
    also sees the Terms/DPA banner on the dashboard, since none has an acceptance on record;

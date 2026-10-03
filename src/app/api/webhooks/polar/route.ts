@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { validateEvent, WebhookVerificationError } from '@polar-sh/sdk/webhooks';
 import { SDKValidationError } from '@polar-sh/sdk/models/errors/sdkvalidationerror.js';
 import { withTransaction } from '@/lib/db';
-import { getPolarWebhookSecret } from '@/lib/polar';
+import { getPolarWebhookSecret, isPolarWebhookConfigured } from '@/lib/polar';
 import { entitlementForStatus, planForProduct } from '@/lib/plan';
 import { lockOrganization, recomputeOrgPlan } from '@/lib/org-plan';
 import { reportError } from '@/lib/report-error';
@@ -78,7 +78,24 @@ function readSubscription(data: Record<string, unknown>): SubscriptionFacts | nu
 
 type Applied = { kind: 'applied'; plan: string } | { kind: 'stale' } | { kind: 'unknown_org' };
 
+// Logged at most once per process: a missing secret is a property of the
+// deployment, not of a request, and this URL is public.
+let warnedNotConfigured = false;
+
 async function handlePolarWebhook(req: Request) {
+  // Billing is not wired in every environment (README, "Deploying
+  // fix/launch-hardening", step 2), and without a secret there is nothing to
+  // verify a delivery against. 503, like checkout without a product: retrying
+  // will not help until the environment is configured. Never reported: anyone
+  // can POST here, and each POST would otherwise be an alert.
+  if (!isPolarWebhookConfigured()) {
+    if (!warnedNotConfigured) {
+      warnedNotConfigured = true;
+      console.warn('Polar webhook received but POLAR_WEBHOOK_SECRET is not set — answering 503 until it is.');
+    }
+    return NextResponse.json({ error: 'Polar webhooks not configured' }, { status: 503 });
+  }
+
   // Signature verification needs the exact bytes Polar signed, so the body must
   // be read raw — parsing it first would reserialize and break the signature.
   // A sender that hangs up mid-body makes the read throw ('aborted'): nothing
@@ -97,11 +114,14 @@ async function handlePolarWebhook(req: Request) {
   });
 
   // validateEvent verifies the signature, then schema-parses the payload into
-  // one of the event types this SDK version knows. Only the verification is
-  // relied on. The fields below are read from the verified body itself: the
-  // SDK has no model for some event types Polar does send (subscription.cycled,
-  // .paused, .resumed, .migrated — every renewal is a .cycled), and its Dates
-  // drop the microseconds the ordering below needs.
+  // one of the event types its parser dispatches. Only the verification is
+  // relied on. The fields below are read from the verified body itself: some
+  // event types Polar does send fail that parse with SDKValidationError, and
+  // the SDK's Dates drop the microseconds the ordering below needs. In
+  // @polar-sh/sdk 0.49.0, subscription.cycled and .migrated have no webhook
+  // payload model at all (every renewal is a .cycled); .paused and .resumed do
+  // have models (WebhookSubscriptionPausedPayload / ...ResumedPayload) but
+  // validateEvent's parser has no case for them, so they fail the same way.
   let sdkParsed = true;
   try {
     validateEvent(rawBody, headers, getPolarWebhookSecret());
@@ -117,11 +137,13 @@ async function handlePolarWebhook(req: Request) {
       // simply has no model for this event.
       sdkParsed = false;
     } else {
-      // A missing secret is a misconfiguration, not a bad request: 500 so it is
-      // visible and so Polar retries once the environment is fixed. Reported:
-      // until it is fixed no subscription change reaches any org's plan.
+      // Not a bad signature (that is the 403 above) and the secret is set, so
+      // nothing a stranger can cause: a body that checked out against our
+      // secret but is not JSON, or the SDK failing in a way it never has.
+      // 500 so Polar retries, and reported, since no event lands until it is
+      // understood.
       reportError('webhook.polar', err, { step: 'validate' });
-      return NextResponse.json({ error: 'Webhook not configured' }, { status: 500 });
+      return NextResponse.json({ error: 'Could not verify the event' }, { status: 500 });
     }
   }
 
