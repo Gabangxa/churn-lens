@@ -8,6 +8,7 @@ import { legalFooterReady } from '@/lib/legal';
 import { currentLegalDocsVersion } from '@/lib/legal-version';
 import { countFreeTierSurveys, surveySendStatus } from '@/lib/survey-status';
 import { loadSurveyPresentation } from '@/lib/survey-config';
+import { reportError } from '@/lib/report-error';
 import type { SurveySendStatus } from '@/lib/survey-status';
 import Wordmark from '@/components/Wordmark';
 import ThemeToggle from '@/components/ThemeToggle';
@@ -221,14 +222,37 @@ function SendStatusLine({ status }: { status: SurveySendStatus }) {
 }
 
 export default async function DashboardPage() {
-  const orgId = await getOrgIdFromCookieStore(cookies());
+  // Outside the try: during `next build` cookies() throws Next's own
+  // dynamic-rendering signal, which must reach Next untouched and unreported.
+  const cookieStore = cookies();
+
+  // A failed load is reported, then rethrown so Next still renders its error
+  // page. Next 14 logs a throw from a server component but tells nobody, so
+  // a dashboard down for every founder (a dead database, a bad query) would
+  // otherwise go unnoticed until someone complained.
+  let orgId: string | null;
+  try {
+    // Reads the database too: the session check honours revocations.
+    orgId = await getOrgIdFromCookieStore(cookieStore);
+  } catch (err) {
+    reportError('dashboard.load', err, { step: 'session' });
+    throw err;
+  }
   // Not /onboarding: onboarding now requires a session too (it no longer
   // creates one), so an unauthenticated visitor goes to /login, which carries
-  // them back here once they've signed in or signed up.
+  // them back here once they've signed in or signed up. Outside any try:
+  // redirect() works by throwing.
   if (!orgId) redirect('/login?next=/dashboard');
 
+  let data: Awaited<ReturnType<typeof getDashboardData>>;
+  try {
+    data = await getDashboardData(orgId);
+  } catch (err) {
+    reportError('dashboard.load', err, { orgId, step: 'data' });
+    throw err;
+  }
   const { themes, responses, latestWeek, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending, plan, sendStatus, legalAcceptedVersion, businessNamed } =
-    await getDashboardData(orgId);
+    data;
   // /api/themes only clusters paid orgs, so a free org must not be told themes are on their way.
   const themesIncluded = plan !== 'free';
 

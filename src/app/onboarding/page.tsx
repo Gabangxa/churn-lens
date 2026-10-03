@@ -1,6 +1,7 @@
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { getOrgIdFromCookieStore } from '@/lib/auth';
+import { reportError } from '@/lib/report-error';
 import OnboardingForm from './OnboardingForm';
 
 const ALLOWED_PLANS = new Set(['starter', 'growth']);
@@ -18,7 +19,21 @@ export default async function OnboardingPage({
 }: {
   searchParams: { plan?: string | string[] };
 }) {
-  const orgId = await getOrgIdFromCookieStore(cookies());
+  // Outside the try: during `next build` cookies() throws Next's own
+  // dynamic-rendering signal, which must reach Next untouched and unreported.
+  const cookieStore = cookies();
+  let orgId: string | null;
+  try {
+    // Reads the database (the session check honours revocations). A failure
+    // is reported, then rethrown so Next still renders its error page: Next
+    // 14 logs a throw from a server component but tells nobody, and a dead
+    // onboarding page stops every new founder.
+    orgId = await getOrgIdFromCookieStore(cookieStore);
+  } catch (err) {
+    reportError('onboarding.load', err, { step: 'session' });
+    throw err;
+  }
+  // Outside the try: redirect() works by throwing.
   if (!orgId) {
     // Next.js parses a repeated query param (?plan=a&plan=b) as string[], not
     // string — take the first value if so, rather than crashing on `plan ?
