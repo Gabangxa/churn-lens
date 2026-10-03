@@ -67,9 +67,16 @@ function parseThemes(raw: string, batchSize: number): ThemeCluster[] {
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
-    throw new Error(
-      `OpenAI returned unparseable JSON for theme clustering: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    // A fixed message, never JSON.parse's own: on Node 22 that quotes the
+    // first ~10 characters of the reply ("Unexpected token 'S', "Sorry, I
+    // c"... is not valid JSON"), and the model's reply quotes churned
+    // customers' answers verbatim. The cron route reports this error, so its
+    // message lands in the logs and the alert inbox. The length and the
+    // numeric position are enough to tell a truncated reply from a refusal.
+    // No `cause` either, for the same reason.
+    const position = err instanceof Error ? /\bposition (\d+)/.exec(err.message)?.[1] : undefined;
+    const where = position === undefined ? '' : `, error at position ${position}`;
+    throw new Error(`OpenAI returned unparseable JSON for theme clustering (${raw.length} chars${where})`);
   }
 
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {

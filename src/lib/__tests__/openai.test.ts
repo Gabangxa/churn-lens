@@ -266,6 +266,37 @@ describe('clusterResponses — malformed model output never becomes themes', () 
     expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/malformed/i));
   });
 
+  describe('unparseable output', () => {
+    // The model echoes customer answers verbatim, and Node 22's JSON.parse
+    // quotes the start of whatever it failed on ("Unexpected token 'S',
+    // "Sorry, I c"... is not valid JSON"). The cron route reports this error,
+    // so its message goes to the logs and the alert inbox.
+    it('says only how long the reply was, never what it said', async () => {
+      const reply = 'Sorry jane, I cannot cluster "the export kept failing"';
+      modelReplies(reply);
+
+      const failure = await clusterResponses(makeResponses(10)).catch((err: unknown) => err);
+
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toBe(
+        `OpenAI returned unparseable JSON for theme clustering (${reply.length} chars)`,
+      );
+      expect((failure as Error).cause).toBeUndefined();
+    });
+
+    it('keeps the numeric position of a mid-reply syntax error, without the text around it', async () => {
+      const reply = '{"themes": [{"label": "Price", "quotes": ["the export kept failing"] "count": 2}]}';
+      modelReplies(reply);
+
+      const failure = (await clusterResponses(makeResponses(10)).catch((err: unknown) => err)) as Error;
+
+      expect(failure.message).toMatch(
+        new RegExp(`^OpenAI returned unparseable JSON for theme clustering \\(${reply.length} chars, error at position \\d+\\)$`),
+      );
+      expect(failure.message).not.toContain('export');
+    });
+  });
+
   it('returns an empty list, without warning, when the model reports no themes', async () => {
     modelRepliesWithThemes([]);
 
