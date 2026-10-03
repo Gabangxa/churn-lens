@@ -566,7 +566,49 @@ suite('POST /api/webhooks/polar against a real database', () => {
 
       await deliver(org, SUB_B, active(aug(11)));
 
+      // The pointer stays on the unledgered subscription: moving it to B is
+      // what used to end the hold, so B ending later dropped the org to free.
+      expect(await billing(org)).toMatchObject({ plan: 'growth', polar_subscription_id: LEGACY.id });
+      expect(getErrorReportSnapshot().totalReported).toBe(0);
+    });
+
+    it.each([
+      ['the same tier', 'growth'],
+      ['a higher tier', 'starter'],
+    ] as const)(
+      'keeps holding after another subscription grants %s and then ends',
+      async (_label, legacyPlan) => {
+        // The unledgered subscription may still be paying when B ends. Formerly
+        // B's grant took the pointer, B's revoke then saw no unledgered pointer,
+        // and the org dropped to free with nothing reported.
+        const org = await seedUnledgeredOrg(legacyPlan);
+        await deliver(org, SUB_B, active(aug(11)));
+
+        const res = await deliver(org, SUB_B, revoked(aug(20)));
+
+        // Held at the plan the org had: the recompute cannot tell which tier
+        // the unledgered subscription pays for, only that it must not lower it.
+        expect(res.body).toEqual({ received: true, orgId: org, plan: 'growth' });
+        expect(await billing(org)).toMatchObject({ plan: 'growth', polar_subscription_id: LEGACY.id });
+        expect(getErrorReportSnapshot().recent).toEqual([
+          expect.objectContaining({
+            context: 'billing.recompute',
+            meta: { orgId: org, subscriptionId: LEGACY.id, step: 'missing_ledger_row' },
+          }),
+        ]);
+      },
+    );
+
+    it('lets the pointer move on once that subscription’s own event lands, ending the hold', async () => {
+      const org = await seedUnledgeredOrg('starter');
+      await deliver(org, SUB_B, active(aug(11)));
+
+      await deliver(org, LEGACY, revoked(aug(12)));
       expect(await billing(org)).toMatchObject({ plan: 'growth', polar_subscription_id: SUB_B.id });
+
+      const res = await deliver(org, SUB_B, revoked(aug(20)));
+
+      expect(res.body).toEqual({ received: true, orgId: org, plan: 'free' });
       expect(getErrorReportSnapshot().totalReported).toBe(0);
     });
 
@@ -584,7 +626,9 @@ suite('POST /api/webhooks/polar against a real database', () => {
 
       await deliver(org, SUB_A, active(aug(5)));
 
-      expect(await billing(org)).toMatchObject({ plan: 'starter', polar_subscription_id: SUB_A.id });
+      // The pointer stays put here too: free is only what an older build last
+      // wrote, not proof that the unledgered subscription has ended.
+      expect(await billing(org)).toMatchObject({ plan: 'starter', polar_subscription_id: LEGACY.id });
       expect(getErrorReportSnapshot().totalReported).toBe(0);
     });
   });

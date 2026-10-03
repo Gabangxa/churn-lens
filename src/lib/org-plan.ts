@@ -65,9 +65,13 @@ export interface RecomputedPlan {
  * the ledger) was live, and the recompute cannot see what that subscription
  * is doing. So it never lowers the plan below its current value while that
  * is so: the plan and the pointer are left as they are and the operator is
- * told to resync. Raising the plan is still fine. The hold ends once an
- * event for that subscription is recorded (the ledger upsert inserts any
- * event for an id it has no row for) or the row is added by hand.
+ * told to resync. Raising the plan is still fine, but the pointer stays on
+ * the unledgered subscription even then: the pointer is the only record that
+ * the hold applies, so moving it to the subscription that raised the plan
+ * would let that one's revoke drop an org that may still be paying to free,
+ * with nothing reported. The hold ends once an event for that subscription
+ * is recorded (the ledger upsert inserts any event for an id it has no row
+ * for) or the row is added by hand.
  *
  * Must run inside the caller's transaction, after lockOrganization.
  */
@@ -115,6 +119,8 @@ export async function recomputeOrgPlan(client: PoolClient, orgId: string): Promi
   }
 
   const plan = derived;
+  // Unledgered: kept where it is (see above), even though the plan may rise.
+  const nextPointer = unledgered ? pointer : (best?.subscriptionId ?? rows[0]?.id ?? null);
 
   const updated = await client.query<{ polar_subscription_id: string | null }>(
     `UPDATE organizations
@@ -122,7 +128,7 @@ export async function recomputeOrgPlan(client: PoolClient, orgId: string): Promi
          polar_subscription_id = COALESCE($3, polar_subscription_id)
      WHERE id = $1
      RETURNING polar_subscription_id`,
-    [orgId, plan, best?.subscriptionId ?? rows[0]?.id ?? null],
+    [orgId, plan, nextPointer],
   );
 
   return { plan, polarSubscriptionId: updated.rows[0]?.polar_subscription_id ?? null };
