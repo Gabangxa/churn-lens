@@ -33,10 +33,14 @@ vi.mock('@/lib/db', () => ({
 
 import { POST } from '../route';
 import { setOrgCookie } from '@/lib/auth';
-import { LEGAL_DOCS_VERSION } from '@/lib/legal-version';
+import { LEGAL_DOCS_VERSION, currentLegalDocsVersion } from '@/lib/legal-version';
+import { hasUnfilledPlaceholders } from '@/lib/legal';
 
 const COOKIE_NAME = 'churnlens_org_id';
 const OLD_VERSION = '2000-01-01';
+// What the banner sends and the route records: LEGAL_DOCS_VERSION, labelled
+// '-draft' while legal.ts still has placeholders.
+const CURRENT_VERSION = currentLegalDocsVersion();
 
 function signedCookieFor(orgId: string): string {
   const carrier = NextResponse.next();
@@ -57,7 +61,7 @@ function acceptRequest(opts: {
       ...(opts.orgId ? { cookie: `${COOKIE_NAME}=${signedCookieFor(opts.orgId)}` } : {}),
       ...opts.headers,
     },
-    body: opts.rawBody ?? JSON.stringify(opts.body ?? { acceptedLegalVersion: LEGAL_DOCS_VERSION }),
+    body: opts.rawBody ?? JSON.stringify(opts.body ?? { acceptedLegalVersion: CURRENT_VERSION }),
   });
 }
 
@@ -173,7 +177,7 @@ suite('POST /api/legal/accept against a real database', () => {
       );
 
       expect(res.status).toBe(200);
-      expect((await readAcceptance(orgId)).legal_accepted_version).toBe(LEGAL_DOCS_VERSION);
+      expect((await readAcceptance(orgId)).legal_accepted_version).toBe(CURRENT_VERSION);
     });
 
     it('a session the org has since signed out everywhere is a 401 and nothing is written', async () => {
@@ -233,6 +237,32 @@ suite('POST /api/legal/accept against a real database', () => {
       });
     });
 
+    // Only meaningful while legal.ts is unfilled, which legal.test.ts pins as
+    // today's state; once it is filled there is no draft left to mislabel.
+    (hasUnfilledPlaceholders() ? it : it.skip)(
+      'records an acceptance of the draft documents as a draft, never as the finished version',
+      async () => {
+        // The pages carry "Draft — do not rely on it". Recorded as the bare
+        // LEGAL_DOCS_VERSION, these acceptances would silently become
+        // acceptances of the final contract the day legal.ts is filled in.
+        const orgId = await seedOrg();
+
+        const bare = await POST(
+          acceptRequest({ orgId, body: { acceptedLegalVersion: LEGAL_DOCS_VERSION } }),
+        );
+        expect(bare.status).toBe(400);
+        expect(await readAcceptance(orgId)).toEqual(NOTHING_RECORDED);
+
+        const draft = await POST(
+          acceptRequest({ orgId, body: { acceptedLegalVersion: `${LEGAL_DOCS_VERSION}-draft` } }),
+        );
+        expect(draft.status).toBe(200);
+        expect((await readAcceptance(orgId)).legal_accepted_version).toBe(
+          `${LEGAL_DOCS_VERSION}-draft`,
+        );
+      },
+    );
+
     it('answers 400 for a body that is not JSON', async () => {
       const orgId = await seedOrg();
 
@@ -252,7 +282,7 @@ suite('POST /api/legal/accept against a real database', () => {
         acceptRequest({
           orgId,
           body: {
-            acceptedLegalVersion: LEGAL_DOCS_VERSION,
+            acceptedLegalVersion: CURRENT_VERSION,
             acceptedAt: '1999-01-01T00:00:00.000Z',
             legalAcceptedAt: '1999-01-01T00:00:00.000Z',
           },
@@ -262,12 +292,12 @@ suite('POST /api/legal/accept against a real database', () => {
 
       expect(res.status).toBe(200);
       const recorded = await readAcceptance(orgId);
-      expect(recorded.legal_accepted_version).toBe(LEGAL_DOCS_VERSION);
+      expect(recorded.legal_accepted_version).toBe(CURRENT_VERSION);
       expect(recorded.legal_accepted_at!.getTime()).toBeGreaterThanOrEqual(before.getTime());
       expect(recorded.legal_accepted_at!.getTime()).toBeLessThanOrEqual(after.getTime());
       expect(await res.json()).toEqual({
         ok: true,
-        version: LEGAL_DOCS_VERSION,
+        version: CURRENT_VERSION,
         acceptedAt: recorded.legal_accepted_at!.toISOString(),
       });
     });
@@ -288,14 +318,14 @@ suite('POST /api/legal/accept against a real database', () => {
 
     it('keeps an earlier acceptance of the current version untouched', async () => {
       const firstAcceptedAt = new Date('2026-01-15T09:30:00Z');
-      const orgId = await seedOrg({ version: LEGAL_DOCS_VERSION, acceptedAt: firstAcceptedAt });
+      const orgId = await seedOrg({ version: CURRENT_VERSION, acceptedAt: firstAcceptedAt });
 
       const res = await POST(acceptRequest({ orgId }));
 
       expect(res.status).toBe(200);
       expect(await readAcceptance(orgId)).toEqual({
         legal_accepted_at: firstAcceptedAt,
-        legal_accepted_version: LEGAL_DOCS_VERSION,
+        legal_accepted_version: CURRENT_VERSION,
       });
     });
 
@@ -307,7 +337,7 @@ suite('POST /api/legal/accept against a real database', () => {
 
       expect(res.status).toBe(200);
       const recorded = await readAcceptance(orgId);
-      expect(recorded.legal_accepted_version).toBe(LEGAL_DOCS_VERSION);
+      expect(recorded.legal_accepted_version).toBe(CURRENT_VERSION);
       expect(recorded.legal_accepted_at!.getTime()).toBeGreaterThanOrEqual(before.getTime());
     });
 
@@ -317,7 +347,7 @@ suite('POST /api/legal/accept against a real database', () => {
 
       await POST(acceptRequest({ orgId: mine }));
 
-      expect((await readAcceptance(mine)).legal_accepted_version).toBe(LEGAL_DOCS_VERSION);
+      expect((await readAcceptance(mine)).legal_accepted_version).toBe(CURRENT_VERSION);
       expect(await readAcceptance(someoneElse)).toEqual(NOTHING_RECORDED);
     });
 
@@ -328,7 +358,7 @@ suite('POST /api/legal/accept against a real database', () => {
       await expect(
         pool().query(
           `INSERT INTO organizations (name, legal_accepted_version) VALUES ('half', $1)`,
-          [LEGAL_DOCS_VERSION],
+          [CURRENT_VERSION],
         ),
       ).rejects.toMatchObject({ code: '23514' });
       await expect(

@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useState, FormEvent, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Wordmark from '@/components/Wordmark';
-import { LEGAL_DOCS_VERSION } from '@/lib/legal-version';
+import { currentLegalDocsVersion } from '@/lib/legal-version';
 
 // Account-takeover fix: this form no longer collects an email or creates an
 // org/user. A session (from /api/auth/verify) is required to even reach this
@@ -54,7 +54,7 @@ function OnboardingFormInner() {
         // across a Terms/DPA update cannot agree to text it never showed.
         body: JSON.stringify({
           apiKey,
-          ...(acceptedLegal ? { acceptedLegalVersion: LEGAL_DOCS_VERSION } : {}),
+          ...(acceptedLegal ? { acceptedLegalVersion: currentLegalDocsVersion() } : {}),
         }),
       });
       const data = await res.json();

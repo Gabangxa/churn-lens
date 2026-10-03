@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryOne } from '@/lib/db';
 import { assertSameOrigin, requireOrgId, clearOrgCookie } from '@/lib/auth';
-import { LEGAL_DOCS_VERSION } from '@/lib/legal-version';
+import { currentLegalDocsVersion } from '@/lib/legal-version';
 import { reportError } from '@/lib/report-error';
 
 /**
@@ -10,7 +10,8 @@ import { reportError } from '@/lib/report-error';
  *
  * New orgs accept at connect (/api/onboarding/connect). This route covers
  * everyone else: the orgs that connected before acceptance was recorded at
- * all, and every org after LEGAL_DOCS_VERSION is bumped. It records and
+ * all, and every org after the current version changes (a LEGAL_DOCS_VERSION
+ * bump, or legal.ts losing its placeholders). It records and
  * nothing more — no feature is gated on acceptance here or anywhere else yet,
  * pending legal advice on whether to.
  *
@@ -37,9 +38,10 @@ export async function POST(req: NextRequest) {
   }
 
   // The banner sends the version it was rendered with. One rendered before a
-  // version bump showed links to documents that have since changed, so it is
+  // version change showed links to documents that have since changed, so it is
   // told to reload rather than recorded as agreeing to the new text.
-  if (acceptedLegalVersion !== LEGAL_DOCS_VERSION) {
+  const currentVersion = currentLegalDocsVersion();
+  if (acceptedLegalVersion !== currentVersion) {
     const error =
       typeof acceptedLegalVersion === 'string' && acceptedLegalVersion !== ''
         ? 'The Terms of Service or Data Processing Agreement changed after this page loaded. Reload the page to review and accept the current version.'
@@ -62,7 +64,7 @@ export async function POST(req: NextRequest) {
            legal_accepted_version = $1
        WHERE id = $2
        RETURNING legal_accepted_at, legal_accepted_version`,
-      [LEGAL_DOCS_VERSION, orgId],
+      [currentVersion, orgId],
     );
 
     if (!org) {

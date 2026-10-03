@@ -3,12 +3,12 @@
 import Link from 'next/link';
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { LEGAL_DOCS_VERSION } from '@/lib/legal-version';
+import { currentLegalDocsVersion } from '@/lib/legal-version';
 
 /**
  * Asks an org with no acceptance of the current Terms/DPA on record to accept
  * them: the orgs that connected before acceptance was recorded, and every org
- * after LEGAL_DOCS_VERSION is bumped. Rendered by the dashboard only when
+ * after currentLegalDocsVersion() changes. Rendered by the dashboard only when
  * needed; it blocks nothing.
  *
  * The copy only says what is factually the case and links the documents — it
@@ -29,7 +29,7 @@ export default function LegalAcceptanceBanner({ previouslyAccepted }: { previous
         headers: { 'Content-Type': 'application/json' },
         // The version this banner was built with, so a banner left open across
         // a document update is refused rather than recorded against new text.
-        body: JSON.stringify({ acceptedLegalVersion: LEGAL_DOCS_VERSION }),
+        body: JSON.stringify({ acceptedLegalVersion: currentLegalDocsVersion() }),
       });
       if (res.status === 401) {
         router.push('/login?next=/dashboard');

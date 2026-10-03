@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 // Pure module (no next/, no db) — safe to import into a Playwright process.
 import { legalFooterReady } from '../src/lib/legal';
-import { LEGAL_DOCS_VERSION } from '../src/lib/legal-version';
+import { currentLegalDocsVersion } from '../src/lib/legal-version';
 import { closeDb, daysAgo, query, queryOne, seedOrg, seedSurveyResponse, uniqueEmail } from './helpers/db';
 import { loginAs } from './helpers/session';
 
@@ -85,7 +85,7 @@ test.describe('dashboard status', () => {
       'SELECT legal_accepted_version, legal_accepted_at FROM organizations WHERE id = $1',
       [orgId],
     );
-    expect(org!.legal_accepted_version).toBe(LEGAL_DOCS_VERSION);
+    expect(org!.legal_accepted_version).toBe(currentLegalDocsVersion());
     expect(org!.legal_accepted_at).not.toBeNull();
 
     // Recorded, not merely hidden: a fresh load does not ask again.
