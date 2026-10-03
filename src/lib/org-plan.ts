@@ -1,5 +1,6 @@
 import type { PoolClient } from 'pg';
 import { entitlementForStatus, planForProduct, type Plan } from '@/lib/plan';
+import { reportError } from '@/lib/report-error';
 
 /**
  * Where organizations.plan comes from.
@@ -58,14 +59,26 @@ export interface RecomputedPlan {
  * the plan follows; it marks that the org has touched Polar (the purge's
  * abandoned-signup check) and keeps the old code sane after a rollback.
  *
+ * One exception: polar_subscription_id naming a subscription with no ledger
+ * row. That org went paid before polar_subscriptions existed, or while a
+ * rollback to the watermark code (which writes the plan and the pointer, not
+ * the ledger) was live, and the recompute cannot see what that subscription
+ * is doing. So it never lowers the plan below its current value while that
+ * is so: the plan and the pointer are left as they are and the operator is
+ * told to resync. Raising the plan is still fine. The hold ends once an
+ * event for that subscription is recorded (the ledger upsert inserts any
+ * event for an id it has no row for) or the row is added by hand.
+ *
  * Must run inside the caller's transaction, after lockOrganization.
  */
 export async function recomputeOrgPlan(client: PoolClient, orgId: string): Promise<RecomputedPlan> {
-  const org = await client.query<{ comp_plan: CompPlan | null }>(
-    `SELECT comp_plan FROM organizations WHERE id = $1`,
+  const org = await client.query<{ comp_plan: CompPlan | null; plan: Plan; polar_subscription_id: string | null }>(
+    `SELECT comp_plan, plan, polar_subscription_id FROM organizations WHERE id = $1`,
     [orgId],
   );
   const compPlan = org.rows[0]?.comp_plan ?? null;
+  const currentPlan = org.rows[0]?.plan ?? 'free';
+  const pointer = org.rows[0]?.polar_subscription_id ?? null;
 
   // Newest first, so among equal tiers the most recently modified one wins
   // the pointer, and an org with nothing granting points at its latest.
@@ -84,7 +97,24 @@ export async function recomputeOrgPlan(client: PoolClient, orgId: string): Promi
     if (!best || TIER_RANK[tier] > TIER_RANK[best.tier]) best = { tier, subscriptionId: row.id };
   }
 
-  const plan = higher(compPlan ?? 'free', best?.tier ?? 'free');
+  const derived = higher(compPlan ?? 'free', best?.tier ?? 'free');
+
+  const unledgered = pointer !== null && !rows.some((row) => row.id === pointer);
+  if (unledgered && TIER_RANK[derived] < TIER_RANK[currentPlan]) {
+    reportError(
+      'billing.recompute',
+      new Error(
+        `Polar subscription ${pointer} (organizations.polar_subscription_id) has no row in ` +
+          `polar_subscriptions, so the recompute cannot see it. Kept plan ${currentPlan} instead of ` +
+          `lowering it to ${derived}; it stays held until an event for that subscription is recorded ` +
+          'or its row is added by hand.',
+      ),
+      { orgId, subscriptionId: pointer, step: 'missing_ledger_row' },
+    );
+    return { plan: currentPlan, polarSubscriptionId: pointer };
+  }
+
+  const plan = derived;
 
   const updated = await client.query<{ polar_subscription_id: string | null }>(
     `UPDATE organizations

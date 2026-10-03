@@ -524,6 +524,71 @@ suite('POST /api/webhooks/polar against a real database', () => {
     });
   });
 
+  describe('an org whose subscription is not in the ledger', () => {
+    // Paid before polar_subscriptions existed, or during a rollback to the
+    // watermark code, which writes the plan and the pointer but no ledger row.
+    // The recompute cannot see that subscription, so it must not take away
+    // what it may still be paying for.
+    const LEGACY = { id: 'sub_legacy', productId: GROWTH, createdAt: aug(1) };
+
+    async function seedUnledgeredOrg(plan: 'free' | 'starter' | 'growth'): Promise<string> {
+      const { rows } = await pool().query(
+        `INSERT INTO organizations (name, plan, polar_subscription_id)
+         VALUES ('polar-db-suite', $1, $2) RETURNING id`,
+        [plan, LEGACY.id],
+      );
+      return rows[0].id as string;
+    }
+
+    it('keeps a paid plan another subscription’s event would lower, and reports it for a resync', async () => {
+      const org = await seedUnledgeredOrg('growth');
+
+      const res = await deliver(org, SUB_A, revoked(aug(5)));
+
+      expect(res.body).toEqual({ received: true, orgId: org, plan: 'growth' });
+      // The pointer stays on the unledgered subscription, so the next
+      // recompute is held up the same way until it is resynced.
+      expect(await billing(org)).toMatchObject({ plan: 'growth', polar_subscription_id: LEGACY.id });
+      expect(getErrorReportSnapshot().recent).toEqual([
+        expect.objectContaining({
+          context: 'billing.recompute',
+          meta: { orgId: org, subscriptionId: LEGACY.id, step: 'missing_ledger_row' },
+        }),
+      ]);
+
+      await deliver(org, SUB_A, { type: 'subscription.updated', status: 'canceled', modifiedAt: aug(6) });
+
+      expect(await billing(org)).toMatchObject({ plan: 'growth', polar_subscription_id: LEGACY.id });
+    });
+
+    it('still raises the plan, without a report, when the ledger grants more', async () => {
+      const org = await seedUnledgeredOrg('starter');
+
+      await deliver(org, SUB_B, active(aug(11)));
+
+      expect(await billing(org)).toMatchObject({ plan: 'growth', polar_subscription_id: SUB_B.id });
+      expect(getErrorReportSnapshot().totalReported).toBe(0);
+    });
+
+    it('recomputes normally once that subscription’s own event lands', async () => {
+      const org = await seedUnledgeredOrg('growth');
+
+      await deliver(org, LEGACY, revoked(aug(5)));
+
+      expect(await billing(org)).toMatchObject({ plan: 'free', polar_subscription_id: LEGACY.id });
+      expect(getErrorReportSnapshot().totalReported).toBe(0);
+    });
+
+    it('does not report an ex-subscriber on free starting a new subscription', async () => {
+      const org = await seedUnledgeredOrg('free');
+
+      await deliver(org, SUB_A, active(aug(5)));
+
+      expect(await billing(org)).toMatchObject({ plan: 'starter', polar_subscription_id: SUB_A.id });
+      expect(getErrorReportSnapshot().totalReported).toBe(0);
+    });
+  });
+
   describe('events the SDK cannot parse', () => {
     // validateEvent verifies the signature first and only then fails to model
     // these types (SDKValidationError). Treating that as a missing secret
