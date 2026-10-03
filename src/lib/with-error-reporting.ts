@@ -11,6 +11,14 @@ import {
 } from '@/lib/report-error';
 
 /**
+ * Marks a handler withErrorReporting returned, so the guard in
+ * src/app/api/__tests__/routes-wrapped.test.ts can check every route's
+ * exports by value, however they are written. Symbol.for, so the guard reads
+ * it without importing anything from here.
+ */
+const WRAPPED_TAG = Symbol.for('churnlens.withErrorReporting');
+
+/**
  * Wrap an App Router route handler so an exception that escapes it is
  * reported, not just logged:
  *
@@ -51,7 +59,7 @@ export function withErrorReporting<Req extends Request, Rest extends unknown[], 
   context: string,
   handler: (req: Req, ...rest: Rest) => Promise<Res>,
 ): (req: Req, ...rest: Rest) => Promise<Res | NextResponse> {
-  return async (req: Req, ...rest: Rest) => {
+  const wrapped = async (req: Req, ...rest: Rest) => {
     try {
       return await handler(req, ...rest);
     } catch (err) {
@@ -69,6 +77,10 @@ export function withErrorReporting<Req extends Request, Rest extends unknown[], 
       );
     }
   };
+  // defineProperty's default is non-enumerable, read-only: invisible to
+  // anything that spreads or serialises the handler.
+  Object.defineProperty(wrapped, WRAPPED_TAG, { value: true });
+  return wrapped;
 }
 
 function isNextControlFlow(err: unknown): boolean {
