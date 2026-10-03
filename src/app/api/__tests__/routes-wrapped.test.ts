@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { withErrorReporting } from '@/lib/with-error-reporting';
 
 /**
@@ -54,6 +54,12 @@ describe('App Router route exports', () => {
 
   it('finds the route files', () => {
     expect(files.length).toBeGreaterThan(20);
+  });
+
+  it('scans the whole app directory, not only api/', () => {
+    // Pinned because narrowing the root back to src/app/api would still pass
+    // every other test here while letting a route elsewhere ship unwrapped.
+    expect(APP_DIR).toBe(resolve(process.cwd(), 'src/app'));
   });
 
   it('wraps every exported handler in withErrorReporting', async () => {
