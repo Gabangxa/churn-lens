@@ -43,6 +43,11 @@ export interface RecomputedPlan {
   plan: Plan;
   /** The subscription the plan came from; see below. */
   polarSubscriptionId: string | null;
+  /**
+   * Set when the plan was kept above what the inputs grant, because the
+   * pointer names a subscription with no ledger row (see below). null otherwise.
+   */
+  held: 'missing_ledger_row' | null;
 }
 
 /**
@@ -64,14 +69,16 @@ export interface RecomputedPlan {
  * rollback to the watermark code (which writes the plan and the pointer, not
  * the ledger) was live, and the recompute cannot see what that subscription
  * is doing. So it never lowers the plan below its current value while that
- * is so: the plan and the pointer are left as they are and the operator is
- * told to resync. Raising the plan is still fine, but the pointer stays on
- * the unledgered subscription even then: the pointer is the only record that
- * the hold applies, so moving it to the subscription that raised the plan
- * would let that one's revoke drop an org that may still be paying to free,
- * with nothing reported. The hold ends once an event for that subscription
- * is recorded (the ledger upsert inserts any event for an id it has no row
- * for) or the row is added by hand.
+ * is so: the plan and the pointer are left as they are, the result says
+ * `held`, and the operator is told to resync. Raising the plan is still fine,
+ * but the pointer stays on the unledgered subscription even then: the pointer
+ * is the only record that the hold applies, so moving it to the subscription
+ * that raised the plan would let that one's revoke drop an org that may still
+ * be paying to free, with nothing reported. The hold ends once an event for
+ * that subscription is recorded (the ledger upsert inserts any event for an
+ * id it has no row for), its row is added by hand, or an operator clears the
+ * pointer for a subscription known to have ended (README, "Deploying
+ * fix/launch-hardening", step 4).
  *
  * Must run inside the caller's transaction, after lockOrganization.
  */
@@ -110,12 +117,13 @@ export async function recomputeOrgPlan(client: PoolClient, orgId: string): Promi
       new Error(
         `Polar subscription ${pointer} (organizations.polar_subscription_id) has no row in ` +
           `polar_subscriptions, so the recompute cannot see it. Kept plan ${currentPlan} instead of ` +
-          `lowering it to ${derived}; it stays held until an event for that subscription is recorded ` +
-          'or its row is added by hand.',
+          `lowering it to ${derived}; it stays held until an event for that subscription is recorded, ` +
+          'its row is added from Polar, or (if it has ended) the pointer is cleared — README, ' +
+          '"Deploying fix/launch-hardening", step 4.',
       ),
       { orgId, subscriptionId: pointer, step: 'missing_ledger_row' },
     );
-    return { plan: currentPlan, polarSubscriptionId: pointer };
+    return { plan: currentPlan, polarSubscriptionId: pointer, held: 'missing_ledger_row' };
   }
 
   const plan = derived;
@@ -131,5 +139,5 @@ export async function recomputeOrgPlan(client: PoolClient, orgId: string): Promi
     [orgId, plan, nextPointer],
   );
 
-  return { plan, polarSubscriptionId: updated.rows[0]?.polar_subscription_id ?? null };
+  return { plan, polarSubscriptionId: updated.rows[0]?.polar_subscription_id ?? null, held: null };
 }

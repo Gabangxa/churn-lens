@@ -39,6 +39,9 @@ vi.mock('@/lib/db', () => ({
 }));
 
 import { POST } from '../route';
+// Real: a held recompute reports. ALERT_EMAIL is pinned empty for every suite
+// (vitest.config.ts), so nothing is emailed.
+import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 
 const CRON_SECRET = 'admin-plan-db-suite-secret';
 const STARTER = 'prod_starter_admin_suite';
@@ -105,6 +108,7 @@ suite('POST /api/admin/plan against a real database', () => {
     vi.stubEnv('POLAR_PRODUCT_GROWTH', GROWTH);
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
+    resetErrorReports();
     await pool().query('TRUNCATE organizations CASCADE');
   });
 
@@ -164,6 +168,53 @@ suite('POST /api/admin/plan against a real database', () => {
     const res = await setPlan({ orgId: org, plan: 'starter' });
 
     expect(res.body).toEqual({ orgId: org, compPlan: 'starter', plan: 'starter' });
+  });
+
+  it('says the plan is held when removing a comp would lower it past an unledgered subscription', async () => {
+    // The org's pointer names a subscription that ended long ago under an
+    // older build, which wrote no ledger row. The recompute cannot see that it
+    // ended, so it will not lower the plan past it, and without `held` in the
+    // response the operator would see the comp gone and the plan unchanged.
+    const org = await seedOrg();
+    await pool().query(`UPDATE organizations SET polar_subscription_id = 'sub_legacy_ended' WHERE id = $1`, [org]);
+    await setPlan({ orgId: org, plan: 'growth' });
+
+    const res = await setPlan({ orgId: org, plan: null });
+
+    expect(res).toEqual({
+      status: 200,
+      body: { orgId: org, compPlan: null, plan: 'growth', held: 'missing_ledger_row' },
+    });
+    expect(await planOf(org)).toEqual({ plan: 'growth', comp_plan: null });
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'billing.recompute',
+        meta: { orgId: org, subscriptionId: 'sub_legacy_ended', step: 'missing_ledger_row' },
+      }),
+    ]);
+
+    // The release README documents for a subscription known to have ended.
+    await pool().query(`UPDATE organizations SET polar_subscription_id = NULL WHERE id = $1`, [org]);
+    const released = await setPlan({ orgId: org, plan: null });
+
+    expect(released.body).toEqual({ orgId: org, compPlan: null, plan: 'free' });
+  });
+
+  it('releases the hold once the subscription’s ledger row is added from Polar', async () => {
+    const org = await seedOrg();
+    await pool().query(`UPDATE organizations SET polar_subscription_id = 'sub_legacy_ended' WHERE id = $1`, [org]);
+    await setPlan({ orgId: org, plan: 'growth' });
+    expect((await setPlan({ orgId: org, plan: null })).body).toMatchObject({ held: 'missing_ledger_row' });
+
+    // The other release README documents: the row as Polar reports it.
+    await pool().query(
+      `INSERT INTO polar_subscriptions (id, org_id, status, product_id, modified_at)
+       VALUES ('sub_legacy_ended', $1, 'canceled', $2, '2026-06-01T00:00:00Z')`,
+      [org, GROWTH],
+    );
+    const released = await setPlan({ orgId: org, plan: null });
+
+    expect(released.body).toEqual({ orgId: org, compPlan: null, plan: 'free' });
   });
 
   it('returns 404 for an org that does not exist', async () => {

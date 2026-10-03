@@ -298,16 +298,53 @@ The first deploy of this branch over `main`:
 4. **Before deploying, run against production:**
 
    ```sql
-   -- Expect 0. A row is an org paid through Polar before the per-subscription ledger
-   -- existed: a recompute never lowers its plan, and reports billing.recompute when it
-   -- would have, until an event for that subscription lands in polar_subscriptions.
-   SELECT id, plan FROM organizations WHERE plan <> 'free' AND polar_subscription_id IS NOT NULL;
+   -- Expect 0. A row is an org whose Polar subscription has no row in the
+   -- per-subscription ledger (polar_subscriptions), on any plan. Before this deploy the
+   -- ledger does not exist, so that is every org with a pointer:
+   SELECT id, plan, polar_subscription_id FROM organizations WHERE polar_subscription_id IS NOT NULL;
+
+   -- The same list once the ledger exists (after this deploy, or after rolling forward
+   -- from an older build, step 8):
+   SELECT o.id, o.plan, o.polar_subscription_id FROM organizations o
+   WHERE o.polar_subscription_id IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM polar_subscriptions s WHERE s.id = o.polar_subscription_id);
 
    -- Orgs with a Stripe key but no webhook endpoint. They will show "Stripe setup is
    -- incomplete" and be sent to /onboarding on sign-in to finish connecting.
    SELECT id FROM organizations
    WHERE stripe_api_key_enc IS NOT NULL
      AND (stripe_webhook_id IS NULL OR stripe_webhook_secret_enc IS NULL);
+   ```
+
+   The recompute cannot see an unledgered subscription, so it never lowers that org's plan:
+   not below what the older build left, and not below what a comp or another subscription
+   raises it to later. When it would have, it reports `billing.recompute`
+   (`missing_ledger_row`) and `/api/admin/plan` answers `held: "missing_ledger_row"`. The
+   hold ends by itself when Polar sends an event for that subscription. To end it sooner,
+   for each listed org, either:
+
+   - add the ledger row, copying the subscription's status, product id and `modified_at`
+     from Polar (`modified_at` exactly, so Polar's later events for it still apply):
+
+     ```sql
+     INSERT INTO polar_subscriptions (id, org_id, status, product_id, modified_at)
+     VALUES ('<subscription id>', '<org id>', '<status>', '<product id>', '<modified_at>');
+     ```
+
+   - or, only for a subscription known to have ended, clear the pointer. The recompute below
+     points it at any ledgered subscription the org has; with none it stays NULL, which
+     account deletion reads as "never reached Polar", so it asks Polar for nothing to cancel.
+
+     ```sql
+     UPDATE organizations SET polar_subscription_id = NULL WHERE id = '<org id>';
+     ```
+
+   then recompute through the admin route, re-sending the org's current `comp_plan` (`null`
+   if it has none), and check the response no longer says `held`:
+
+   ```sh
+   curl -X POST "$NEXT_PUBLIC_APP_URL/api/admin/plan" -H "Authorization: Bearer $CRON_SECRET" \
+     -H 'content-type: application/json' -d '{"orgId":"<org id>","plan":null}'
    ```
 5. **If the pre-deploy migrate fails with "Gave up waiting for a table lock"**, another session
    held a lock past the 5 s `lock_timeout`. Nothing is half-applied and the old build keeps
@@ -328,7 +365,8 @@ The first deploy of this branch over `main`:
      `plan` and `polar_subscription_id` but no `polar_subscriptions` row, and writes an admin
      comp straight into `plan` rather than `comp_plan`: re-grant such comps through
      `/api/admin/plan`, and expect the `billing.recompute` report from step 4 for those
-     subscriptions.
+     subscriptions. Run step 4's ledger query after rolling forward and release each org it
+     lists as described there.
 
 ### Rolling back
 

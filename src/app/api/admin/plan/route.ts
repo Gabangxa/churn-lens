@@ -17,7 +17,9 @@ import { withErrorReporting } from '@/lib/with-error-reporting';
  * the same recompute the webhook runs (src/lib/org-plan.ts): the org gets the
  * higher of its comp and what its subscriptions pay for. So `plan: 'free'`
  * (or null) removes the comp — it does not take a paying org off the plan its
- * subscription pays for. The response says which plan the org ended up on.
+ * subscription pays for. The response says which plan the org ended up on,
+ * and `held: 'missing_ledger_row'` when the recompute kept it higher than its
+ * inputs grant because the org points at a subscription with no ledger row.
  *
  * Guarded by CRON_SECRET, the same shared secret the cron routes use. That is
  * deliberate: this is an operator tool with no UI, and adding a second
@@ -76,8 +78,16 @@ async function setCompPlan(req: Request) {
     return NextResponse.json({ error: 'Organization not found' }, { status: 404 });
   }
 
-  console.log(`Comp for org ${orgId} set to ${compPlan ?? 'none'} via admin route; plan is now ${result.plan}`);
-  return NextResponse.json({ orgId, compPlan, plan: result.plan });
+  console.log(
+    `Comp for org ${orgId} set to ${compPlan ?? 'none'} via admin route; plan is now ${result.plan}` +
+      (result.held ? ` (held: ${result.held})` : ''),
+  );
+  // The operator is the one who can release a hold, so the response says so
+  // rather than leaving them to wonder why removing a comp changed nothing.
+  // How to release it: README, "Deploying fix/launch-hardening", step 4.
+  return NextResponse.json(
+    result.held ? { orgId, compPlan, plan: result.plan, held: result.held } : { orgId, compPlan, plan: result.plan },
+  );
 }
 
 export const POST = withErrorReporting('admin.plan', setCompPlan);
