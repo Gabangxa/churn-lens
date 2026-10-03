@@ -41,10 +41,12 @@ vi.mock('@/lib/db', () => ({
 }));
 
 // src/lib/legal.ts is deliberately unfilled until launch, which makes the route
-// skip everything as 'legal_footer_unfilled'. That gate has its own tests.
+// skip everything as 'legal_footer_unfilled'. Forced ready for every test
+// except the ones about that gate, which flip it.
+const legalState = vi.hoisted(() => ({ footerReady: true }));
 vi.mock('@/lib/legal', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/legal')>()),
-  legalFooterReady: () => true,
+  legalFooterReady: () => legalState.footerReady,
 }));
 
 interface CapturedEmail {
@@ -191,19 +193,29 @@ function cancelledSubscription(opts: SubscriptionOpts = {}) {
   };
 }
 
+interface DeliveryOpts {
+  type?: string;
+  /** Which mode the event comes from. Matches API_KEY (a live key) by default. */
+  livemode?: boolean;
+  /** The secret the event is signed with — the org's own unless a test forges one. */
+  secret?: string;
+}
+
 /** Delivers a correctly signed event to the route, as Stripe would. */
 async function deliver(
   orgId: string,
   subscription: ReturnType<typeof cancelledSubscription>,
-  type = 'customer.subscription.deleted',
+  opts: DeliveryOpts = {},
 ): Promise<{ status: number; body: Record<string, unknown> }> {
+  const { type = 'customer.subscription.deleted', livemode = true, secret = WEBHOOK_SECRET } = opts;
   const payload = JSON.stringify({
     id: `evt_${randomUUID()}`,
     object: 'event',
     type,
+    livemode,
     data: { object: subscription },
   });
-  const signature = Stripe.webhooks.generateTestHeaderString({ payload, secret: WEBHOOK_SECRET });
+  const signature = Stripe.webhooks.generateTestHeaderString({ payload, secret });
   const res = await POST(
     new NextRequest(`http://localhost/api/webhooks/stripe/${orgId}`, {
       method: 'POST',
@@ -287,6 +299,7 @@ suite('Stripe webhook against a real database', () => {
     // unsubscribes has no FK to organizations any more, so it needs naming.
     await pool().query('TRUNCATE organizations, unsubscribes CASCADE');
     sentEmails.length = 0;
+    legalState.footerReady = true;
     fakeStripeApi.reset(onboardingScopedKey);
     consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -310,6 +323,40 @@ suite('Stripe webhook against a real database', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].stripe_subscription_id).toBe(subscription.id);
     expect(rows[0].survey_email_sent_at).not.toBeNull();
+  });
+
+  // ─── An unfilled legal footer ─────────────────────────────────────────────
+
+  describe('while src/lib/legal.ts is unfilled', () => {
+    beforeEach(() => {
+      legalState.footerReady = false;
+      resetErrorReports();
+    });
+
+    it('answers a genuine delivery 200, records and fetches nothing, and alerts the operator', async () => {
+      const orgId = await seedOrg();
+
+      const res = await deliver(orgId, cancelledSubscription());
+
+      expect(res).toEqual({ status: 200, body: { received: true, skipped: 'legal_footer_unfilled' } });
+      expect(fakeStripeApi.requests).toEqual([]);
+      expect(await surveyRows(orgId)).toEqual([]);
+      expect(sentEmails).toEqual([]);
+      expect(getErrorReportSnapshot().recent).toEqual([
+        expect.objectContaining({ context: 'webhook.stripe', meta: { orgId, step: 'legal_footer' } }),
+      ]);
+    });
+
+    it('cannot be made to alert the operator by someone who only knows the webhook URL', async () => {
+      // The URL is not a secret (it is the org id), so the alert must need a
+      // delivery signed with the org's own webhook secret.
+      const orgId = await seedOrg();
+
+      const res = await deliver(orgId, cancelledSubscription(), { secret: 'whsec_not_this_orgs' });
+
+      expect(res.status).toBe(400);
+      expect(getErrorReportSnapshot().totalReported).toBe(0);
+    });
   });
 
   // ─── Involuntary churn ────────────────────────────────────────────────────

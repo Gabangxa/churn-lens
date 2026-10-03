@@ -161,32 +161,6 @@ export async function POST(
     return NextResponse.json({ error: 'Unknown organization' }, { status: 404 });
   }
 
-  // CAN-SPAM footer not fillable yet: refuse before anything is recorded, not
-  // just before the email is sent. Checked here — before the customer is even
-  // retrieved from Stripe, and before either survey_responses write path below
-  // (the portal-feedback insert and the email-claim insert both write real,
-  // permanent rows) — so a not-yet-configured deploy burns no claim attempt
-  // and records nothing at all. 200 so Stripe does not retry-storm the event.
-  //
-  // Reported, not just logged: while this holds every cancellation for every
-  // org is dropped, and only the operator can fix it. It runs before the
-  // signature check, so anyone holding an org's webhook URL can reach it —
-  // but only on a deploy that is already misconfigured, and the message
-  // carries no ids, so all of it is one fingerprint: at most one alert email
-  // an hour, whoever is calling.
-  if (!legalFooterReady()) {
-    reportError(
-      'webhook.stripe',
-      new Error(
-        'Survey email blocked: src/lib/legal.ts still has unfilled placeholders required for ' +
-          'the CAN-SPAM footer (LEGAL.entity / LEGAL.postalAddress). Fill them in before this ' +
-          'deploys real traffic.',
-      ),
-      { orgId: org.id, step: 'legal_footer' },
-    );
-    return NextResponse.json({ received: true, skipped: 'legal_footer_unfilled' });
-  }
-
   const webhookSecret = decryptApiKey(org.stripe_webhook_secret_enc);
 
   let event: Stripe.Event;
@@ -198,6 +172,31 @@ export async function POST(
     // a bad signature, so an alert here would be an alert anyone can trigger.
     console.error(`Webhook signature verification failed for org ${orgId}:`, err);
     return NextResponse.json({ error: 'Invalid signature' }, { status: 400 });
+  }
+
+  // CAN-SPAM footer not fillable yet: refuse before anything is recorded, not
+  // just before the email is sent. Checked here — before the customer is even
+  // retrieved from Stripe, and before either survey_responses write path below
+  // (the portal-feedback insert and the email-claim insert both write real,
+  // permanent rows) — so a not-yet-configured deploy burns no claim attempt
+  // and records nothing at all. 200 so Stripe does not retry-storm the event.
+  //
+  // Reported, not just logged: while this holds every cancellation for every
+  // org is dropped, and only the operator can fix it. Below the signature
+  // check, not above it: the webhook URL is just the org id, so above it
+  // anyone could raise this alert at will. The message carries no ids, so
+  // every org's block is one fingerprint: at most one alert email an hour.
+  if (!legalFooterReady()) {
+    reportError(
+      'webhook.stripe',
+      new Error(
+        'Survey email blocked: src/lib/legal.ts still has unfilled placeholders required for ' +
+          'the CAN-SPAM footer (LEGAL.entity / LEGAL.postalAddress). Fill them in before this ' +
+          'deploys real traffic.',
+      ),
+      { orgId: org.id, step: 'legal_footer' },
+    );
+    return NextResponse.json({ received: true, skipped: 'legal_footer_unfilled' });
   }
 
   // Deletion requested: stop collecting new PII for an account on its way out.

@@ -734,25 +734,37 @@ describe('pre-send guards', () => {
     expect(executeMock).not.toHaveBeenCalled();
   });
 
-  it('skips when the legal footer is unfilled, before the signature is even verified', async () => {
+  it('skips when the legal footer is unfilled, right after the signature is verified', async () => {
     legalFooterReadyMock.mockReturnValue(false);
 
     const res = await callPost();
 
     expect(await res.json()).toEqual({ received: true, skipped: 'legal_footer_unfilled' });
-    expect(constructEventMock).not.toHaveBeenCalled();
+    expect(constructEventMock).toHaveBeenCalledTimes(1);
     expect(customersRetrieveMock).not.toHaveBeenCalled();
     expect(sendSurveyEmailMock).not.toHaveBeenCalled();
     expect(executeMock).not.toHaveBeenCalled();
   });
+
+  it('still rejects a bad signature while the legal footer is unfilled', async () => {
+    legalFooterReadyMock.mockReturnValue(false);
+    constructEventMock.mockImplementation(() => {
+      throw new Error('No signatures found matching the expected signature for payload');
+    });
+
+    const res = await callPost();
+
+    expect(res.status).toBe(400);
+  });
 });
 
 // ─── Legal footer guard ────────────────────────────────────────────────────
-// Hoisted next to the deletion_pending check — before signature verification,
-// before the customer is retrieved, and before EITHER survey_responses write
-// path (the portal-feedback insert and the email-claim insert). Nothing is
-// recorded and no attempt is burned; a later, separate test below covers the
-// belt-and-braces catch for the (practically unreachable) case where
+// Right after signature verification (so only a genuine delivery can raise
+// the operator alert it carries) — before the deletion_pending and event-type
+// checks, before the customer is retrieved, and before EITHER survey_responses
+// write path (the portal-feedback insert and the email-claim insert). Nothing
+// is recorded and no attempt is burned; a later, separate test below covers
+// the belt-and-braces catch for the (practically unreachable) case where
 // sendSurveyEmail itself still throws LegalFooterUnfilledError.
 
 describe('when the legal footer is unfilled', () => {
@@ -786,10 +798,9 @@ describe('when the legal footer is unfilled', () => {
 
     const res = await callPost();
 
-    // Never even reaches constructEvent, so the event type is irrelevant —
-    // this pins that the check really is hoisted above it, not merely
-    // agreeing with what invoice.paid would have answered anyway.
-    expect(constructEventMock).not.toHaveBeenCalled();
+    // invoice.paid would otherwise answer a bare { received: true }: this
+    // pins that the check sits above the event-type filter, not merely
+    // agreeing with what that filter would have answered anyway.
     expect(await res.json()).toEqual({ received: true, skipped: 'legal_footer_unfilled' });
   });
 });
@@ -955,6 +966,17 @@ describe('error reporting', () => {
     const res = await callPost();
 
     expect(res.status).toBe(400);
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+  });
+
+  it('does not report the legal-footer block for a bad signature — anyone holding the URL can send one', async () => {
+    legalFooterReadyMock.mockReturnValue(false);
+    constructEventMock.mockImplementation(() => {
+      throw new Error('No signatures found matching the expected signature for payload');
+    });
+
+    await callPost();
+
     expect(getErrorReportSnapshot().totalReported).toBe(0);
   });
 
