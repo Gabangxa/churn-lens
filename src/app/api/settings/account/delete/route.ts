@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import { queryOne } from '@/lib/db';
 import { assertSameOrigin, requireOrgId, clearOrgCookie, revokeAllSessions } from '@/lib/auth';
 import { disconnectStripe } from '@/lib/stripe-disconnect';
+import type { Polar } from '@polar-sh/sdk';
+import { AlreadyCanceledSubscription } from '@polar-sh/sdk/models/errors/alreadycanceledsubscription.js';
+import { PolarError } from '@polar-sh/sdk/models/errors/polarerror.js';
+import { ResourceNotFound } from '@polar-sh/sdk/models/errors/resourcenotfound.js';
 import { getPolar } from '@/lib/polar';
 import { LEGAL } from '@/lib/legal';
 import { reportError } from '@/lib/report-error';
@@ -68,18 +72,19 @@ export async function POST(req: NextRequest) {
     stripeDisconnectFailed = true;
   }
 
+  // Only an org that has reached Polar is looked up there. Every subscription
+  // event the webhook applies sets polar_subscription_id, so a NULL means Polar
+  // has never told us of one, and asking anyway would let a Polar outage tell a
+  // founder who never paid to go cancel a subscription. (An org whose first
+  // webhook is still in flight is missed, as it always was.)
+  //
+  // Non-fatal: the account is marked for deletion and Stripe is disconnected
+  // either way. A failure is reported in the response so the UI can tell the
+  // founder to also cancel from the billing portal — otherwise Polar keeps
+  // billing a subscription we failed to revoke.
   let billing: 'revoke_failed' | undefined;
-  if (org.polar_subscription_id) {
-    try {
-      await getPolar().subscriptions.revoke({ id: org.polar_subscription_id });
-    } catch (err) {
-      // Non-fatal: the account is marked for deletion and Stripe is
-      // disconnected either way. Reported in the response so the UI can tell
-      // the founder to also cancel from the billing portal — otherwise Polar
-      // keeps billing a subscription we failed to revoke.
-      reportError('settings.account-delete', err, { orgId, step: 'polar_revoke' });
-      billing = 'revoke_failed';
-    }
+  if (org.polar_subscription_id && !(await revokeBillableSubscriptions(orgId))) {
+    billing = 'revoke_failed';
   }
 
   // When the Polar revoke failed the UI sends the founder to /api/billing/portal
@@ -125,4 +130,86 @@ export async function POST(req: NextRequest) {
     ...(sessionsRevokeFailed ? { sessions: 'revoke_failed' } : {}),
   });
   return keepSessionForBillingPortal ? response : clearOrgCookie(response);
+}
+
+/**
+ * Every Polar call here gives up after this long. The SDK sets no deadline of
+ * its own, so a stalled api.polar.sh would otherwise hold the founder's
+ * deletion request, and a Node socket, open for minutes.
+ */
+const POLAR_TIMEOUT_MS = 10_000;
+
+/**
+ * The statuses Polar can still charge a card under. The rest have ended
+ * (canceled, unpaid, incomplete_expired) or never started (incomplete), and
+ * revoking an ended one is Polar's 403 AlreadyCanceledSubscription.
+ */
+const BILLABLE_STATUSES = ['active', 'trialing', 'past_due'] as const;
+
+/**
+ * Revoke every subscription Polar could still bill this org for. Returns false
+ * when one may still be billing: the list failed, or a revoke did.
+ *
+ * Asks Polar rather than following organizations.polar_subscription_id. That
+ * pointer names the org's latest subscription, which for an ex-subscriber is
+ * one that has already ended — revoking it was a 403, reported as a failure
+ * that kept the founder signed in everywhere and told them to cancel a
+ * subscription that no longer exists — and an org can hold more than one.
+ */
+async function revokeBillableSubscriptions(orgId: string): Promise<boolean> {
+  let polar: Polar;
+  const billable: string[] = [];
+  try {
+    polar = getPolar();
+    const pages = await polar.subscriptions.list(
+      { externalCustomerId: orgId, status: [...BILLABLE_STATUSES], limit: 100 },
+      { timeoutMs: POLAR_TIMEOUT_MS },
+    );
+    // Every page is read before anything is revoked: a revoked subscription
+    // drops out of this status filter, which would shift any later page past
+    // rows it had not yet returned.
+    for await (const page of pages) {
+      for (const subscription of page.result.items) billable.push(subscription.id);
+    }
+  } catch (err) {
+    reportError('settings.account-delete', describePolarFailure('subscriptions.list', err), {
+      orgId,
+      step: 'polar_list',
+    });
+    return false;
+  }
+
+  // Each one is attempted even after another fails: one fewer subscription
+  // billing the founder is worth having whatever happens to the rest.
+  let allRevoked = true;
+  for (const subscriptionId of billable) {
+    try {
+      await polar.subscriptions.revoke({ id: subscriptionId }, { timeoutMs: POLAR_TIMEOUT_MS });
+    } catch (err) {
+      // Already over (the period ran out, or the founder cancelled in the
+      // portal a moment ago) or gone: either way it bills nobody, which is
+      // what this was for.
+      if (err instanceof AlreadyCanceledSubscription || err instanceof ResourceNotFound) continue;
+      reportError('settings.account-delete', describePolarFailure('subscriptions.revoke', err), {
+        orgId,
+        subscriptionId,
+        step: 'polar_revoke',
+      });
+      allRevoked = false;
+    }
+  }
+  return allRevoked;
+}
+
+/**
+ * A PolarError's message carries Polar's response body, which is Polar's
+ * customer data rather than ours to forward into logs and alert email; its
+ * class and status say what went wrong. Anything else (a timeout, a refused
+ * connection, the missing-token error) is from our side and kept whole.
+ */
+function describePolarFailure(call: string, err: unknown): unknown {
+  if (err instanceof PolarError) {
+    return new Error(`Polar ${call} failed: ${err.name} (status ${err.statusCode})`);
+  }
+  return err;
 }
