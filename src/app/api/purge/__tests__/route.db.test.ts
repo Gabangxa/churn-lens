@@ -24,8 +24,8 @@ import { assertThrowawayDatabase } from '../../../../../e2e/helpers/throwaway-db
  *   TEST_DATABASE_URL='postgresql://postgres:pw@127.0.0.1:55432/churnlens_test' \
  *     npx vitest run src/app/api/purge
  *
- * It TRUNCATEs organizations, unsubscribes and cron_runs between tests. Never point it at
- * a database you care about.
+ * It TRUNCATEs organizations, unsubscribes, cron_runs and users_dedupe_backup between
+ * tests. Never point it at a database you care about.
  */
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 
@@ -78,6 +78,7 @@ interface PurgeResult {
   abandonedDeleted: number;
   unsubscribesOrphaned: number;
   cronRunsPurged: number;
+  dedupeBackupsPurged: number;
   failed: string[];
 }
 
@@ -244,8 +245,9 @@ suite('POST /api/purge against a real database', () => {
     // from organizations either, and the "cron_runs history" tests below
     // write directly to it — without this it would be the one table that
     // leaks rows across test *runs* (not just across tests within a run),
-    // since nothing else in this file ever inserts into it.
-    await pool().query('TRUNCATE organizations, unsubscribes, cron_runs CASCADE');
+    // since nothing else in this file ever inserts into it. users_dedupe_backup
+    // is the same story: no org_id FK, written to directly by its own tests.
+    await pool().query('TRUNCATE organizations, unsubscribes, cron_runs, users_dedupe_backup CASCADE');
   });
 
   // ── Retention: 24 months, exactly ────────────────────────────────────────
@@ -545,6 +547,59 @@ suite('POST /api/purge against a real database', () => {
       // mocked away here, so it isn't — only the two seeded rows are real).
       expect(rows.map((r) => r.job)).toEqual(['digest']);
       expect(result.cronRunsPurged).toBe(1);
+    });
+  });
+
+  // ── users_dedupe_backup snapshots ─────────────────────────────────────────
+
+  describe('users_dedupe_backup retention', () => {
+    /**
+     * Seeds one snapshot the way scripts/migrate.js writes them: the removed
+     * users row as jsonb (email included — the reason this needs a deletion
+     * rule at all), stamped with when it was removed.
+     */
+    async function seedDedupeBackup(
+      email: string,
+      opts: { removedAgo: string; userCreatedAgo?: string },
+    ): Promise<void> {
+      await pool().query(
+        `INSERT INTO users_dedupe_backup (id, removed_at, row_data)
+         VALUES (gen_random_uuid(), now() - $2::interval,
+                 jsonb_build_object('email', $1::text, 'created_at', now() - $3::interval))`,
+        [email, opts.removedAgo, opts.userCreatedAgo ?? opts.removedAgo],
+      );
+    }
+
+    async function survivingBackups(): Promise<string[]> {
+      const { rows } = await pool().query(
+        `SELECT row_data->>'email' AS email FROM users_dedupe_backup ORDER BY 1`,
+      );
+      return rows.map((r) => r.email as string);
+    }
+
+    it('deletes snapshots removed more than 30 days ago and keeps newer ones', async () => {
+      await seedDedupeBackup('removed-29-days-ago@example.com', { removedAgo: '29 days' });
+      await seedDedupeBackup('removed-31-days-ago@example.com', { removedAgo: '31 days' });
+
+      const result = await runPurge();
+
+      expect(await survivingBackups()).toEqual(['removed-29-days-ago@example.com']);
+      expect(result.dedupeBackupsPurged).toBe(1);
+    });
+
+    it('starts the 30 days at removal, not at the removed account\'s own signup', async () => {
+      // The snapshot exists to audit or undo a dedupe, so its window runs
+      // from when the row was removed. An account that signed up long ago
+      // and was deduped yesterday still gets its full 30 days.
+      await seedDedupeBackup('old-account-deduped-yesterday@example.com', {
+        removedAgo: '1 day',
+        userCreatedAgo: '400 days',
+      });
+
+      const result = await runPurge();
+
+      expect(await survivingBackups()).toEqual(['old-account-deduped-yesterday@example.com']);
+      expect(result.dedupeBackupsPurged).toBe(0);
     });
   });
 });

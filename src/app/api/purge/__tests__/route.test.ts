@@ -328,6 +328,7 @@ describe('POST /api/purge — one broken step does not stop the others', () => {
     ['DELETE FROM organizations o', 'abandoned_signups'],
     ['DELETE FROM unsubscribes', 'orphaned_unsubscribes'],
     ['DELETE FROM cron_runs', 'cron_runs'],
+    ['DELETE FROM users_dedupe_backup', 'users_dedupe_backup'],
   ];
 
   it.each(STEPS)('names %s in `failed` as "%s"', async (needle, stepName) => {
@@ -475,6 +476,7 @@ describe('POST /api/purge — guards', () => {
       if (sql.includes('DELETE FROM organizations WHERE id')) return 1; // org-a hard-deleted
       if (sql.includes('DELETE FROM unsubscribes')) return 6;
       if (sql.includes('DELETE FROM cron_runs')) return 7;
+      if (sql.includes('DELETE FROM users_dedupe_backup')) return 8;
       return 0;
     });
 
@@ -484,7 +486,8 @@ describe('POST /api/purge — guards', () => {
       'purge',
       DATE_STR,
       // 3 + 2 + 5 + 1 org hard-deleted + 4 abandoned + 6 orphaned unsubscribes + 7 old cron_runs
-      expect.objectContaining({ status: 'succeeded', processed: 28, failed: 0 }),
+      // + 8 expired dedupe snapshots
+      expect.objectContaining({ status: 'succeeded', processed: 36, failed: 0 }),
     );
   });
 });

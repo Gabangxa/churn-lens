@@ -236,8 +236,9 @@ async function migrate() {
     // `LIKE users`: IF NOT EXISTS can never widen a table that already exists,
     // so a column-for-column clone would break `INSERT ... SELECT u.*` the day
     // users gains a column — only in production, where the table already
-    // exists at the old width. Retention: review and drop this table once the
-    // dedupe has been confirmed in production; it holds email addresses.
+    // exists at the old width. Retention: it holds email addresses, so the
+    // daily purge job (src/app/api/purge, step g) deletes each snapshot 30
+    // days after its removed_at. Audit or recover a dedupe within that window.
     await dedupeClient.query(`
       CREATE TABLE IF NOT EXISTS users_dedupe_backup (
         id uuid NOT NULL,

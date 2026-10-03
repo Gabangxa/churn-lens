@@ -43,6 +43,7 @@ export async function POST(req: Request) {
   let abandonedDeleted = 0;
   let unsubscribesOrphaned = 0;
   let cronRunsPurged = 0;
+  let dedupeBackupsPurged = 0;
   const failed: string[] = [];
 
   // (a) Survey-response retention (privacy policy s8 / DPA s9). Interval math
@@ -165,6 +166,22 @@ export async function POST(req: Request) {
     failed.push('cron_runs');
   }
 
+  // (g) users_dedupe_backup: the recoverable-delete snapshot scripts/migrate.js
+  // takes of every duplicate users row its email dedupe removes. Each row is a
+  // whole users row as jsonb — email address included — and the table has no
+  // org_id column, so no org deletion in step (c) ever reaches it; without
+  // this step it is personal data kept indefinitely with no purpose. The
+  // snapshot exists only so a dedupe can be audited or undone, and 30 days
+  // from removed_at is ample time to notice a wrong one.
+  try {
+    dedupeBackupsPurged = await execute(
+      `DELETE FROM users_dedupe_backup WHERE removed_at < now() - interval '30 days'`,
+    );
+  } catch (err) {
+    console.error(`Purge ${dateStr}: users_dedupe_backup cleanup step failed:`, err);
+    failed.push('users_dedupe_backup');
+  }
+
   const result = {
     responses,
     themes,
@@ -173,6 +190,7 @@ export async function POST(req: Request) {
     abandonedDeleted,
     unsubscribesOrphaned,
     cronRunsPurged,
+    dedupeBackupsPurged,
     failed,
   };
   console.log(`[purge] ${dateStr} →`, result);
@@ -180,7 +198,14 @@ export async function POST(req: Request) {
   await finishCronRun('purge', dateStr, {
     status: failed.length > 0 ? 'failed' : 'succeeded',
     processed:
-      responses + themes + tokens + orgsDeleted + abandonedDeleted + unsubscribesOrphaned + cronRunsPurged,
+      responses +
+      themes +
+      tokens +
+      orgsDeleted +
+      abandonedDeleted +
+      unsubscribesOrphaned +
+      cronRunsPurged +
+      dedupeBackupsPurged,
     failed: failed.length,
   });
 
