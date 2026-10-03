@@ -370,7 +370,7 @@ describe('POST /api/onboarding/connect — error reporting', () => {
   it('reports a webhook registration failure that is not the founder\'s key', async () => {
     webhookEndpointsCreateMock.mockRejectedValue(new Error('connect ETIMEDOUT'));
 
-    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY }));
+    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY, ...ACCEPTED }));
 
     expect(res.status).toBe(422);
     expect(getErrorReportSnapshot().recent).toEqual([
@@ -386,7 +386,7 @@ describe('POST /api/onboarding/connect — error reporting', () => {
       new MockAuthenticationError('Invalid API Key provided: rk_live_****c123'),
     );
 
-    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY }));
+    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY, ...ACCEPTED }));
 
     expect(res.status).toBe(422);
     expect(getErrorReportSnapshot().totalReported).toBe(0);
@@ -395,7 +395,7 @@ describe('POST /api/onboarding/connect — error reporting', () => {
   it('reports a server whose app URL cannot carry a Stripe webhook — every onboarding fails until fixed', async () => {
     process.env.NEXT_PUBLIC_APP_URL = 'http://app.churnlens.com';
 
-    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY }));
+    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY, ...ACCEPTED }));
 
     expect(res.status).toBe(500);
     expect(getErrorReportSnapshot().recent).toEqual([
@@ -406,7 +406,7 @@ describe('POST /api/onboarding/connect — error reporting', () => {
   it('reports an unexpected failure with the org id, and never the key', async () => {
     queryMock.mockRejectedValue(new Error('connection terminated'));
 
-    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY }));
+    const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY, ...ACCEPTED }));
 
     expect(res.status).toBe(500);
     const { recent } = getErrorReportSnapshot();
