@@ -140,6 +140,8 @@ export interface SurveyResponse {
   theme_tags: string[];
   surveyed_at: string | null;
   is_test: boolean;
+  /** The business name the survey email for this row carried; null for the generic copy or unrecorded. */
+  business_name: string | null;
 }
 
 export interface Theme {
