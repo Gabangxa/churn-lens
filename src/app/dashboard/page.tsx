@@ -141,12 +141,16 @@ function SendStatusLine({ status }: { status: SurveySendStatus }) {
     case 'deletion_pending':
       return <p className="text-sm font-medium text-muted">{dot('warn')} Account deletion requested — surveys have stopped.</p>;
     case 'stripe_key_invalid':
-      // /onboarding is where a key is pasted; saving one there clears this.
+      // Set for two causes — Stripe rejecting the key, and a key from another
+      // account or mode than the events — so the copy has to be true of both.
+      // /onboarding is where a key is pasted; saving one there clears this
+      // and re-registers the webhook in that key's account and mode.
       return (
         <p className="text-sm font-medium text-muted">
-          {dot('warn')} Stripe has been rejecting your API key since{' '}
-          {status.since.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} — it was
-          revoked, rolled, or lost a permission, so cancellations are not being surveyed.{' '}
+          {dot('warn')} Since{' '}
+          {status.since.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}, Stripe has
+          rejected your API key, or the key belongs to a different Stripe account or mode (test or
+          live) than your cancellations — so they are not being surveyed.{' '}
           <Link href="/onboarding" className="underline underline-offset-2 hover:text-zinc-900 dark:hover:text-white">
             Reconnect Stripe with a new key
           </Link>

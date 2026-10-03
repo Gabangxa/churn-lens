@@ -85,6 +85,48 @@ function isStripeKeyRejected(
 }
 
 /**
+ * Whether a lookup failed because the object does not exist for this key:
+ * Stripe's 404 with code resource_missing. For an id taken from a genuine,
+ * signed event, that means the stored key is for another Stripe account (or
+ * mode) than the webhook endpoint — permanent until the founder reconnects.
+ * Any other 404 (a malformed request URL) stays unexpected.
+ */
+function isStripeObjectMissing(err: unknown): boolean {
+  return err instanceof Stripe.errors.StripeInvalidRequestError && err.code === 'resource_missing';
+}
+
+/**
+ * The mode a Stripe secret or restricted key works in, read off its prefix
+ * (rk_live_…, sk_test_…), or null when the prefix does not say.
+ */
+function stripeKeyMode(apiKey: string): 'live' | 'test' | null {
+  const match = /^(?:rk|sk)_(live|test)_/.exec(apiKey);
+  if (!match) return null;
+  return match[1] === 'live' ? 'live' : 'test';
+}
+
+/**
+ * Records that the org's stored key cannot serve its webhook — Stripe
+ * rejected it, or it belongs to another account or mode than the events — so
+ * the dashboard's status line (src/lib/survey-status.ts) tells the founder to
+ * reconnect.
+ *
+ * Keyed to the exact ciphertext this request used. If the founder reconnected
+ * while the request was in flight, the row now holds a different key that
+ * nothing has faulted, and the UPDATE matches no row. IS NULL keeps the time
+ * of the FIRST problem. Not wrapped: if this write fails the error 500s, and
+ * Stripe's retry will both meet the same problem and try the flag again —
+ * the right outcome either way.
+ */
+async function flagStoredKeyUnusable(orgId: string, keyCiphertext: string): Promise<void> {
+  await execute(
+    `UPDATE organizations SET stripe_key_invalid_at = now()
+     WHERE id = $1 AND stripe_api_key_enc = $2 AND stripe_key_invalid_at IS NULL`,
+    [orgId, keyCiphertext],
+  );
+}
+
+/**
  * Normalizes one subscription item to monthly cents: an annual plan must not be
  * recorded as 12x its true MRR, and a 5-seat plan must not be recorded as 1/5.
  *
@@ -271,6 +313,29 @@ export async function POST(
   }
 
   const apiKey = decryptApiKey(org.stripe_api_key_enc);
+
+  // A live key cannot read a test-mode customer, nor the reverse, so an event
+  // from the other mode than the stored key can never be surveyed. That
+  // happens when the webhook endpoint and the key were registered in
+  // different modes (a founder who switched rk_test_ → rk_live_ before
+  // /api/onboarding/connect re-registered the endpoint on such a switch).
+  // Checked before any Stripe call: the lookup could only fail, and the
+  // failure would look transient. 200 so Stripe stops retrying; flagged so the
+  // dashboard tells the founder to reconnect, which registers an endpoint in
+  // the key's mode. A warning, not an alert: only the founder can fix it.
+  // Events always carry livemode; a key whose prefix names no mode (none is
+  // accepted by connect today) is not judged.
+  const keyMode = stripeKeyMode(apiKey);
+  if (keyMode !== null && typeof event.livemode === 'boolean' && event.livemode !== (keyMode === 'live')) {
+    await flagStoredKeyUnusable(org.id, org.stripe_api_key_enc);
+    console.warn(
+      `Org ${org.id} received a ${event.livemode ? 'live' : 'test'}-mode event but its stored Stripe key ` +
+        `is a ${keyMode}-mode key — skipping subscription ${subscription.id}; surveys are stopped until ` +
+        'the founder reconnects Stripe.',
+    );
+    return NextResponse.json({ received: true, skipped: 'stripe_mode_mismatch' });
+  }
+
   const stripeClient = new Stripe(apiKey, { apiVersion: '2024-04-10', typescript: true });
 
   let customer: Stripe.Customer | Stripe.DeletedCustomer;
@@ -282,18 +347,7 @@ export async function POST(
       // Every retry would fail identically until the founder reconnects, so
       // answer 200 to stop Stripe's days-long retry schedule, and flag the org
       // so the dashboard tells the founder why surveys stopped.
-      //
-      // The flag is keyed to the exact ciphertext this request used. If the
-      // founder reconnected while this call was in flight, the row now holds a
-      // different key that nothing has rejected, and the UPDATE matches no
-      // row. IS NULL keeps the time of the FIRST rejection. Not wrapped: if
-      // this write fails the error 500s, and Stripe's retry will both meet the
-      // same rejection and try the flag again — the right outcome either way.
-      await execute(
-        `UPDATE organizations SET stripe_key_invalid_at = now()
-         WHERE id = $1 AND stripe_api_key_enc = $2 AND stripe_key_invalid_at IS NULL`,
-        [org.id, org.stripe_api_key_enc],
-      );
+      await flagStoredKeyUnusable(org.id, org.stripe_api_key_enc);
       //
       // A warning, not an operator alert: the founder revoked or restricted
       // their own key, only they can fix it, and the flag above puts it on
@@ -306,6 +360,23 @@ export async function POST(
           `${subscription.id}; surveys are stopped until the founder reconnects Stripe.`,
       );
       return NextResponse.json({ received: true, skipped: 'stripe_key_invalid' });
+    }
+
+    if (isStripeObjectMissing(err)) {
+      // The customer id came from a signed event, so it exists — just not
+      // where this key looks: the key is for another Stripe account than the
+      // webhook endpoint (the mode check above catches the other-mode case).
+      // Permanent, and the founder's to fix, exactly like a rejected key:
+      // 200, the same flag and dashboard line, a warning rather than an
+      // alert. Treated as transient, this was a 502, three days of retries
+      // and one operator alert per customer, with nothing on the dashboard.
+      await flagStoredKeyUnusable(org.id, org.stripe_api_key_enc);
+      console.warn(
+        `Stripe has no customer visible to the stored API key for org ${org.id} — the key belongs to ` +
+          `a different Stripe account than the webhook; skipping subscription ${subscription.id}. ` +
+          'Surveys are stopped until the founder reconnects Stripe.',
+      );
+      return NextResponse.json({ received: true, skipped: 'customer_not_found' });
     }
 
     // Rate limit, Stripe 5xx, network failure: transient. Nothing has been

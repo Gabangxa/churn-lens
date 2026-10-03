@@ -642,6 +642,93 @@ suite('Stripe webhook against a real database', () => {
     });
   });
 
+  // ─── A key for a different Stripe account or mode than the events ────────
+
+  describe('when the stored key belongs to a different Stripe account or mode than the events', () => {
+    // A webhook endpoint lives in one account and one mode; the key decides
+    // whose customers can be read. A founder who reconnected with a key from
+    // another account, or switched rk_test_ → rk_live_, while the old
+    // endpoint was kept, ends up with events no lookup can ever answer.
+
+    /** What the dashboard would say for this org right now. */
+    async function dashboardStatus(orgId: string) {
+      return surveySendStatus({
+        stripeConnected: true,
+        deletionRequested: false,
+        stripeKeyInvalidSince: await keyInvalidAt(orgId),
+        legalFooterReady: true,
+        plan: 'growth',
+        surveysThisMonth: 0,
+      }).kind;
+    }
+
+    it.each([
+      ['a test-mode event for a live key', 'rk_live_db_suite_key', false],
+      ['a live event for a test-mode key', 'rk_test_db_suite_key', true],
+    ])('skips %s without calling Stripe, and flags the org for the dashboard', async (_label, apiKey, livemode) => {
+      resetErrorReports();
+      const orgId = await seedOrg({ apiKey });
+
+      const res = await deliver(orgId, cancelledSubscription(), { livemode });
+
+      // 200: every retry would meet the same mismatch.
+      expect(res).toEqual({ status: 200, body: { received: true, skipped: 'stripe_mode_mismatch' } });
+      expect(fakeStripeApi.requests).toEqual([]);
+      expect(await surveyRows(orgId)).toEqual([]);
+      expect(sentEmails).toEqual([]);
+      expect(await dashboardStatus(orgId)).toBe('stripe_key_invalid');
+      // The founder's to fix, from their dashboard — not the operator's.
+      expect(getErrorReportSnapshot().totalReported).toBe(0);
+      const warned = consoleWarnSpy.mock.calls.map((call) => call.map(String).join(' ')).join('\n');
+      expect(warned).toContain(orgId);
+      expect(warned).not.toContain(apiKey);
+    });
+
+    it('surveys a test-mode event for a test-mode key as normal', async () => {
+      const orgId = await seedOrg({ apiKey: 'rk_test_db_suite_key' });
+
+      const res = await deliver(orgId, cancelledSubscription(), { livemode: false });
+
+      expect(res.body).toEqual({ received: true });
+      expect(sentEmails).toHaveLength(1);
+      expect(await keyInvalidAt(orgId)).toBeNull();
+    });
+
+    it("answers 200 customer_not_found when the key cannot see the event's customer, and flags the org", async () => {
+      // Same mode, other account: Stripe answers 404 resource_missing. That
+      // used to be treated as transient — a 502, three days of retries, one
+      // operator alert per customer, and nothing on the founder's dashboard.
+      resetErrorReports();
+      const orgId = await seedOrg();
+      fakeStripeApi.respond = () =>
+        stripeError(404, 'invalid_request_error', `No such customer: '${CUSTOMER_ID}'`, {
+          code: 'resource_missing',
+          param: 'id',
+        });
+
+      const res = await deliver(orgId, cancelledSubscription());
+
+      expect(res).toEqual({ status: 200, body: { received: true, skipped: 'customer_not_found' } });
+      expect(await surveyRows(orgId)).toEqual([]);
+      expect(await dashboardStatus(orgId)).toBe('stripe_key_invalid');
+      expect(getErrorReportSnapshot().totalReported).toBe(0);
+      const warned = consoleWarnSpy.mock.calls.map((call) => call.map(String).join(' ')).join('\n');
+      expect(warned).toContain(orgId);
+      expect(warned).not.toContain(API_KEY);
+    });
+
+    it('still treats any other 404 from the customer lookup as unexpected', async () => {
+      // Only resource_missing says "this key cannot see that customer".
+      const orgId = await seedOrg();
+      fakeStripeApi.respond = () => stripeError(404, 'invalid_request_error', 'Unrecognized request URL.');
+
+      const res = await deliver(orgId, cancelledSubscription());
+
+      expect(res.status).toBe(502);
+      expect(await keyInvalidAt(orgId)).toBeNull();
+    });
+  });
+
   describe('when Stripe fails transiently', () => {
     it.each([
       ['rate-limits the request (429)', () => stripeError(429, 'invalid_request_error', 'Too many requests.')],

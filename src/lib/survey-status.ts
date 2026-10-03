@@ -28,8 +28,11 @@ export function surveySendStatus(input: {
   stripeConnected: boolean;
   deletionRequested: boolean;
   /**
-   * organizations.stripe_key_invalid_at: when the webhook first found Stripe
-   * rejecting the stored key (401/403), or null when no problem is known.
+   * organizations.stripe_key_invalid_at: when the webhook first found the
+   * stored key unable to serve it — Stripe rejected it (401/403), or it
+   * belongs to a different Stripe account or mode than the events
+   * ('stripe_mode_mismatch', 'customer_not_found') — or null when no problem
+   * is known.
    */
   stripeKeyInvalidSince: Date | null;
   /** legalFooterReady() from src/lib/legal — injected so this stays pure. */
@@ -42,7 +45,7 @@ export function surveySendStatus(input: {
   if (input.deletionRequested) return { kind: 'deletion_pending' };
   // Ahead of the platform pause, whose copy tells the founder nothing in their
   // setup needs fixing — untrue while their key is rejected — and of the
-  // free-tier cap, which lifts on the 1st while a rejected key stays rejected.
+  // free-tier cap, which lifts on the 1st while an unusable key stays unusable.
   // The webhook checks the key later than both, but this is the one the
   // founder has to act on.
   if (input.stripeKeyInvalidSince !== null) {

@@ -38,14 +38,15 @@ test.describe('dashboard status', () => {
   test('an org whose Stripe key was rejected is told to reconnect', async ({ page }) => {
     const email = uniqueEmail('keyrejected');
     const { orgId } = await seedOrg({ email, withStripeKey: true, withStripeWebhook: true });
-    // What the Stripe webhook records when Stripe answers 401/403 for the stored key.
+    // What the Stripe webhook records when Stripe answers 401/403 for the
+    // stored key, or the key is for another account or mode than the events.
     await query('UPDATE organizations SET stripe_key_invalid_at = now() WHERE id = $1', [orgId]);
 
     await loginAs(page, { orgId, email, redirectTo: '/dashboard' });
     await page.waitForURL((url) => url.pathname === '/dashboard');
 
     // Shown whether or not legal.ts is filled: it outranks the platform pause.
-    await expect(page.getByText(/Stripe has been rejecting your API key/)).toBeVisible();
+    await expect(page.getByText(/Stripe has rejected your API key, or the key belongs to a different Stripe account or mode/)).toBeVisible();
     await expect(page.getByRole('link', { name: 'Reconnect Stripe with a new key' })).toHaveAttribute(
       'href',
       '/onboarding',

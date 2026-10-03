@@ -94,7 +94,16 @@ export function stripeJson(status: number, body: unknown): Response {
   });
 }
 
-/** Stripe's error envelope, e.g. stripeError(401, 'invalid_request_error', 'Expired API Key provided'). */
-export function stripeError(status: number, type: string, message: string): Response {
-  return stripeJson(status, { error: { type, message } });
+/**
+ * Stripe's error envelope, e.g. stripeError(401, 'invalid_request_error', 'Expired API Key provided').
+ * `fields` adds the envelope's other members — most often `code`, which is
+ * what tells a 404 resource_missing apart from any other 404.
+ */
+export function stripeError(
+  status: number,
+  type: string,
+  message: string,
+  fields: { code?: string; param?: string } = {},
+): Response {
+  return stripeJson(status, { error: { type, message, ...fields } });
 }
