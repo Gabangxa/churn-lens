@@ -11,10 +11,17 @@ vi.mock('@/lib/auth', () => ({
 }));
 
 const queryOneMock = vi.fn();
+// Every statement the route runs on its transaction's client, answered with
+// the row count executeMock resolves to. Whether the key and the acceptance
+// really commit or roll back together is a fact about rows:
+// connect.db.test.ts and legal-acceptance.db.test.ts pin it.
 const executeMock = vi.fn();
 vi.mock('@/lib/db', () => ({
   queryOne: (...args: unknown[]) => queryOneMock(...args),
-  execute: (...args: unknown[]) => executeMock(...args),
+  withTransaction: async (fn: (client: unknown) => Promise<unknown>) =>
+    fn({
+      query: async (text: string, params?: unknown[]) => ({ rows: [], rowCount: await executeMock(text, params) }),
+    }),
 }));
 
 const encryptApiKeyMock = vi.fn();
@@ -41,7 +48,7 @@ import { POST } from '../connect/route';
 // Real: these tests assert on what the route reported. ALERT_EMAIL is pinned
 // empty for every suite (vitest.config.ts), so nothing is emailed.
 import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
-import { LEGAL_DOCS_VERSION } from '@/lib/legal-version';
+import { currentLegalDocsVersion } from '@/lib/legal-version';
 import { fakeStripeApi, stripeError, stripeJson, type FakeStripeRequest } from '@/__tests__/helpers/fake-stripe-api';
 
 const ORG_ID = 'org-abc';
@@ -50,7 +57,7 @@ const RESTRICTED_KEY = 'rk_live_abc123';
 const ORIGINAL_APP_URL = process.env.NEXT_PUBLIC_APP_URL;
 // Every connect must carry acceptance of the current Terms/DPA; what happens
 // without it is pinned against real rows in connect.db.test.ts.
-const ACCEPTED = { acceptedLegalVersion: LEGAL_DOCS_VERSION };
+const ACCEPTED = { acceptedLegalVersion: currentLegalDocsVersion() };
 
 /**
  * A key made per the onboarding instructions: the key check's customer list
@@ -175,18 +182,25 @@ describe('POST /api/onboarding/connect — requires a session', () => {
 });
 
 describe('POST /api/onboarding/connect — happy path', () => {
-  it('registers the webhook, then stores the encrypted key and endpoint in one statement, and sets no cookie', async () => {
+  it('registers the webhook, then stores the encrypted key, endpoint and acceptance in one transaction, and sets no cookie', async () => {
     const res = await POST(connectRequest({ apiKey: RESTRICTED_KEY, ...ACCEPTED }));
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ success: true });
 
     expect(registeredWebhookUrls()).toEqual([`${APP_URL}/api/webhooks/stripe/${ORG_ID}`]);
-    expect(executeMock).toHaveBeenCalledTimes(1);
-    expect(executeMock).toHaveBeenCalledWith(
+    expect(executeMock).toHaveBeenCalledTimes(2);
+    expect(executeMock).toHaveBeenNthCalledWith(
+      1,
       expect.stringMatching(/UPDATE organizations\s+SET stripe_api_key_enc = \$1,\s+stripe_webhook_id = \$2/),
       // No business name: this key may not read the account (onboardingScopedKey).
-      [`enc:${RESTRICTED_KEY}`, 'we_1', 'enc:whsec_test', null, LEGAL_DOCS_VERSION, ORG_ID],
+      [`enc:${RESTRICTED_KEY}`, 'we_1', 'enc:whsec_test', null, ORG_ID],
+    );
+    // The acceptance, recorded through the shared writer with the connect door.
+    expect(executeMock).toHaveBeenNthCalledWith(
+      2,
+      expect.stringMatching(/INSERT INTO legal_acceptances/),
+      [ORG_ID, currentLegalDocsVersion(), 'connect'],
     );
 
     // The whole point of the rewrite: this route never mints a session.
@@ -214,12 +228,11 @@ describe('POST /api/onboarding/connect — happy path', () => {
 
     expect(res.status).toBe(200);
     expect(registeredWebhookUrls()).toEqual([]);
-    expect(executeMock).toHaveBeenCalledWith(expect.any(String), [
+    expect(executeMock).toHaveBeenCalledWith(expect.stringMatching(/UPDATE organizations/), [
       `enc:${RESTRICTED_KEY}`,
       'we_existing',
       'enc:whsec_existing',
       null,
-      LEGAL_DOCS_VERSION,
       ORG_ID,
     ]);
   });

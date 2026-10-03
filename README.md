@@ -47,8 +47,11 @@ everyone else to wherever they were headed (or `/dashboard`). `/api/onboarding/c
 requires that session and only ever attaches a Stripe key to it; it can no
 longer create an org or accept an email on its own. It also refuses the key
 unless the request accepts the current Terms of Service and DPA
-(`LEGAL_DOCS_VERSION` in `src/lib/legal-version.ts`), and records that
-acceptance in the same statement that stores the key.
+(`currentLegalDocsVersion()` in `src/lib/legal-version.ts`: `LEGAL_DOCS_VERSION`,
+labelled `-draft` while `src/lib/legal.ts` has placeholders), and records that
+acceptance in the same transaction that stores the key — in `legal_acceptances`,
+which keeps every version an org has accepted, and in the
+`organizations.legal_accepted_*` columns, which hold the current one.
 
 ---
 

@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Stripe from 'stripe';
-import { execute, queryOne } from '@/lib/db';
+import { queryOne, withTransaction } from '@/lib/db';
 import { decryptApiKey, encryptApiKey } from '@/lib/crypto';
 import { assertSameOrigin, requireOrgId, clearOrgCookie } from '@/lib/auth';
 import { checkRateLimit, clientIp } from '@/lib/ratelimit';
 import { reportError } from '@/lib/report-error';
 import { fetchStripeBusinessName } from '@/lib/stripe-business-name';
-import { LEGAL_DOCS_VERSION } from '@/lib/legal-version';
+import { currentLegalDocsVersion } from '@/lib/legal-version';
+import { recordLegalAcceptance } from '@/lib/legal-acceptance';
 
 /** The Stripe calls this route makes, as named in operator reports. */
 type StripeStep = 'stripe_key_check' | 'stripe_webhook_lookup' | 'stripe_webhook';
@@ -99,10 +100,10 @@ async function deleteEndpointBestEffort(
  * only in /api/auth/request, and a session is minted only in /api/auth/verify.
  *
  * Connecting also requires accepting the current Terms of Service and Data
- * Processing Agreement (see LEGAL_DOCS_VERSION). The stored key is what starts
- * processing the org's customers' personal information on its behalf, which
- * POPIA s21 only allows under a written operator contract — so no key is
- * stored without an acceptance recorded in the same statement.
+ * Processing Agreement (currentLegalDocsVersion()). The stored key is what
+ * starts processing the org's customers' personal information on its behalf,
+ * which POPIA s21 only allows under a written operator contract — so no key is
+ * stored without an acceptance recorded in the same transaction.
  *
  * Nothing is stored until Stripe has accepted the key AND an endpoint the key
  * can see is settled. A key stored on its own — rejected by Stripe, or with
@@ -146,7 +147,7 @@ export async function POST(req: NextRequest) {
   // cannot agree to wording the founder was never shown — it gets told to
   // reload instead. Whatever else the body carries (a timestamp, say) is
   // ignored: the acceptance time below is the database's clock.
-  if (acceptedLegalVersion !== LEGAL_DOCS_VERSION) {
+  if (acceptedLegalVersion !== currentLegalDocsVersion()) {
     const error =
       typeof acceptedLegalVersion === 'string' && acceptedLegalVersion !== ''
         ? 'The Terms of Service or Data Processing Agreement changed after this page loaded. Reload the page to review and accept the current version.'
@@ -275,7 +276,7 @@ export async function POST(req: NextRequest) {
     //    connect or count against the key — it returns null instead.
     const businessName = await fetchStripeBusinessName(customerStripe, orgId);
 
-    // 4. One statement, so the row never pairs the new key with stale state:
+    // 4. One transaction, so the row never pairs the new key with stale state:
     //  - the webhook columns: the endpoint settled above, in this key's
     //    account and mode, always beside the key that can read its events.
     //  - stripe_key_invalid_at: Stripe has just accepted this key, so the
@@ -284,31 +285,33 @@ export async function POST(req: NextRequest) {
     //  - stripe_business_name: always overwritten, NULL included. The new key
     //    may belong to a different Stripe account, and surveys must not go out
     //    naming the previous one; the webhook retries the lookup lazily.
-    //  - legal_accepted_*: the Terms/DPA acceptance is written in the SAME
-    //    statement as the key, so a stored key can never exist without one
-    //    beside it, and a connect that fails records neither. now() is the
-    //    database's clock, never a client-supplied time. A re-accept of the
-    //    version already on record keeps the original time: the record should
-    //    say when the founder first agreed to this wording, and replacing a
-    //    key is not a new agreement to it. In a SET clause the right-hand
-    //    columns are the row's values BEFORE this update, and the
-    //    organizations_legal_acceptance_pair_check constraint guarantees a
-    //    matching version always has a time beside it. POST /api/legal/accept
-    //    applies the same rule.
+    //  - the Terms/DPA acceptance commits or rolls back WITH the key, so a
+    //    stored key can never exist without one beside it, and a connect that
+    //    fails records neither. recordLegalAcceptance (shared with POST
+    //    /api/legal/accept) adds the version to legal_acceptances, which keeps
+    //    every earlier version, and updates the organizations cache on the
+    //    database clock; reconnecting under the version already on record
+    //    keeps the original time, because replacing a key is not a new
+    //    agreement to the same wording.
     let updated: number;
     try {
-      updated = await execute(
-        `UPDATE organizations
-         SET stripe_api_key_enc = $1,
-             stripe_webhook_id = $2,
-             stripe_webhook_secret_enc = $3,
-             stripe_key_invalid_at = NULL,
-             stripe_business_name = $4,
-             legal_accepted_at = CASE WHEN legal_accepted_version = $5 THEN legal_accepted_at ELSE now() END,
-             legal_accepted_version = $5
-         WHERE id = $6`,
-        [encryptApiKey(apiKey), webhookId, webhookSecretEnc, businessName, LEGAL_DOCS_VERSION, orgId],
-      );
+      updated = await withTransaction(async (client) => {
+        const { rowCount } = await client.query(
+          `UPDATE organizations
+           SET stripe_api_key_enc = $1,
+               stripe_webhook_id = $2,
+               stripe_webhook_secret_enc = $3,
+               stripe_key_invalid_at = NULL,
+               stripe_business_name = $4
+           WHERE id = $5`,
+          [encryptApiKey(apiKey), webhookId, webhookSecretEnc, businessName, orgId],
+        );
+        // No row, nothing to accept for: recordLegalAcceptance would find
+        // none either, and the caller answers the vanished session below.
+        if (!rowCount) return 0;
+        await recordLegalAcceptance(client, orgId, 'connect');
+        return rowCount;
+      });
     } catch (err) {
       // Nothing was saved, so an endpoint registered for this attempt would
       // only post events no row can verify. The error itself is reported by

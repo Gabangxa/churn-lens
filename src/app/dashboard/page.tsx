@@ -5,7 +5,7 @@ import { getOrgIdFromCookieStore } from '@/lib/auth';
 import { query, queryOne } from '@/lib/db';
 import type { Theme, SurveyResponse } from '@/lib/db';
 import { legalFooterReady } from '@/lib/legal';
-import { LEGAL_DOCS_VERSION } from '@/lib/legal-version';
+import { currentLegalDocsVersion } from '@/lib/legal-version';
 import { countFreeTierSurveys, surveySendStatus } from '@/lib/survey-status';
 import { loadSurveyPresentation } from '@/lib/survey-config';
 import type { SurveySendStatus } from '@/lib/survey-status';
@@ -290,8 +290,9 @@ export default async function DashboardPage() {
           {/* Asks, never blocks: nothing on the dashboard or in the survey
               pipeline is gated on acceptance until legal advice says it
               should be. Shown for orgs with no acceptance on record and for
-              any whose recorded version predates LEGAL_DOCS_VERSION. */}
-          {legalAcceptedVersion !== LEGAL_DOCS_VERSION && (
+              any whose recorded version is not currentLegalDocsVersion() —
+              including a '-draft' acceptance once legal.ts is filled in. */}
+          {legalAcceptedVersion !== currentLegalDocsVersion() && (
             <LegalAcceptanceBanner previouslyAccepted={legalAcceptedVersion !== null} />
           )}
           {!businessNamed && <BusinessNamePrompt />}

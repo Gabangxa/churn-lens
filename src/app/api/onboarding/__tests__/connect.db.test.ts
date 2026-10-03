@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
-import { Pool } from 'pg';
+import { Pool, PoolClient } from 'pg';
 import { NextRequest, NextResponse } from 'next/server';
 import { assertThrowawayDatabase } from '../../../../../e2e/helpers/throwaway-db';
 
@@ -36,6 +36,22 @@ vi.mock('@/lib/db', () => ({
   execute: async (text: string, params?: unknown[]) =>
     (await pool().query(text, params)).rowCount ?? 0,
   queryOne: async (text: string, params?: unknown[]) => (await pool().query(text, params)).rows[0] ?? null,
+  // db.ts's withTransaction, on this suite's pool: a real BEGIN/COMMIT on one
+  // dedicated connection, rolled back on any error.
+  withTransaction: async <T,>(fn: (client: PoolClient) => Promise<T>): Promise<T> => {
+    const client = await pool().connect();
+    try {
+      await client.query('BEGIN');
+      const result = await fn(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  },
 }));
 
 vi.mock('@/lib/ratelimit', () => ({
@@ -51,7 +67,8 @@ vi.mock('stripe', async (importOriginal) => {
 import { POST } from '../connect/route';
 import { setOrgCookie } from '@/lib/auth';
 import { decryptApiKey, encryptApiKey } from '@/lib/crypto';
-import { LEGAL_DOCS_VERSION } from '@/lib/legal-version';
+import { LEGAL_DOCS_VERSION, currentLegalDocsVersion } from '@/lib/legal-version';
+import { hasUnfilledPlaceholders } from '@/lib/legal';
 // Real: what reaches the operator is asserted on what reportError recorded.
 // ALERT_EMAIL is pinned empty for every suite (vitest.config.ts).
 import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
@@ -61,9 +78,12 @@ const ENCRYPTION_KEY = 'd'.repeat(64);
 const APP_URL = 'https://app.churnlens.test';
 const NEW_KEY = 'rk_live_new_key_after_rotation';
 const RESTRICTED_KEY = 'rk_live_db_suite';
+// What the onboarding form sends and the route records: LEGAL_DOCS_VERSION,
+// labelled '-draft' while legal.ts still has placeholders.
+const CURRENT_VERSION = currentLegalDocsVersion();
 // Every connect that is meant to succeed must carry acceptance of the current
 // Terms/DPA; the acceptance suite below pins what happens without it.
-const ACCEPTED = { acceptedLegalVersion: LEGAL_DOCS_VERSION };
+const ACCEPTED = { acceptedLegalVersion: CURRENT_VERSION };
 
 const OLD_KEY = 'rk_live_old_revoked_key';
 
@@ -149,7 +169,11 @@ async function seedConnectedOrg(opts: OrgOpts = {}): Promise<string> {
   return rows[0].id;
 }
 
-/** An org that has never connected Stripe, optionally with an acceptance already on record. */
+/**
+ * An org that has never connected Stripe, optionally with an acceptance
+ * already on record the way the app leaves one: the organizations cache
+ * columns and the matching legal_acceptances row.
+ */
 async function seedUnconnectedOrg(acceptance?: { version: string; acceptedAt: Date }): Promise<string> {
   const { rows } = await pool().query<{ id: string }>(
     `INSERT INTO organizations (name, legal_accepted_version, legal_accepted_at)
@@ -157,7 +181,24 @@ async function seedUnconnectedOrg(acceptance?: { version: string; acceptedAt: Da
      RETURNING id`,
     [acceptance?.version ?? null, acceptance?.acceptedAt ?? null],
   );
+  if (acceptance) {
+    await pool().query(
+      `INSERT INTO legal_acceptances (org_id, version, accepted_at, source)
+       VALUES ($1, $2, $3, 'banner')`,
+      [rows[0].id, acceptance.version, acceptance.acceptedAt],
+    );
+  }
   return rows[0].id;
+}
+
+/** Every Terms/DPA acceptance on record for the org, oldest first. */
+async function acceptanceHistory(orgId: string) {
+  const { rows } = await pool().query<{ version: string; accepted_at: Date; source: string }>(
+    `SELECT version, accepted_at, source FROM legal_acceptances
+     WHERE org_id = $1 ORDER BY accepted_at, version`,
+    [orgId],
+  );
+  return rows;
 }
 
 /** A request carrying a genuinely signed session for `orgId`. */
@@ -233,9 +274,11 @@ suite('POST /api/onboarding/connect against a real database', () => {
     const { rows } = await pool().query(
       `SELECT column_name FROM information_schema.columns
        WHERE table_name = 'organizations'
-         AND column_name IN ('stripe_business_name', 'legal_accepted_version')`,
+         AND column_name IN ('stripe_business_name', 'legal_accepted_version')
+       UNION ALL
+       SELECT 'legal_acceptances' WHERE to_regclass('legal_acceptances') IS NOT NULL`,
     );
-    if (rows.length !== 2) {
+    if (rows.length !== 3) {
       throw new Error('TEST_DATABASE_URL is not migrated — run `node scripts/migrate.js` against it first.');
     }
   });
@@ -570,6 +613,7 @@ suite('POST /api/onboarding/connect against a real database', () => {
         legal_accepted_at: null,
         legal_accepted_version: null,
       });
+      expect(await acceptanceHistory(orgId)).toEqual([]);
       // Refused before the key is used for anything — not even the optional
       // business-name lookup reaches Stripe.
       expect(fakeStripeApi.requests).toEqual([]);
@@ -595,8 +639,31 @@ suite('POST /api/onboarding/connect against a real database', () => {
         legal_accepted_at: priorAcceptance.acceptedAt,
         legal_accepted_version: priorAcceptance.version,
       });
+      expect(await acceptanceHistory(orgId)).toEqual([
+        { version: priorAcceptance.version, accepted_at: priorAcceptance.acceptedAt, source: 'banner' },
+      ]);
       expect(fakeStripeApi.requests).toEqual([]);
     });
+
+    // Only meaningful while legal.ts is unfilled, which legal.test.ts pins as
+    // today's state; once it is filled there is no draft left to mislabel.
+    (hasUnfilledPlaceholders() ? it : it.skip)(
+      'refuses the bare version while the documents are drafts, so no acceptance reads as final',
+      async () => {
+        // The pages carry "Draft — do not rely on it". Recorded as the bare
+        // LEGAL_DOCS_VERSION, this acceptance would silently become one of
+        // the final contract the day legal.ts is filled in.
+        const orgId = await seedUnconnectedOrg();
+
+        const res = await POST(
+          connectRequest(orgId, { apiKey: RESTRICTED_KEY, acceptedLegalVersion: LEGAL_DOCS_VERSION }),
+        );
+
+        expect(res.status).toBe(400);
+        expect((await orgRow(orgId)).stripe_api_key_enc).toBeNull();
+        expect(await acceptanceHistory(orgId)).toEqual([]);
+      },
+    );
 
     it('records acceptance of the current version, on the database clock, together with the key', async () => {
       const orgId = await seedUnconnectedOrg();
@@ -605,7 +672,7 @@ suite('POST /api/onboarding/connect against a real database', () => {
       const res = await POST(
         connectRequest(orgId, {
           apiKey: RESTRICTED_KEY,
-          acceptedLegalVersion: LEGAL_DOCS_VERSION,
+          acceptedLegalVersion: CURRENT_VERSION,
           // A client trying to choose its own acceptance time is ignored.
           legalAcceptedAt: '1999-01-01T00:00:00.000Z',
           acceptedAt: '1999-01-01T00:00:00.000Z',
@@ -618,56 +685,72 @@ suite('POST /api/onboarding/connect against a real database', () => {
       expect(org.stripe_api_key_enc).not.toBeNull();
       expect(org.stripe_api_key_enc).not.toContain(RESTRICTED_KEY);
       expect(org.stripe_webhook_id).toBe('we_registered');
-      expect(org.legal_accepted_version).toBe(LEGAL_DOCS_VERSION);
+      expect(org.legal_accepted_version).toBe(CURRENT_VERSION);
       expect(org.legal_accepted_at!.getTime()).toBeGreaterThanOrEqual(before.getTime());
       expect(org.legal_accepted_at!.getTime()).toBeLessThanOrEqual(after.getTime());
+      // The history row and the cache are one write: same version, same time.
+      expect(await acceptanceHistory(orgId)).toEqual([
+        { version: CURRENT_VERSION, accepted_at: org.legal_accepted_at, source: 'connect' },
+      ]);
     });
 
     it('records no acceptance when the connect then fails — it rides with the key, and no key is stored', async () => {
-      // The acceptance is written in the same statement as the key, and that
-      // statement only runs once Stripe has accepted the key and the webhook.
+      // The acceptance commits in the same transaction as the key, and that
+      // transaction only runs once Stripe has accepted the key and the webhook.
       // A failed connect stores no key, so nothing is processed under the
       // agreement; the founder ticks the box again on the retry.
       fakeStripeApi.reset(except(isRegistration, () => stripeError(500, 'api_error', 'stripe is down')));
       const orgId = await seedUnconnectedOrg();
 
       const res = await POST(
-        connectRequest(orgId, { apiKey: RESTRICTED_KEY, acceptedLegalVersion: LEGAL_DOCS_VERSION }),
+        connectRequest(orgId, { apiKey: RESTRICTED_KEY, acceptedLegalVersion: CURRENT_VERSION }),
       );
 
       expect(res.status).toBe(502);
       expect(await orgRow(orgId)).toEqual(NOTHING_STORED);
+      expect(await acceptanceHistory(orgId)).toEqual([]);
     });
 
-    it('moves an org that accepted an older version onto the current one, with a fresh time', async () => {
-      const orgId = await seedUnconnectedOrg({ version: '2000-01-01', acceptedAt: new Date('2025-01-01T00:00:00Z') });
+    it('moves an org that accepted an older version onto the current one and keeps the old record', async () => {
+      // The older acceptance is the wording that covered everything processed
+      // before today; it must survive the new one.
+      const prior = { version: '2000-01-01', acceptedAt: new Date('2025-01-01T00:00:00Z') };
+      const orgId = await seedUnconnectedOrg(prior);
       const before = await dbClock();
 
       const res = await POST(
-        connectRequest(orgId, { apiKey: RESTRICTED_KEY, acceptedLegalVersion: LEGAL_DOCS_VERSION }),
+        connectRequest(orgId, { apiKey: RESTRICTED_KEY, acceptedLegalVersion: CURRENT_VERSION }),
       );
 
       expect(res.status).toBe(200);
       const org = await orgRow(orgId);
-      expect(org.legal_accepted_version).toBe(LEGAL_DOCS_VERSION);
+      expect(org.legal_accepted_version).toBe(CURRENT_VERSION);
       expect(org.legal_accepted_at!.getTime()).toBeGreaterThanOrEqual(before.getTime());
+      expect(await acceptanceHistory(orgId)).toEqual([
+        { version: prior.version, accepted_at: prior.acceptedAt, source: 'banner' },
+        { version: CURRENT_VERSION, accepted_at: org.legal_accepted_at, source: 'connect' },
+      ]);
     });
 
     it('reconnecting under the version already on record keeps the original acceptance time', async () => {
       // Replacing a key is not a new agreement to the same text; the record
       // should still say when the founder first agreed to this wording.
       const firstAcceptedAt = new Date('2026-01-15T09:30:00Z');
-      const orgId = await seedUnconnectedOrg({ version: LEGAL_DOCS_VERSION, acceptedAt: firstAcceptedAt });
+      const orgId = await seedUnconnectedOrg({ version: CURRENT_VERSION, acceptedAt: firstAcceptedAt });
 
       const res = await POST(
-        connectRequest(orgId, { apiKey: RESTRICTED_KEY, acceptedLegalVersion: LEGAL_DOCS_VERSION }),
+        connectRequest(orgId, { apiKey: RESTRICTED_KEY, acceptedLegalVersion: CURRENT_VERSION }),
       );
 
       expect(res.status).toBe(200);
       const org = await orgRow(orgId);
       expect(org.stripe_api_key_enc).not.toBeNull();
-      expect(org.legal_accepted_version).toBe(LEGAL_DOCS_VERSION);
+      expect(org.legal_accepted_version).toBe(CURRENT_VERSION);
       expect(org.legal_accepted_at).toEqual(firstAcceptedAt);
+      // No second row for the same wording, and the first keeps its door.
+      expect(await acceptanceHistory(orgId)).toEqual([
+        { version: CURRENT_VERSION, accepted_at: firstAcceptedAt, source: 'banner' },
+      ]);
     });
   });
 });

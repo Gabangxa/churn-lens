@@ -535,7 +535,7 @@ async function migrate() {
   // contract — but until these columns existed nothing ever showed it to a
   // founder or recorded that one had agreed to it.
   //
-  // legal_accepted_version is LEGAL_DOCS_VERSION (src/lib/legal-version.ts)
+  // legal_accepted_version is currentLegalDocsVersion() (src/lib/legal-version.ts)
   // at the moment of acceptance, so a later change to the documents can tell
   // who agreed to which wording; legal_accepted_at is always the database's
   // now(), never a time the client sent. Both NULL means "no acceptance on

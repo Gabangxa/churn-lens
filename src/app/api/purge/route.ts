@@ -85,7 +85,8 @@ async function runPurge(req: Request) {
   // (c) Hard-delete orgs whose 30-day deletion grace period has elapsed.
   // Stripe disconnect first (best-effort, logs and continues on its own
   // failure — see disconnectStripe), then the row itself; ON DELETE CASCADE
-  // takes users/survey_responses/themes/login_tokens/digest_sends with it —
+  // takes users/survey_responses/themes/login_tokens/digest_sends/
+  // legal_acceptances with it —
   // every one of those tables carries an org_id FK. unsubscribes and
   // cron_runs are the two things that do NOT go with it: unsubscribes'
   // FK was dropped in the migration precisely so this DELETE cannot take the
