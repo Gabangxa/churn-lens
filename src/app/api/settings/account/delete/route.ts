@@ -143,11 +143,15 @@ async function requestAccountDeletion(req: NextRequest) {
 const POLAR_TIMEOUT_MS = 10_000;
 
 /**
- * The statuses Polar can still charge a card under. The rest have ended
- * (canceled, unpaid, incomplete_expired) or never started (incomplete), and
- * revoking an ended one is Polar's 403 AlreadyCanceledSubscription.
+ * The statuses under which Polar charges a card now or will later without
+ * anyone acting: active, trialing, past_due, and paused, which resumes on its
+ * own when the pause carries a resumes_at, possibly after the account is
+ * erased. Polar revokes a paused subscription immediately like the others.
+ * The rest have ended (canceled, unpaid, incomplete_expired) or never started
+ * (incomplete), and revoking an ended one is Polar's 403
+ * AlreadyCanceledSubscription.
  */
-const BILLABLE_STATUSES = ['active', 'trialing', 'past_due'] as const;
+const BILLABLE_STATUSES = ['active', 'trialing', 'past_due', 'paused'] as const;
 
 /**
  * Revoke every subscription Polar could still bill this org for. Returns false

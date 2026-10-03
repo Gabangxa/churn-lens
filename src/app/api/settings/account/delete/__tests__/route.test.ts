@@ -263,7 +263,22 @@ describe('POST /api/settings/account/delete — Polar billing', () => {
     expect(list.method).toBe('GET');
     expect(list.path).toBe('/v1/subscriptions/');
     expect(list.query.getAll('external_customer_id')).toEqual([ORG_ID]);
-    expect(list.query.getAll('status').sort()).toEqual(['active', 'past_due', 'trialing']);
+    expect(list.query.getAll('status').sort()).toEqual(['active', 'past_due', 'paused', 'trialing']);
+  });
+
+  it('revokes a paused subscription: it resumes billing on its own if left alone', async () => {
+    // A pause with resumes_at set starts charging again on that date, by
+    // which time the account may already be erased.
+    queryOneMock.mockResolvedValue(orgRow('sub_paused'));
+    servePolar([{ id: 'sub_paused', status: 'paused', externalId: ORG_ID }]);
+
+    const body = await (await POST(deleteRequest())).json();
+
+    // revokeRequests() is the DELETE /v1/subscriptions/{id} calls.
+    expect(revokeRequests()).toEqual(['sub_paused']);
+    expect(body).not.toHaveProperty('billing');
+    expect(revokeAllSessionsMock).toHaveBeenCalledWith(ORG_ID);
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
   });
 
   it('signs an ex-subscriber out everywhere without a billing warning or an alert', async () => {
