@@ -70,6 +70,7 @@ src/
 │       ├── auth/                  # Magic-link request/verify, logout
 │       ├── survey/                # Survey submission + opt-out
 │       ├── settings/              # Survey config, status, disconnect
+│       ├── legal/accept/          # Record Terms/DPA acceptance (dashboard banner)
 │       ├── themes/                # AI clustering cron (Mon 06:00 UTC)
 │       ├── digest/                # Weekly email cron (Mon 07:00 UTC)
 │       └── health/                # Railway healthcheck
@@ -170,6 +171,7 @@ scheduler cannot race the cron spec.
 | `e2e/auth.spec.ts` | Signup through the real form (email normalization, plan carried into `redirect_to`, no session yet), magic-link verification, replayed and expired links, signed-out redirects to `/login?next=…` |
 | `e2e/csrf.spec.ts` | `assertSameOrigin` wired in front of connect / login / checkout, and an off-site `next` dropped rather than stored |
 | `e2e/onboarding.spec.ts` | Key-only form behind a session (no email field — that was the account-takeover hole), the unticked-by-default Terms/DPA checkbox, and the `rk_` validation error |
+| `e2e/dashboard.spec.ts` | Status line tells the truth about whether surveys send; free orgs not promised AI themes; Terms/DPA banner for an org with no acceptance on record, and "I agree" recording it |
 | `e2e/account.spec.ts` | Delete account from Settings: two-step confirm, Stripe columns cleared, session ended |
 | `e2e/cron.spec.ts` | `CRON_SECRET` gate on all three jobs; the purge job's retention, erasure, abandoned-signup and orphaned-opt-out rules against real rows; themes + digest recorded as succeeded |
 | `e2e/legal.spec.ts` | Privacy / Terms / DPA render with the draft banner, POPIA specifics, unsubscribe page's privacy link |

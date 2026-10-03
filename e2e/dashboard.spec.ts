@@ -1,7 +1,8 @@
 import { expect, test } from '@playwright/test';
 // Pure module (no next/, no db) — safe to import into a Playwright process.
 import { legalFooterReady } from '../src/lib/legal';
-import { closeDb, daysAgo, query, seedOrg, seedSurveyResponse, uniqueEmail } from './helpers/db';
+import { LEGAL_DOCS_VERSION } from '../src/lib/legal-version';
+import { closeDb, daysAgo, query, queryOne, seedOrg, seedSurveyResponse, uniqueEmail } from './helpers/db';
 import { loginAs } from './helpers/session';
 
 /**
@@ -62,5 +63,34 @@ test.describe('dashboard status', () => {
 
     await expect(page.getByText('AI themes are included in the Starter and Growth plans')).toBeVisible();
     await expect(page.getByText(/themes generate Monday/)).toHaveCount(0);
+  });
+
+  test('an org with no Terms/DPA acceptance on record is asked, and "I agree" records it', async ({ page }) => {
+    // seedOrg leaves both legal_accepted_* columns NULL — exactly the state of
+    // every org that connected before acceptance was recorded.
+    const email = uniqueEmail('legalaccept');
+    const { orgId } = await seedOrg({ email, withStripeKey: true });
+
+    await loginAs(page, { orgId, email, redirectTo: '/dashboard' });
+    await page.waitForURL((url) => url.pathname === '/dashboard');
+
+    const agree = page.getByRole('button', { name: 'I agree' });
+    await expect(agree).toBeVisible();
+    await agree.click();
+    // The banner only hides once the route has answered 200, so the row is
+    // already written by the time this passes.
+    await expect(agree).toHaveCount(0);
+
+    const org = await queryOne<{ legal_accepted_version: string | null; legal_accepted_at: Date | null }>(
+      'SELECT legal_accepted_version, legal_accepted_at FROM organizations WHERE id = $1',
+      [orgId],
+    );
+    expect(org!.legal_accepted_version).toBe(LEGAL_DOCS_VERSION);
+    expect(org!.legal_accepted_at).not.toBeNull();
+
+    // Recorded, not merely hidden: a fresh load does not ask again.
+    await page.reload();
+    await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'I agree' })).toHaveCount(0);
   });
 });

@@ -5,10 +5,12 @@ import { getOrgIdFromCookieStore } from '@/lib/auth';
 import { query, queryOne } from '@/lib/db';
 import type { Theme, SurveyResponse } from '@/lib/db';
 import { legalFooterReady } from '@/lib/legal';
+import { LEGAL_DOCS_VERSION } from '@/lib/legal-version';
 import { countFreeTierSurveys, surveySendStatus } from '@/lib/survey-status';
 import type { SurveySendStatus } from '@/lib/survey-status';
 import Wordmark from '@/components/Wordmark';
 import ThemeToggle from '@/components/ThemeToggle';
+import LegalAcceptanceBanner from './LegalAcceptanceBanner';
 
 // Audit fixes: stat cards labelled by timeframe (this week vs all time);
 // theme badge colours hashed from the label (stable week over week) instead
@@ -51,8 +53,10 @@ async function getDashboardData(orgId: string) {
     plan: string;
     deletion_requested_at: string | null;
     stripe_key_invalid_at: Date | null;
+    legal_accepted_version: string | null;
   }>(
-    `SELECT stripe_api_key_enc, stripe_account_id, plan, deletion_requested_at, stripe_key_invalid_at
+    `SELECT stripe_api_key_enc, stripe_account_id, plan, deletion_requested_at, stripe_key_invalid_at,
+            legal_accepted_version
      FROM organizations WHERE id = $1`,
     [orgId],
   );
@@ -106,7 +110,7 @@ async function getDashboardData(orgId: string) {
   const weekResponses = themes.reduce((acc, t) => acc + t.response_count, 0);
   const pending = totalSent - responded;
 
-  return { themes, responses, latestWeek: latestWeek?.week_of ?? null, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending, plan, sendStatus };
+  return { themes, responses, latestWeek: latestWeek?.week_of ?? null, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending, plan, sendStatus, legalAcceptedVersion: org?.legal_accepted_version ?? null };
 }
 
 /** One-line answer to "is a cancellation right now going to be surveyed?" */
@@ -173,7 +177,7 @@ export default async function DashboardPage() {
   // them back here once they've signed in or signed up.
   if (!orgId) redirect('/login?next=/dashboard');
 
-  const { themes, responses, latestWeek, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending, plan, sendStatus } =
+  const { themes, responses, latestWeek, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending, plan, sendStatus, legalAcceptedVersion } =
     await getDashboardData(orgId);
   // /api/themes only clusters paid orgs, so a free org must not be told themes are on their way.
   const themesIncluded = plan !== 'free';
@@ -233,6 +237,13 @@ export default async function DashboardPage() {
             Dashboard
           </h1>
           <SendStatusLine status={sendStatus} />
+          {/* Asks, never blocks: nothing on the dashboard or in the survey
+              pipeline is gated on acceptance until legal advice says it
+              should be. Shown for orgs with no acceptance on record and for
+              any whose recorded version predates LEGAL_DOCS_VERSION. */}
+          {legalAcceptedVersion !== LEGAL_DOCS_VERSION && (
+            <LegalAcceptanceBanner previouslyAccepted={legalAcceptedVersion !== null} />
+          )}
         </div>
 
         {/* ── Empty state ── */}
