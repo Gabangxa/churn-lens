@@ -293,12 +293,47 @@ function fnv1a32(text: string): string {
 }
 
 /**
- * Groups occurrences that differ only in ids: UUIDs and digit runs are
- * normalised (emails are already redacted by the time this runs). The stack
- * is left out so a redeploy that shifts line numbers does not split a group.
+ * A quoted value: "…", `…`, or '…' where the opening quote does not follow a
+ * letter or digit — so the apostrophes in "can't reach the server's" are prose,
+ * not a literal. Postgres, Stripe and JSON.parse all quote the offending value.
+ */
+const QUOTED_LITERAL = /"[^"\n]*"|`[^`\n]*`|(?<![\p{L}\p{N}])'[^'\n]*'/gu;
+
+/**
+ * Prefixed ids: cus_…, sub_…, req_…, evt_…, whsec_…. Only replaced when the
+ * part after the underscore has a digit or a capital (see isPrefixedId) —
+ * random ids almost always do, and snake_case table and column names
+ * (survey_responses, login_tokens) never do and must stay distinct.
+ */
+const PREFIXED_ID = /\b[a-z]{2,8}_[A-Za-z0-9]{6,}\b/g;
+
+/**
+ * 8+ letters and digits with at least one of each: hex and base62 ids. Both
+ * are required so ordinary long words ("terminated", "connection") survive;
+ * all-digit runs are the digit rule's job.
+ */
+const ALNUM_ID = /\b(?=[A-Za-z]*\d)(?=\d*[A-Za-z])[A-Za-z0-9]{8,}\b/g;
+
+function isPrefixedId(token: string): boolean {
+  return /[A-Z0-9]/.test(token.slice(token.indexOf('_') + 1));
+}
+
+/**
+ * Groups occurrences that differ only in ids and quoted values (emails are
+ * already redacted by the time this runs). Every distinct fingerprint costs
+ * an immediate alert and a slot in the MAX_FINGERPRINTS map, so an id the
+ * normaliser misses turns a recurring failure into an alert per occurrence
+ * that also evicts the entries that matter. Order matters: quoted values and
+ * whole ids go before the digit rule would break them up. The stack is left
+ * out so a redeploy that shifts line numbers does not split a group.
  */
 function fingerprintOf(context: string, name: string, message: string): string {
-  const normalised = message.replace(UUID_SHAPED, '<id>').replace(/\d+/g, '<n>');
+  const normalised = message
+    .replace(QUOTED_LITERAL, '<q>')
+    .replace(UUID_SHAPED, '<id>')
+    .replace(PREFIXED_ID, (token) => (isPrefixedId(token) ? '<id>' : token))
+    .replace(ALNUM_ID, '<id>')
+    .replace(/\d+/g, '<n>');
   return fnv1a32(`${context}\n${name}\n${normalised}`);
 }
 

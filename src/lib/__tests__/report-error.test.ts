@@ -274,6 +274,51 @@ describe('reportError — PII redaction', () => {
   });
 });
 
+describe('reportError — fingerprints group by kind of failure, not by the ids in it', () => {
+  // Every pair differs only in an id or a quoted value. Splitting them would
+  // send one immediate alert per occurrence and churn real entries out of the
+  // 100-entry fingerprint map.
+  it.each([
+    ['Stripe-style prefixed ids', 'No such customer: cus_Q1a2B3c4D5e6F7', 'No such customer: cus_Zz9y8X7w6V5u4T'],
+    ['request ids', 'Request req_8fK2mQ9xLp3n failed', 'Request req_a1B2c3D4e5F6 failed'],
+    ['hex runs', 'object 3f9a0c7be12d not found', 'object 0be4419ac7f2 not found'],
+    ['base62 runs', 'token aB3dE5gH7jK9 rejected', 'token Zx81Qw72Er63 rejected'],
+    ['double-quoted values', 'invalid input syntax for type uuid: "not-a-uuid"', 'invalid input syntax for type uuid: "x"'],
+    ['single-quoted values', "Unexpected token 'S' in reply", "Unexpected token '<' in reply"],
+    ['backtick-quoted values', 'Invalid `to` field', 'Invalid `from` field'],
+  ])('groups %s', (_label, first, second) => {
+    reportError('webhook.stripe', new Error(first));
+    reportError('webhook.stripe', new Error(second));
+
+    const { fingerprints } = getErrorReportSnapshot();
+    expect(fingerprints).toHaveLength(1);
+    expect(fingerprints[0].count).toBe(2);
+    expect(sendMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['different words', 'connection terminated unexpectedly', 'transaction aborted unexpectedly'],
+    ['different snake_case tables', 'deadlock on survey_responses', 'deadlock on login_tokens'],
+    ["an apostrophe in prose", "can't reach the server", "can't parse the reply"],
+  ])('still separates %s', (_label, first, second) => {
+    reportError('cron.purge', new Error(first));
+    reportError('cron.purge', new Error(second));
+
+    expect(getErrorReportSnapshot().fingerprints).toHaveLength(2);
+  });
+
+  it('does not let a flood of distinct ids evict the fingerprints that matter', () => {
+    reportError('cron.themes', new Error('connection terminated'));
+    for (let i = 0; i < 150; i++) {
+      const id = `cus_${i.toString(36).padStart(4, 'Q')}X${(i * 7919).toString(36)}`;
+      reportError('webhook.stripe', new Error(`No such customer: ${id}`));
+    }
+
+    const { fingerprints } = getErrorReportSnapshot();
+    expect(fingerprints.map((f) => f.context).sort()).toEqual(['cron.themes', 'webhook.stripe']);
+  });
+});
+
 describe('getErrorReportSnapshot — the in-process ring buffer', () => {
   it('lists recent errors newest first and counts each fingerprint', () => {
     reportError('cron.themes', new Error('first'));
