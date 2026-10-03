@@ -39,7 +39,18 @@ vi.mock('@/lib/survey-email', () => ({
 }));
 
 vi.mock('@/lib/survey-config', () => ({
-  loadSurveyConfig: async () => ({ displayName: null, logoUrl: null, customReasons: [] }),
+  loadSurveyPresentation: async () => ({
+    displayName: null,
+    logoUrl: null,
+    customReasons: [],
+    businessName: null,
+  }),
+}));
+
+// The optional Stripe account-name lookup; route.db.test.ts runs it for real.
+vi.mock('@/lib/stripe-business-name', () => ({
+  fetchStripeBusinessName: async () => null,
+  cacheStripeBusinessName: async () => true,
 }));
 
 const legalFooterReadyMock = vi.fn();

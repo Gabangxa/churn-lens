@@ -30,9 +30,9 @@ vi.mock('@/lib/survey-email', () => ({
   sendSurveyEmail: (...args: unknown[]) => sendSurveyEmailMock(...args),
 }));
 
-const loadSurveyConfigMock = vi.fn();
+const loadSurveyPresentationMock = vi.fn();
 vi.mock('@/lib/survey-config', () => ({
-  loadSurveyConfig: (...args: unknown[]) => loadSurveyConfigMock(...args),
+  loadSurveyPresentation: (...args: unknown[]) => loadSurveyPresentationMock(...args),
 }));
 
 import { POST } from '../route';
@@ -53,7 +53,9 @@ beforeEach(() => {
   signSurveyTokenMock.mockReset().mockReturnValue('signed.survey.token');
   checkRateLimitMock.mockReset().mockReturnValue({ allowed: true, retryAfterSec: 0 });
   sendSurveyEmailMock.mockReset().mockResolvedValue(undefined);
-  loadSurveyConfigMock.mockReset().mockResolvedValue({ displayName: null, logoUrl: null, customReasons: [] });
+  loadSurveyPresentationMock
+    .mockReset()
+    .mockResolvedValue({ displayName: null, logoUrl: null, customReasons: [], businessName: null });
   process.env.NEXT_PUBLIC_APP_URL = APP_URL;
 });
 
@@ -100,6 +102,24 @@ describe('POST /api/survey/test — guards', () => {
     expect(queryOneMock).toHaveBeenCalledWith(expect.stringMatching(/FROM users/), [ORG_ID]);
     expect(sendSurveyEmailMock).toHaveBeenCalledWith(
       expect.objectContaining({ to: 'founder@example.com', isTest: true }),
+    );
+  });
+
+  it('names the business exactly as a real survey would, Stripe-name fallback included', async () => {
+    // A test send that named "the founder" while real customers got "Acme"
+    // would show the founder something their customers never see.
+    loadSurveyPresentationMock.mockResolvedValue({
+      displayName: null,
+      logoUrl: null,
+      customReasons: [],
+      businessName: 'Acme From Stripe',
+    });
+
+    await POST(testSurveyRequest());
+
+    expect(loadSurveyPresentationMock).toHaveBeenCalledWith(ORG_ID);
+    expect(sendSurveyEmailMock).toHaveBeenCalledWith(
+      expect.objectContaining({ displayName: 'Acme From Stripe' }),
     );
   });
 });

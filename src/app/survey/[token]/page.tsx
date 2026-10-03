@@ -17,7 +17,7 @@
 
 import Link from 'next/link';
 import { verifySurveyToken } from '@/lib/crypto';
-import { BUILTIN_CANCELLATION_REASONS, loadSurveyConfig } from '@/lib/survey-config';
+import { BUILTIN_CANCELLATION_REASONS, loadSurveyPresentation } from '@/lib/survey-config';
 
 export default async function SurveyPage({ params }: { params: { token: string } }) {
   const payload = verifySurveyToken(params.token);
@@ -42,12 +42,15 @@ export default async function SurveyPage({ params }: { params: { token: string }
     );
   }
 
-  const config = await loadSurveyConfig(payload.orgId);
+  // Same resolver as the survey email, so the page names the business the
+  // email named: configured display name, else the cached Stripe account name,
+  // else the generic copy. Rendered as JSX text, so it is escaped.
+  const config = await loadSurveyPresentation(payload.orgId);
   const builtinReasons = BUILTIN_CANCELLATION_REASONS.filter((reason) => reason !== 'Other');
   // Built-ins → custom reasons → 'Other' last (Resolved decisions #2). Zero-config
   // orgs have no custom reasons, so this is byte-identical to the original 8.
   const reasons = [...builtinReasons, ...config.customReasons, 'Other'];
-  const founderCopy = config.displayName ? `the ${config.displayName} team` : 'the founder';
+  const founderCopy = config.businessName ? `the ${config.businessName} team` : 'the founder';
 
   return (
     <div className="flex flex-1 flex-col items-center justify-center px-4 md:px-6 py-12">
@@ -72,7 +75,7 @@ export default async function SurveyPage({ params }: { params: { token: string }
               // eslint-disable-next-line @next/next/no-img-element -- external, org-supplied URL; no server-side fetch/reachability check (see spec edge cases).
               <img
                 src={config.logoUrl}
-                alt={config.displayName ? `${config.displayName} logo` : 'Company logo'}
+                alt={config.businessName ? `${config.businessName} logo` : 'Company logo'}
                 className="mx-auto mb-6 h-12 w-auto max-w-[200px] object-contain"
               />
             )}

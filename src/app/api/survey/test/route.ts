@@ -5,7 +5,7 @@ import { signSurveyToken } from '@/lib/crypto';
 import { assertSameOrigin, requireOrgId } from '@/lib/auth';
 import { checkRateLimit } from '@/lib/ratelimit';
 import { sendSurveyEmail } from '@/lib/survey-email';
-import { loadSurveyConfig } from '@/lib/survey-config';
+import { loadSurveyPresentation } from '@/lib/survey-config';
 
 /**
  * Send the founder a test exit survey at their own email — exercises the
@@ -66,7 +66,11 @@ export async function POST(req: NextRequest) {
       [orgId, owner.email, owner.name ?? 'Test customer', testSubscriptionId, token],
     );
 
-    const config = await loadSurveyConfig(orgId);
+    // Resolved exactly as for a real cancellation (display name, else the
+    // cached Stripe account name), so the test shows the founder what their
+    // customers will see. It reads the cache only: a test send does not go to
+    // Stripe for the name.
+    const presentation = await loadSurveyPresentation(orgId);
 
     await sendSurveyEmail({
       to: owner.email,
@@ -74,7 +78,7 @@ export async function POST(req: NextRequest) {
       surveyUrl: `${appUrl}/survey/${token}`,
       optOutUrl: `${appUrl}/api/survey/opt-out?token=${token}`,
       isTest: true,
-      displayName: config.displayName,
+      displayName: presentation.businessName,
     });
 
     // Same delivery bookkeeping as the webhook path so the two never drift:

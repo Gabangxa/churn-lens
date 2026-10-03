@@ -5,6 +5,7 @@ import { encryptApiKey } from '@/lib/crypto';
 import { assertSameOrigin, requireOrgId, clearOrgCookie } from '@/lib/auth';
 import { checkRateLimit, clientIp } from '@/lib/ratelimit';
 import { reportError } from '@/lib/report-error';
+import { fetchStripeBusinessName } from '@/lib/stripe-business-name';
 
 /**
  * Attach (or replace) the signed-in org's Stripe restricted key and register
@@ -77,15 +78,29 @@ export async function POST(req: NextRequest) {
       return clearOrgCookie(response);
     }
 
+    const customerStripe = new Stripe(apiKey, { apiVersion: '2024-04-10', typescript: true });
+
+    // The account's public business name, for survey copy when no display
+    // name is set (POPIA s18). Optional: most keys made per our instructions
+    // cannot read the account, and that must not fail the connect or count
+    // against the key — fetchStripeBusinessName returns null instead.
+    const businessName = await fetchStripeBusinessName(customerStripe, orgId);
+
     const encrypted = encryptApiKey(apiKey);
-    // A new key is not one Stripe has rejected, so the dashboard's "reconnect
-    // Stripe" warning (stripe_key_invalid_at, set by the Stripe webhook) is
-    // cleared in the same statement that replaces the key. Nothing here proves
-    // the new key works — when a webhook is already registered no Stripe call
-    // is made at all — so the next cancellation re-flags it if it does not.
+    // One statement, so the row never pairs the new key with stale state:
+    //  - stripe_key_invalid_at: a new key is not one Stripe has rejected, so the
+    //    dashboard's "reconnect Stripe" warning (set by the Stripe webhook) is
+    //    cleared. Nothing here proves the key works — with a webhook already
+    //    registered no customer call is made — so the next cancellation
+    //    re-flags it if it does not.
+    //  - stripe_business_name: always overwritten, NULL included. The new key
+    //    may belong to a different Stripe account, and surveys must not go out
+    //    naming the previous one; the webhook retries the lookup lazily.
     await query(
-      'UPDATE organizations SET stripe_api_key_enc = $1, stripe_key_invalid_at = NULL WHERE id = $2',
-      [encrypted, orgId],
+      `UPDATE organizations
+       SET stripe_api_key_enc = $1, stripe_key_invalid_at = NULL, stripe_business_name = $2
+       WHERE id = $3`,
+      [encrypted, businessName, orgId],
     );
 
     // Register ChurnLens webhook on the customer's Stripe account (only if not already done).
@@ -111,7 +126,6 @@ export async function POST(req: NextRequest) {
     if (!existing.stripe_webhook_id) {
       let webhookEndpoint: Stripe.WebhookEndpoint;
       try {
-        const customerStripe = new Stripe(apiKey, { apiVersion: '2024-04-10', typescript: true });
         webhookEndpoint = await customerStripe.webhookEndpoints.create({
           url: `${appUrl}/api/webhooks/stripe/${orgId}`,
           enabled_events: ['customer.subscription.deleted'],

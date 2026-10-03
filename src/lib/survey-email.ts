@@ -32,10 +32,15 @@ export async function sendSurveyEmail(opts: {
   optOutUrl: string;
   isTest?: boolean;
   /**
-   * Org's configured product/company display name (CL-1). When set, replaces
-   * the generic "the founder" / "The team" copy. When unset (undefined or
-   * null — the zero-config default), the email is byte-identical to before
-   * this feature existed.
+   * The business the survey is sent for: SurveyPresentation.businessName —
+   * the org's configured display name (CL-1), else its Stripe account's
+   * business name. When set, replaces the generic "the founder" / "The team"
+   * copy. When unset (undefined or null — the zero-config default), the email
+   * is byte-identical to before this feature existed.
+   *
+   * Interpolated into plain text only (there is no HTML part), and already
+   * stripped of control characters by normalizeBusinessName, so it cannot add
+   * lines. If an HTML part is ever added, it must be HTML-escaped there.
    */
   displayName?: string | null;
 }): Promise<void> {

@@ -4,7 +4,8 @@ import { queryOne, queryCount, execute } from '@/lib/db';
 import { decryptApiKey, signSurveyToken } from '@/lib/crypto';
 import { sendSurveyEmail, LegalFooterUnfilledError } from '@/lib/survey-email';
 import { legalFooterReady } from '@/lib/legal';
-import { loadSurveyConfig } from '@/lib/survey-config';
+import { loadSurveyPresentation } from '@/lib/survey-config';
+import { cacheStripeBusinessName, fetchStripeBusinessName } from '@/lib/stripe-business-name';
 import { FREE_TIER_MONTHLY_SURVEYS } from '@/lib/plan';
 import { countFreeTierSurveys } from '@/lib/survey-status';
 
@@ -496,7 +497,20 @@ export async function POST(
   const surveyUrl = `${process.env.NEXT_PUBLIC_APP_URL}/survey/${emailToken}`;
   const optOutUrl = `${process.env.NEXT_PUBLIC_APP_URL}/api/survey/opt-out?token=${emailToken}`;
 
-  const config = await loadSurveyConfig(org.id);
+  // Which business the email says is asking. Looked up here, after the claim,
+  // so only a cancellation we are actually about to email costs a Stripe call.
+  let presentation = await loadSurveyPresentation(org.id);
+  if (presentation.businessName === null) {
+    // No display name configured and no Stripe name cached yet: try the
+    // account once more (it fails harmlessly for keys without the account
+    // permission). The name is used only once it is cached, because the survey
+    // page reads the cache, never Stripe — the email and the page it links to
+    // must name the same business, or none.
+    const stripeName = await fetchStripeBusinessName(stripeClient, org.id);
+    if (stripeName !== null && (await cacheStripeBusinessName(org.id, stripeName))) {
+      presentation = { ...presentation, businessName: stripeName };
+    }
+  }
 
   try {
     await sendSurveyEmail({
@@ -504,7 +518,7 @@ export async function POST(
       customerName: customer.name ?? null,
       surveyUrl,
       optOutUrl,
-      displayName: config.displayName,
+      displayName: presentation.businessName,
     });
   } catch (err) {
     if (err instanceof LegalFooterUnfilledError) {

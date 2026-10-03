@@ -21,6 +21,12 @@ export default defineConfig({
     // run into real alert emails. Suites that test alerting stub it per test.
     env: { ALERT_EMAIL: '' },
   },
+  // tsconfig says jsx: "preserve" (Next compiles JSX itself), which leaves
+  // esbuild on the classic React.createElement transform — so importing any
+  // page or component into a test throws "React is not defined". The automatic
+  // runtime is what Next uses, and lets a suite render a page through its
+  // public interface (e.g. the survey page in the Stripe webhook's DB suite).
+  esbuild: { jsx: 'automatic' },
   resolve: {
     alias: {
       '@': resolve(__dirname, './src'),

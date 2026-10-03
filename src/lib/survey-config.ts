@@ -81,6 +81,22 @@ function dedupeAgainstBuiltinsAndSelf(reasons: string[]): string[] {
 }
 
 /**
+ * A business name as it may appear in survey copy ("the Acme team", "Sent on
+ * behalf of Acme"), or null when there is none fit to print. Control
+ * characters — line breaks included — are stripped, so a name can only ever
+ * occupy its own place in one line of the plain-text email. Empty or
+ * over-limit values read as absent (the generic copy) rather than being cut
+ * off mid-word. One rule for the configured display name and for the Stripe
+ * account's name, which is just as untrusted.
+ */
+export function normalizeBusinessName(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = stripControlChars(raw).trim();
+  if (trimmed.length === 0 || trimmed.length > SURVEY_CONFIG_LIMITS.displayNameMaxLen) return null;
+  return trimmed;
+}
+
+/**
  * Defensive normalizer for whatever is stored in the DB. Never throws — any
  * missing/malformed key falls back to its default rather than erroring the
  * survey render. Also re-applies the length/count limits and dedupe so a
@@ -92,13 +108,7 @@ function normalizeStoredConfig(raw: unknown): SurveyConfig {
   }
   const obj = raw as Record<string, unknown>;
 
-  let displayName: string | null = null;
-  if (typeof obj.display_name === 'string') {
-    const trimmed = stripControlChars(obj.display_name).trim();
-    if (trimmed.length > 0 && trimmed.length <= SURVEY_CONFIG_LIMITS.displayNameMaxLen) {
-      displayName = trimmed;
-    }
-  }
+  const displayName = normalizeBusinessName(obj.display_name);
 
   let logoUrl: string | null = null;
   if (typeof obj.logo_url === 'string') {
@@ -141,6 +151,46 @@ export async function loadSurveyConfig(orgId: string): Promise<SurveyConfig> {
   } catch (err) {
     console.error(`Failed to load survey_config for org ${orgId}:`, err);
     return { ...DEFAULT_CONFIG, customReasons: [] };
+  }
+}
+
+/** The survey config plus the business the survey says is asking. */
+export interface SurveyPresentation extends SurveyConfig {
+  /**
+   * Who the churned customer is told the survey is from — POPIA s18 requires
+   * the data subject be told the responsible party's identity. In order: the
+   * configured display name; else the connected Stripe account's business
+   * name, as cached in organizations.stripe_business_name by
+   * /api/onboarding/connect or the Stripe webhook; else null, which keeps
+   * today's generic copy (no new required setup — the 2026-07-12 zero-config
+   * decision). The survey email and the survey page both resolve it here, from
+   * the same row, so they cannot name different businesses.
+   */
+  businessName: string | null;
+}
+
+/**
+ * loadSurveyConfig plus the resolved businessName, in one read. For the
+ * customer-facing callers (survey page, survey emails); never throws, with the
+ * same fall-back-to-defaults contract as loadSurveyConfig.
+ */
+export async function loadSurveyPresentation(orgId: string): Promise<SurveyPresentation> {
+  try {
+    const row = await queryOne<{ survey_config: unknown; stripe_business_name: unknown }>(
+      'SELECT survey_config, stripe_business_name FROM organizations WHERE id = $1',
+      [orgId],
+    );
+    if (!row) return { ...DEFAULT_CONFIG, customReasons: [], businessName: null };
+    const config = normalizeStoredConfig(row.survey_config);
+    return {
+      ...config,
+      // Normalized again on read, like every stored config field, so a
+      // hand-edited row cannot put a line break into the email.
+      businessName: config.displayName ?? normalizeBusinessName(row.stripe_business_name),
+    };
+  } catch (err) {
+    console.error(`Failed to load survey presentation for org ${orgId}:`, err);
+    return { ...DEFAULT_CONFIG, customReasons: [], businessName: null };
   }
 }
 

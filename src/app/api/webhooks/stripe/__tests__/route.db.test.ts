@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } 
 import { Pool } from 'pg';
 import { randomUUID } from 'crypto';
 import { NextRequest } from 'next/server';
+import { renderToStaticMarkup } from 'react-dom/server';
 import Stripe from 'stripe';
 import { assertThrowawayDatabase } from '../../../../../../e2e/helpers/throwaway-db';
 
@@ -71,6 +72,7 @@ vi.mock('stripe', async (importOriginal) => {
 });
 
 import { POST } from '../[orgId]/route';
+import SurveyPage from '@/app/survey/[token]/page';
 import { encryptApiKey } from '@/lib/crypto';
 import { FREE_TIER_MONTHLY_SURVEYS } from '@/lib/plan';
 import { countFreeTierSurveys, surveySendStatus } from '@/lib/survey-status';
@@ -121,16 +123,34 @@ interface OrgOpts {
   apiKey?: string | null;
   /** SQL interval ago that Stripe first rejected the key, or null (the default). */
   keyInvalidAgo?: string | null;
+  /** Settings → survey display name (survey_config.display_name). */
+  displayName?: string | null;
+  /** organizations.stripe_business_name, as an earlier lookup cached it. */
+  stripeBusinessName?: string | null;
 }
 
 async function seedOrg(opts: OrgOpts = {}): Promise<string> {
-  const { plan = 'growth', apiKey = API_KEY, keyInvalidAgo = null } = opts;
+  const {
+    plan = 'growth',
+    apiKey = API_KEY,
+    keyInvalidAgo = null,
+    displayName = null,
+    stripeBusinessName = null,
+  } = opts;
   const { rows } = await pool().query<{ id: string }>(
     `INSERT INTO organizations
-       (name, plan, stripe_api_key_enc, stripe_webhook_id, stripe_webhook_secret_enc, stripe_key_invalid_at)
-     VALUES ('DB suite org', $1, $2, 'we_db_suite', $3, now() - $4::interval)
+       (name, plan, stripe_api_key_enc, stripe_webhook_id, stripe_webhook_secret_enc,
+        stripe_key_invalid_at, survey_config, stripe_business_name)
+     VALUES ('DB suite org', $1, $2, 'we_db_suite', $3, now() - $4::interval, $5, $6)
      RETURNING id`,
-    [plan, apiKey === null ? null : encryptApiKey(apiKey), encryptApiKey(WEBHOOK_SECRET), keyInvalidAgo],
+    [
+      plan,
+      apiKey === null ? null : encryptApiKey(apiKey),
+      encryptApiKey(WEBHOOK_SECRET),
+      keyInvalidAgo,
+      displayName === null ? null : JSON.stringify({ display_name: displayName }),
+      stripeBusinessName,
+    ],
   );
   return rows[0].id;
 }
@@ -246,7 +266,7 @@ suite('Stripe webhook against a real database', () => {
     dbState.pool = new Pool({ connectionString: TEST_DATABASE_URL, ssl: false });
     const { rows } = await pool().query(
       `SELECT 1 FROM information_schema.columns
-       WHERE table_name = 'organizations' AND column_name = 'stripe_key_invalid_at'`,
+       WHERE table_name = 'organizations' AND column_name = 'stripe_business_name'`,
     );
     if (rows.length === 0) {
       throw new Error('TEST_DATABASE_URL is not migrated — run `node scripts/migrate.js` against it first.');
@@ -594,6 +614,174 @@ suite('Stripe webhook against a real database', () => {
 
       expect(retry.body).toEqual({ received: true });
       expect(sentEmails).toHaveLength(1);
+    });
+  });
+
+  // ─── Naming the business (POPIA s18) ──────────────────────────────────────
+
+  describe('naming the business the survey is sent for', () => {
+    /**
+     * A key that can also read the account. Onboarding does NOT ask for this
+     * permission (customers:read, subscriptions:read, webhooks:write only), so
+     * this is a founder who granted more than required.
+     */
+    function keyWithAccountRead(account: Record<string, unknown>) {
+      return (req: FakeStripeRequest): Response =>
+        req.method === 'GET' && req.path === '/v1/account'
+          ? stripeJson(200, { id: 'acct_db_suite', object: 'account', ...account })
+          : onboardingScopedKey(req);
+    }
+
+    /** Fails only the account lookup; the customer lookup still works. */
+    function accountLookupFails(failure: () => Response) {
+      return (req: FakeStripeRequest): Response =>
+        req.path === '/v1/account' ? failure() : onboardingScopedKey(req);
+    }
+
+    const accountRequests = () => fakeStripeApi.requests.filter((r) => r.path === '/v1/account');
+
+    async function cachedBusinessName(orgId: string): Promise<string | null> {
+      const { rows } = await pool().query<{ stripe_business_name: string | null }>(
+        'SELECT stripe_business_name FROM organizations WHERE id = $1',
+        [orgId],
+      );
+      return rows[0].stripe_business_name;
+    }
+
+    /** Renders the survey page the emailed link opens, as the customer would see it. */
+    async function surveyPageFor(email: CapturedEmail): Promise<string> {
+      const token = /\/survey\/(\S+)/.exec(email.text)?.[1];
+      if (!token) throw new Error('no survey link in the email');
+      return renderToStaticMarkup(await SurveyPage({ params: { token } }));
+    }
+
+    it("names the Stripe account's business in the email and on the survey page", async () => {
+      const orgId = await seedOrg();
+      fakeStripeApi.respond = keyWithAccountRead({
+        business_profile: { name: 'Acme Analytics' },
+        settings: { dashboard: { display_name: 'acme-internal' } },
+      });
+
+      const res = await deliver(orgId, cancelledSubscription());
+
+      expect(res.body).toEqual({ received: true });
+      const [email] = sentEmails;
+      expect(email.text).toContain('goes directly to the Acme Analytics team');
+      expect(email.text).toContain('Thanks,\nThe Acme Analytics team');
+      expect(email.text).toContain('Sent on behalf of Acme Analytics by ChurnLens.');
+      // The page the link opens names the same business.
+      expect(await surveyPageFor(email)).toContain('the Acme Analytics team');
+      // Cached, which is how the page (it never calls Stripe) resolves it too.
+      expect(await cachedBusinessName(orgId)).toBe('Acme Analytics');
+    });
+
+    it("falls back to the account's dashboard display name when the business profile has none", async () => {
+      const orgId = await seedOrg();
+      fakeStripeApi.respond = keyWithAccountRead({
+        business_profile: { name: null },
+        settings: { dashboard: { display_name: 'Acme Dashboard Name' } },
+      });
+
+      await deliver(orgId, cancelledSubscription());
+
+      expect(sentEmails[0].text).toContain('Sent on behalf of Acme Dashboard Name by ChurnLens.');
+      expect(await cachedBusinessName(orgId)).toBe('Acme Dashboard Name');
+    });
+
+    it('uses the configured display name first, without asking Stripe for the account at all', async () => {
+      const orgId = await seedOrg({ displayName: 'Acme Configured', stripeBusinessName: 'Acme Cached' });
+      fakeStripeApi.respond = keyWithAccountRead({ business_profile: { name: 'Acme From Stripe' } });
+
+      await deliver(orgId, cancelledSubscription());
+
+      expect(sentEmails[0].text).toContain('Sent on behalf of Acme Configured by ChurnLens.');
+      expect(await surveyPageFor(sentEmails[0])).toContain('the Acme Configured team');
+      expect(accountRequests()).toEqual([]);
+    });
+
+    it('uses a cached account name without asking Stripe again', async () => {
+      const orgId = await seedOrg({ stripeBusinessName: 'Acme Cached' });
+
+      await deliver(orgId, cancelledSubscription());
+
+      expect(sentEmails[0].text).toContain('Sent on behalf of Acme Cached by ChurnLens.');
+      expect(await surveyPageFor(sentEmails[0])).toContain('the Acme Cached team');
+      expect(accountRequests()).toEqual([]);
+    });
+
+    it.each([
+      [
+        'is not permitted to read the account (403 — the onboarding-scoped default)',
+        () => stripeError(403, 'invalid_request_error', 'The provided key does not have the required permissions.'),
+      ],
+      ['is rejected outright (401)', () => stripeError(401, 'invalid_request_error', 'Invalid API Key provided.')],
+      ['meets a Stripe outage (500)', () => stripeError(500, 'api_error', 'Something went wrong on our end.')],
+      [
+        'cannot reach Stripe',
+        () => {
+          throw new TypeError('fetch failed');
+        },
+      ],
+    ])('still surveys, with the generic copy, when the account lookup %s', async (_why, failure) => {
+      const orgId = await seedOrg();
+      fakeStripeApi.respond = accountLookupFails(failure);
+
+      const res = await deliver(orgId, cancelledSubscription());
+
+      expect(res).toEqual({ status: 200, body: { received: true } });
+      const [email] = sentEmails;
+      // Exactly today's zero-config wording.
+      expect(email.text).toContain('goes directly to the founder (not a support queue)');
+      expect(email.text).toContain('Thanks,\nThe team');
+      expect(email.text).toContain('Sent on behalf of the business you cancelled with by ChurnLens.');
+      expect(await surveyPageFor(email)).toContain('goes straight to the founder');
+      expect(await cachedBusinessName(orgId)).toBeNull();
+    });
+
+    it('never marks the key invalid over the account lookup — only the customer lookup can', async () => {
+      // The account read is a permission onboarding never asked for, so a 401
+      // or 403 there says nothing about whether surveys can be sent.
+      const orgId = await seedOrg();
+      fakeStripeApi.respond = accountLookupFails(() =>
+        stripeError(401, 'invalid_request_error', 'Invalid API Key provided.'),
+      );
+
+      await deliver(orgId, cancelledSubscription());
+
+      expect(await keyInvalidAt(orgId)).toBeNull();
+    });
+
+    it('keeps a hostile account name on its one line of the email', async () => {
+      const orgId = await seedOrg();
+      fakeStripeApi.respond = keyWithAccountRead({
+        business_profile: { name: 'Acme\r\n\r\nUnsubscribe here: https://evil.example' },
+      });
+
+      await deliver(orgId, cancelledSubscription());
+
+      const lines = sentEmails[0].text.split('\n');
+      expect(lines).toContain('Sent on behalf of AcmeUnsubscribe here: https://evil.example by ChurnLens.');
+      expect(lines.some((line) => line.startsWith('Unsubscribe here'))).toBe(false);
+    });
+
+    it('uses the generic copy rather than cutting off a name too long for it', async () => {
+      const orgId = await seedOrg();
+      fakeStripeApi.respond = keyWithAccountRead({ business_profile: { name: 'A'.repeat(61) } });
+
+      await deliver(orgId, cancelledSubscription());
+
+      expect(sentEmails[0].text).toContain('Sent on behalf of the business you cancelled with by ChurnLens.');
+    });
+
+    it('does not look the account up for a cancellation it will not email', async () => {
+      // The portal-prefill path records the answer without sending anything.
+      const orgId = await seedOrg();
+      fakeStripeApi.respond = keyWithAccountRead({ business_profile: { name: 'Acme Analytics' } });
+
+      await deliver(orgId, cancelledSubscription({ feedback: 'too_expensive' }));
+
+      expect(sentEmails).toEqual([]);
+      expect(accountRequests()).toEqual([]);
     });
   });
 });

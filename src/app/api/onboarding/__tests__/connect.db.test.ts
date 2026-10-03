@@ -57,24 +57,36 @@ function onboardingScopedKey(req: FakeStripeRequest): Response {
   return stripeError(403, 'invalid_request_error', `The provided key does not have the required permissions (${req.path}).`);
 }
 
+/** onboardingScopedKey, plus read access to the account (a permission onboarding does not ask for). */
+function keyWithAccountRead(account: Record<string, unknown>) {
+  return (req: FakeStripeRequest): Response =>
+    req.method === 'GET' && req.path === '/v1/account'
+      ? stripeJson(200, { id: 'acct_connect_suite', object: 'account', ...account })
+      : onboardingScopedKey(req);
+}
+
 interface OrgOpts {
   webhookRegistered?: boolean;
   /** SQL interval ago that the webhook flagged the old key, or null. */
   keyInvalidAgo?: string | null;
+  /** A name cached from the previously connected key. */
+  stripeBusinessName?: string | null;
 }
 
 async function seedOrg(opts: OrgOpts = {}): Promise<string> {
-  const { webhookRegistered = true, keyInvalidAgo = null } = opts;
+  const { webhookRegistered = true, keyInvalidAgo = null, stripeBusinessName = null } = opts;
   const { rows } = await pool().query<{ id: string }>(
     `INSERT INTO organizations
-       (name, stripe_api_key_enc, stripe_webhook_id, stripe_webhook_secret_enc, stripe_key_invalid_at)
-     VALUES ('Connect suite org', $1, $2, $3, now() - $4::interval)
+       (name, stripe_api_key_enc, stripe_webhook_id, stripe_webhook_secret_enc,
+        stripe_key_invalid_at, stripe_business_name)
+     VALUES ('Connect suite org', $1, $2, $3, now() - $4::interval, $5)
      RETURNING id`,
     [
       encryptApiKey('rk_live_old_revoked_key'),
       webhookRegistered ? 'we_existing' : null,
       webhookRegistered ? encryptApiKey('whsec_existing') : null,
       keyInvalidAgo,
+      stripeBusinessName,
     ],
   );
   return rows[0].id;
@@ -96,8 +108,10 @@ async function orgRow(orgId: string) {
     stripe_api_key_enc: string | null;
     stripe_key_invalid_at: Date | null;
     stripe_webhook_id: string | null;
+    stripe_business_name: string | null;
   }>(
-    'SELECT stripe_api_key_enc, stripe_key_invalid_at, stripe_webhook_id FROM organizations WHERE id = $1',
+    `SELECT stripe_api_key_enc, stripe_key_invalid_at, stripe_webhook_id, stripe_business_name
+     FROM organizations WHERE id = $1`,
     [orgId],
   );
   return rows[0];
@@ -107,13 +121,14 @@ const suite = TEST_DATABASE_URL ? describe : describe.skip;
 
 suite('POST /api/onboarding/connect against a real database', () => {
   let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+  let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
 
   beforeAll(async () => {
     assertThrowawayDatabase(TEST_DATABASE_URL!);
     dbState.pool = new Pool({ connectionString: TEST_DATABASE_URL, ssl: false });
     const { rows } = await pool().query(
       `SELECT 1 FROM information_schema.columns
-       WHERE table_name = 'organizations' AND column_name = 'stripe_key_invalid_at'`,
+       WHERE table_name = 'organizations' AND column_name = 'stripe_business_name'`,
     );
     if (rows.length === 0) {
       throw new Error('TEST_DATABASE_URL is not migrated — run `node scripts/migrate.js` against it first.');
@@ -131,11 +146,13 @@ suite('POST /api/onboarding/connect against a real database', () => {
     await pool().query('TRUNCATE organizations CASCADE');
     fakeStripeApi.reset(onboardingScopedKey);
     consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
 
   afterEach(() => {
     vi.unstubAllEnvs();
     consoleErrorSpy.mockRestore();
+    consoleWarnSpy.mockRestore();
   });
 
   describe('reconnecting after Stripe rejected the old key', () => {
@@ -161,6 +178,46 @@ suite('POST /api/onboarding/connect against a real database', () => {
       expect(org.stripe_key_invalid_at).toBeNull();
       // Registered with the key just saved, not the stored (revoked) one.
       expect(fakeStripeApi.requests.find((r) => r.path === '/v1/webhook_endpoints')?.apiKey).toBe(NEW_KEY);
+    });
+  });
+
+  describe("caching the Stripe account's business name for the survey copy", () => {
+    it('stores the name the new key can read', async () => {
+      const orgId = await seedOrg();
+      fakeStripeApi.reset(keyWithAccountRead({ business_profile: { name: 'Acme Analytics' } }));
+
+      const res = await POST(connectRequest(orgId, NEW_KEY));
+
+      expect(res.status).toBe(200);
+      expect((await orgRow(orgId)).stripe_business_name).toBe('Acme Analytics');
+      expect(fakeStripeApi.requests.find((r) => r.path === '/v1/account')?.apiKey).toBe(NEW_KEY);
+    });
+
+    it('connects a key that may not read the account — no new required permission — and caches no name', async () => {
+      const orgId = await seedOrg();
+
+      const res = await POST(connectRequest(orgId, NEW_KEY));
+
+      expect(res.status).toBe(200);
+      const org = await orgRow(orgId);
+      expect(org.stripe_business_name).toBeNull();
+      expect(decryptApiKey(org.stripe_api_key_enc!)).toBe(NEW_KEY);
+      // A 403 on the account is not a 403 on what surveys need.
+      expect(org.stripe_key_invalid_at).toBeNull();
+      // Explained in the log by org id, never by key.
+      const logged = consoleWarnSpy.mock.calls.map((call) => call.map(String).join(' ')).join('\n');
+      expect(logged).toContain(orgId);
+      expect(logged).not.toContain(NEW_KEY);
+    });
+
+    it("drops a name cached from the previous key when the new key can't confirm one", async () => {
+      // The new key may belong to a different Stripe account; surveys must not
+      // go out naming the old business.
+      const orgId = await seedOrg({ stripeBusinessName: 'Previous Business Ltd' });
+
+      await POST(connectRequest(orgId, NEW_KEY));
+
+      expect((await orgRow(orgId)).stripe_business_name).toBeNull();
     });
   });
 });

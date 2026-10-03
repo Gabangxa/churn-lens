@@ -35,6 +35,13 @@ vi.mock('stripe', () => {
   class StripePermissionError extends Error {}
   class MockStripe {
     webhookEndpoints = { create: (...args: unknown[]) => webhookEndpointsCreateMock(...args) };
+    // What a key made per the onboarding instructions gets for the optional
+    // business-name lookup. connect.db.test.ts covers the lookup for real.
+    accounts = {
+      retrieveCurrent: async () => {
+        throw new StripePermissionError('The provided key does not have the required permissions.');
+      },
+    };
     static errors = { StripeAuthenticationError, StripePermissionError };
   }
   return { default: MockStripe };
@@ -82,9 +89,13 @@ beforeEach(() => {
   process.env.NEXT_PUBLIC_APP_URL = APP_URL;
   authOk();
   queryOneMock.mockResolvedValue({ id: ORG_ID, stripe_webhook_id: null });
+  // The business-name lookup warns when the key may not read the account,
+  // which the Stripe mock above makes the default.
+  vi.spyOn(console, 'warn').mockImplementation(() => {});
 });
 
 afterEach(() => {
+  vi.mocked(console.warn).mockRestore();
   if (ORIGINAL_APP_URL === undefined) delete process.env.NEXT_PUBLIC_APP_URL;
   else process.env.NEXT_PUBLIC_APP_URL = ORIGINAL_APP_URL;
 });
@@ -138,8 +149,9 @@ describe('POST /api/onboarding/connect — happy path', () => {
 
     expect(encryptApiKeyMock).toHaveBeenCalledWith(RESTRICTED_KEY);
     expect(queryMock).toHaveBeenCalledWith(
-      expect.stringMatching(/UPDATE organizations SET stripe_api_key_enc/),
-      [`enc:${RESTRICTED_KEY}`, ORG_ID],
+      expect.stringMatching(/UPDATE organizations\s+SET stripe_api_key_enc = \$1/),
+      // No business name: this key may not read the account (see the mock).
+      [`enc:${RESTRICTED_KEY}`, null, ORG_ID],
     );
 
     expect(webhookEndpointsCreateMock).toHaveBeenCalledWith(

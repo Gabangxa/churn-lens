@@ -499,6 +499,20 @@ async function migrate() {
       ADD COLUMN IF NOT EXISTS stripe_key_invalid_at timestamptz;
   `);
 
+  // The connected Stripe account's public business name (business_profile.name,
+  // else settings.dashboard.display_name), cached so the survey email and the
+  // survey page can say which business is asking (POPIA s18) when the founder
+  // has set no display name. Reading it needs an account permission onboarding
+  // does not ask the restricted key for, so it is best-effort: written by
+  // /api/onboarding/connect on every key save (NULL when the key cannot read
+  // it, so a previous account's name never outlives its key) and filled lazily
+  // by the Stripe webhook. Nullable, no default, no backfill: NULL means the
+  // generic copy, exactly what every org had before this column.
+  await pool.query(`
+    ALTER TABLE organizations
+      ADD COLUMN IF NOT EXISTS stripe_business_name text;
+  `);
+
   console.log('Database migration complete');
   await pool.end();
 }
