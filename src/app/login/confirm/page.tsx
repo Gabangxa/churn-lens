@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import SiteHeader from '@/components/SiteHeader';
 import { findUsableLoginToken } from '@/lib/login-token';
+import { reportError } from '@/lib/report-error';
 import ConfirmSignInForm from './ConfirmSignInForm';
 
 export const metadata: Metadata = {
@@ -40,7 +41,20 @@ export default async function ConfirmSignInPage({
   // A repeated ?token= parses as string[]; the redirect from verify only ever
   // writes one, so anything else is hand-made and gets the first value.
   const token = Array.isArray(searchParams.token) ? searchParams.token[0] : searchParams.token;
-  const pending = token ? await findUsableLoginToken(token) : null;
+  let pending: { email: string } | null = null;
+  if (token) {
+    try {
+      pending = await findUsableLoginToken(token);
+    } catch (err) {
+      // Reported, then rethrown so Next still renders its error page: Next 14
+      // logs a throw from a server component but tells nobody, and a confirm
+      // page that cannot read the database signs nobody in. No token in the
+      // meta: it signs someone in until it is used.
+      reportError('auth.confirm', err, { step: 'token_lookup' });
+      throw err;
+    }
+  }
+  // Outside the try: redirect() works by throwing.
   if (!token || !pending) redirect('/login?error=expired');
 
   return (
