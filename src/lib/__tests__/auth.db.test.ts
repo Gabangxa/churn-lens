@@ -11,7 +11,7 @@ import { assertThrowawayDatabase } from '../../../e2e/helpers/throwaway-db';
  * question (does the org exist; has it signed out everywhere since). The unit
  * suite (auth.test.ts) pins the cookie itself with that lookup stubbed; this
  * one proves the lookup, end to end: a cookie minted by the real
- * /api/auth/verify, checked by the real requireOrgId/getOrgIdFromCookieStore,
+ * POST /api/auth/verify, checked by the real requireOrgId/getOrgIdFromCookieStore,
  * against rows a real engine holds.
  *
  * Same contract as src/app/api/purge/__tests__/route.db.test.ts: skipped
@@ -38,7 +38,7 @@ vi.mock('@/lib/db', () => ({
 }));
 
 import { requireOrgId, getOrgIdFromCookieStore, revokeAllSessions } from '../auth';
-import { GET as verifyMagicLink } from '@/app/api/auth/verify/route';
+import { POST as confirmMagicLink } from '@/app/api/auth/verify/route';
 import { POST as logout } from '@/app/api/auth/logout/route';
 // Runs unmocked: for an org with no Stripe webhook and no Polar subscription
 // (all seedOrg creates) every step it takes is SQL against this database.
@@ -58,8 +58,9 @@ async function seedOrg(name = 'Org'): Promise<string> {
 
 /**
  * Sign a device in the only way the app allows: a magic-link token in the
- * database, consumed by /api/auth/verify. `at` sets the app clock for the
- * click, which is what the session's signed issued-at records.
+ * database, consumed by the confirm page's same-origin POST to
+ * /api/auth/verify. `at` sets the app clock for the click, which is what the
+ * session's signed issued-at records.
  */
 async function signIn(orgId: string, at?: Date): Promise<string> {
   const rawToken = randomBytes(32).toString('base64url');
@@ -73,8 +74,12 @@ async function signIn(orgId: string, at?: Date): Promise<string> {
     vi.setSystemTime(at);
   }
   try {
-    const res = await verifyMagicLink(
-      new NextRequest(`http://localhost/api/auth/verify?token=${rawToken}`),
+    const res = await confirmMagicLink(
+      new NextRequest('http://localhost/api/auth/verify', {
+        method: 'POST',
+        headers: { origin: 'http://localhost', 'sec-fetch-site': 'same-origin' },
+        body: new URLSearchParams({ token: rawToken }),
+      }),
     );
     const cookie = res.cookies.get(COOKIE_NAME)?.value;
     if (!cookie) throw new Error(`verify set no session cookie (status ${res.status})`);

@@ -1,65 +1,126 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryOne } from '@/lib/db';
-import { hashLoginToken } from '@/lib/crypto';
-import { setOrgCookie } from '@/lib/auth';
+import { assertSameOrigin, setOrgCookie } from '@/lib/auth';
 import { redirectUrl } from '@/lib/app-url';
 import { sanitizeNext } from '@/lib/next-paths';
+import { consumeLoginToken } from '@/lib/login-token';
 
 /**
- * Consume a magic-link token and establish the session. The ONLY place a
- * session is ever minted — every other route either requires an existing
- * session (requireOrgId) or has none. That is what closes the account
- * takeover this route accompanies: nothing upstream of a proven click on a
- * link sent to a specific inbox can end in a set-cookie.
+ * Magic-link sign-in, in two steps: the link in the email (GET) only forwards
+ * to a confirm page, and the confirm page's same-origin form (POST) is what
+ * uses the link up and mints the session.
  *
- * Single-use is enforced atomically by the UPDATE guard (used_at IS NULL) rather
- * than a check-then-act, so a replayed or concurrent second click can't log in.
- * On any failure (missing/invalid/expired/already-used) we redirect to /login
- * with a generic error rather than distinguishing cases.
+ * A GET that signed you in was a login-CSRF primitive. An attacker requests a
+ * link for their OWN address and navigates a victim's browser to it — a
+ * link, a redirect, an <img> — and the victim is silently signed into the
+ * attacker's org, sitting on /onboarding, one paste away from handing over
+ * their Stripe key (and with it, their customers' survey answers). It also
+ * let mail scanners and link prefetchers, which GET or HEAD every URL in an
+ * email, spend a single-use link before the founder ever clicked it.
+ *
+ * The emailed URL is unchanged (/api/auth/verify?token=...), so links already
+ * sitting in inboxes keep working across this deploy, and across a rollback.
+ */
+
+function failedSignIn(req: NextRequest): NextResponse {
+  // One generic answer for missing, unknown, used and expired: telling them
+  // apart would tell a guesser which tokens exist.
+  return NextResponse.redirect(redirectUrl('/login?error=expired', req), { status: 303 });
+}
+
+/**
+ * The link in the email. Inert by design: no database, no cookie. A link
+ * scanner may fetch it any number of times (Next answers HEAD with this same
+ * handler) and the founder can still sign in afterwards.
  */
 export async function GET(req: NextRequest) {
-  const fail = () =>
-    NextResponse.redirect(redirectUrl('/login?error=expired', req), { status: 303 });
-
   const token = req.nextUrl.searchParams.get('token');
-  if (!token) return fail();
-
-  const row = await queryOne<{ org_id: string; redirect_to: string | null }>(
-    `UPDATE login_tokens SET used_at = now()
-     WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now()
-     RETURNING org_id, redirect_to`,
-    [hashLoginToken(token)],
+  if (!token) return failedSignIn(req);
+  return NextResponse.redirect(
+    redirectUrl(`/login/confirm?token=${encodeURIComponent(token)}`, req),
+    { status: 303 },
   );
+}
 
-  if (!row) return fail();
+/**
+ * The confirm page's "Sign in" button. The ONLY place a session is ever
+ * minted — every other route either requires an existing session
+ * (requireOrgId) or has none — so nothing short of a same-origin submission
+ * carrying a link that was emailed to a specific inbox can end in a
+ * set-cookie.
+ *
+ * assertSameOrigin runs first: a foreign page's auto-submitting form is the
+ * login-CSRF attack itself, and it must be refused before the token is so
+ * much as looked up (leaving the link usable by its owner).
+ */
+export async function POST(req: NextRequest) {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
 
-  // Stamped in the same statement as the lookup (UPDATE ... RETURNING, not a
-  // separate SELECT + UPDATE): this is the one place a real, inbox-verified
-  // sign-in happens, and the purge job's abandoned-signup rule (src/app/api/
-  // purge) depends on last_login_at surviving as long as this org keeps being
-  // used, distinct from login_tokens rows, which the same job deletes a day
-  // after they expire regardless of whether anyone ever used them.
+  const token = await readSubmittedToken(req);
+  if (!token) return failedSignIn(req);
+
+  const consumed = await consumeLoginToken(token);
+  if (!consumed) return failedSignIn(req);
+
+  // Stamped on every real, inbox-verified sign-in: the purge job's
+  // abandoned-signup rule (src/app/api/purge) depends on last_login_at
+  // surviving as long as this org keeps being used, distinct from
+  // login_tokens rows, which the same job deletes a day after they expire
+  // regardless of whether anyone ever used them. RETURNING the key in the
+  // same statement saves a second round trip for the destination below.
   const org = await queryOne<{ stripe_api_key_enc: string | null }>(
-    'UPDATE organizations SET last_login_at = now() WHERE id = $1 RETURNING stripe_api_key_enc',
-    [row.org_id],
+    `UPDATE organizations SET last_login_at = now() WHERE id = $1
+     RETURNING stripe_api_key_enc`,
+    [consumed.orgId],
   );
 
-  // Re-validate redirect_to against the same allow-list /api/auth/request wrote
-  // it under, rather than trusting the stored value verbatim. Today request is
-  // the only writer and it already allow-lists on the way in, so this is
-  // defense in depth, not the primary guard — but a row this route trusts
-  // blindly is one bad migration, admin query, or future writer away from an
-  // open redirect on the one route that also hands out a session.
-  const validRedirectTo = sanitizeNext(row.redirect_to);
-
-  // No key yet (brand-new signup, or a founder who never finished connecting)
-  // means onboarding is where they belong regardless of what redirect_to says
-  // — except redirect_to itself may BE an onboarding link carrying the plan a
-  // pricing-page click chose, in which case it already is the destination.
-  const destination = !org?.stripe_api_key_enc
-    ? (validRedirectTo?.startsWith('/onboarding') ? validRedirectTo : '/onboarding')
-    : (validRedirectTo ?? '/dashboard');
-
+  const destination = destinationAfterSignIn(org, consumed.redirectTo);
   const response = NextResponse.redirect(redirectUrl(destination, req), { status: 303 });
-  return setOrgCookie(response, row.org_id);
+  return setOrgCookie(response, consumed.orgId);
+}
+
+/**
+ * The token from the confirm page's form body. A body that is not a form at
+ * all (wrong content type, truncated) is answered like a missing token: the
+ * only legitimate caller is our own <form>, so anything else is a client we
+ * owe the generic failure, not a 500.
+ */
+async function readSubmittedToken(req: NextRequest): Promise<string | null> {
+  let form: FormData;
+  try {
+    form = await req.formData();
+  } catch {
+    return null;
+  }
+  const token = form.get('token');
+  return typeof token === 'string' && token !== '' ? token : null;
+}
+
+/**
+ * Where a founder goes once signed in.
+ *
+ * No Stripe key yet (brand-new signup, or a founder who never finished
+ * connecting) means onboarding, whatever redirect_to says — except that
+ * redirect_to may itself BE an onboarding link carrying the plan a
+ * pricing-page click chose, in which case it already is the destination.
+ *
+ * redirect_to is re-validated against the same allow-list /api/auth/request
+ * wrote it under rather than trusted as stored. Request is the only writer
+ * and allow-lists on the way in, so this is defense in depth — but a row this
+ * route trusted blindly would be one bad migration, admin query or future
+ * writer away from an open redirect on the one route that hands out a session.
+ *
+ * A missing org row (deleted out from under a live token) is treated as
+ * keyless; the session minted for it fails its next check anyway.
+ */
+function destinationAfterSignIn(
+  org: { stripe_api_key_enc: string | null } | null,
+  storedRedirectTo: string | null,
+): string {
+  const redirectTo = sanitizeNext(storedRedirectTo);
+  if (!org?.stripe_api_key_enc) {
+    return redirectTo?.startsWith('/onboarding') ? redirectTo : '/onboarding';
+  }
+  return redirectTo ?? '/dashboard';
 }

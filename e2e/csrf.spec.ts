@@ -36,6 +36,16 @@ test.describe('cross-site request rejection', () => {
     });
     expect(login.status()).toBe(403);
 
+    // The magic-link confirmation — the one request that mints a session. A
+    // foreign page submitting it is login CSRF; auth.spec.ts covers it with a
+    // real token in a signed-in browser.
+    const confirm = await request.post('/api/auth/verify', {
+      headers: { origin: EVIL_ORIGIN },
+      form: { token: 'not-a-real-token' },
+      maxRedirects: 0,
+    });
+    expect(confirm.status()).toBe(403);
+
     // A GET, but it starts a checkout against the signed-in org, so it is
     // state-changing in every way that matters.
     const checkout = await request.get('/api/billing/checkout?plan=starter', {

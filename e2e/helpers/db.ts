@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
-import { E2E_BASE_URL, TEST_DATABASE_URL } from '../env';
+import { TEST_DATABASE_URL } from '../env';
 
 /**
  * Direct database access for the e2e specs: seed the preconditions a flow
@@ -120,11 +120,20 @@ export interface SeedLoginTokenOptions {
   expiresInMs?: number;
 }
 
+/**
+ * Write a magic-link token the way /api/auth/request does (hash only) and
+ * return the raw token plus the path of the link the email would carry.
+ *
+ * A path, not an absolute URL, so it resolves against the run's configured
+ * baseURL in page.goto — the same server everything else in the run talks to.
+ * Opening it lands on the /login/confirm page; nothing is signed in until
+ * that page's "Sign in" is pressed (see confirmSignIn in ./session).
+ */
 export async function seedLoginToken(
   orgId: string,
   email: string,
   options: SeedLoginTokenOptions = {},
-): Promise<{ rawToken: string; verifyUrl: string }> {
+): Promise<{ rawToken: string; verifyPath: string }> {
   // 32 random bytes, base64url — the shape generateLoginToken() emits.
   const rawToken = randomBytes(32).toString('base64url');
   const expiresAt = new Date(Date.now() + (options.expiresInMs ?? 15 * 60 * 1000));
@@ -141,8 +150,18 @@ export async function seedLoginToken(
   );
   return {
     rawToken,
-    verifyUrl: `${E2E_BASE_URL}/api/auth/verify?token=${encodeURIComponent(rawToken)}`,
+    verifyPath: `/api/auth/verify?token=${encodeURIComponent(rawToken)}`,
   };
+}
+
+/** login_tokens.used_at for a raw token (null while unspent); throws if no such token was seeded. */
+export async function loginTokenUsedAt(rawToken: string): Promise<string | null> {
+  const row = await queryOne<{ used_at: string | null }>(
+    'SELECT used_at FROM login_tokens WHERE token_hash = $1',
+    [hashLoginToken(rawToken)],
+  );
+  if (!row) throw new Error('no login_tokens row for that token');
+  return row.used_at;
 }
 
 export interface SeedSurveyResponseOptions {

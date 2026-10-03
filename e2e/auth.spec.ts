@@ -1,16 +1,17 @@
 import { expect, test } from '@playwright/test';
-import { closeDb, queryOne, seedLoginToken, seedOrg, uniqueEmail } from './helpers/db';
+import { closeDb, loginTokenUsedAt, queryOne, seedLoginToken, seedOrg, uniqueEmail } from './helpers/db';
 import { E2E_CLIENT_IP } from './env';
-import { atLoginWithNext, loginAs } from './helpers/session';
+import { atLoginWithNext, confirmSignIn, loginAs } from './helpers/session';
 
 const SESSION_COOKIE = 'churnlens_org_id';
 
 /**
- * Sign-in is the whole trust boundary: /api/auth/verify is the only route in
- * the app that ever mints a session, and everything else assumes a cookie it
- * did not issue cannot exist. These specs cover the four ways that can go
- * wrong end to end — a link that works, one that is replayed, one that has
- * expired, and a page that should have demanded one and didn't.
+ * Sign-in is the whole trust boundary: the confirm page's same-origin POST to
+ * /api/auth/verify is the only request in the app that ever mints a session,
+ * and everything else assumes a cookie it did not issue cannot exist. These
+ * specs cover the ways that can go wrong end to end — a link that works, one
+ * that signs someone in merely by being opened, one that is replayed, one
+ * that has expired, and a page that should have demanded one and didn't.
  */
 test.describe('authentication', () => {
   test.afterAll(async () => {
@@ -95,22 +96,83 @@ test.describe('authentication', () => {
     expect(rawToken.length).toBeGreaterThan(20);
   });
 
-  test('replaying a consumed magic link mints no second session', async ({ page, browser }) => {
+  test('opening a magic link signs nobody in until the founder confirms on our own page', async ({ page }) => {
+    const email = uniqueEmail('confirm');
+    const { orgId } = await seedOrg({ email });
+    const { rawToken, verifyPath } = await seedLoginToken(orgId, email);
+
+    // What a mail scanner, a link prefetcher or the founder's click does.
+    await page.goto(verifyPath);
+    await page.waitForURL((url) => url.pathname === '/login/confirm');
+
+    // The page names the address the link was sent to...
+    await expect(page.getByRole('heading', { level: 1 })).toContainText(`Sign in to ChurnLens as ${email}`);
+    // ...and so far nothing has happened: no session, and the link is unspent.
+    expect((await page.context().cookies()).find((c) => c.name === SESSION_COOKIE)).toBeUndefined();
+    expect(await loginTokenUsedAt(rawToken)).toBeNull();
+
+    await confirmSignIn(page);
+    await page.waitForURL((url) => url.pathname === '/onboarding');
+
+    expect((await page.context().cookies()).find((c) => c.name === SESSION_COOKIE)).toBeDefined();
+    expect(await loginTokenUsedAt(rawToken)).not.toBeNull();
+  });
+
+  test("an attacker's own link opened in a signed-in browser does not switch its session", async ({ page }) => {
+    // Login CSRF: the attacker requests a link for an address they own and
+    // gets a victim's browser to open it. Before the confirm step, that alone
+    // signed the victim into the attacker's org.
+    const victimEmail = uniqueEmail('victim');
+    const { orgId: victimOrg } = await seedOrg({ email: victimEmail });
+    await loginAs(page, { orgId: victimOrg, email: victimEmail });
+    await page.waitForURL((url) => url.pathname === '/onboarding');
+    const victimCookie = (await page.context().cookies()).find((c) => c.name === SESSION_COOKIE);
+    expect(victimCookie).toBeDefined();
+
+    const attackerEmail = uniqueEmail('attacker');
+    const { orgId: attackerOrg } = await seedOrg({ email: attackerEmail });
+    const { rawToken, verifyPath } = await seedLoginToken(attackerOrg, attackerEmail);
+
+    await page.goto(verifyPath);
+    await page.waitForURL((url) => url.pathname === '/login/confirm');
+
+    // The victim is shown whose account this is, and is still signed in as themselves.
+    await expect(page.getByText(attackerEmail)).toBeVisible();
+
+    // Nor can the attacker's page press the button for them: a cross-site
+    // form POST of the token, sent from this browser with its cookies, is
+    // refused before the token is looked at.
+    const forged = await page.request.post('/api/auth/verify', {
+      headers: { origin: 'https://evil.example' },
+      form: { token: rawToken },
+      maxRedirects: 0,
+    });
+    expect(forged.status()).toBe(403);
+
+    const cookieAfter = (await page.context().cookies()).find((c) => c.name === SESSION_COOKIE);
+    expect(cookieAfter?.value).toBe(victimCookie!.value);
+    expect(await loginTokenUsedAt(rawToken)).toBeNull();
+  });
+
+  test('replaying a consumed magic link mints no second session', async ({ page, browser, baseURL }) => {
     const email = uniqueEmail('replay');
     const { orgId } = await seedOrg({ email });
 
-    const { verifyUrl } = await loginAs(page, { orgId, email });
+    const { verifyPath } = await loginAs(page, { orgId, email });
     await page.waitForURL((url) => url.pathname === '/onboarding');
 
     // A second browser, so "no cookie was set" is a fact about this request
     // rather than about a context that already holds one from the first click.
     // A context created straight off `browser` does not inherit the config's
-    // `use` block, so the run's rate-limit identity has to be restated here.
+    // `use` block, so the run's server and rate-limit identity are restated.
     const replayContext = await browser.newContext({
+      baseURL,
       extraHTTPHeaders: { 'x-forwarded-for': E2E_CLIENT_IP },
     });
     const replayPage = await replayContext.newPage();
-    await replayPage.goto(verifyUrl);
+    // A used link does not even reach the confirm button: the confirm page
+    // sends it straight to the error.
+    await replayPage.goto(verifyPath);
     await replayPage.waitForURL(
       (url) => url.pathname === '/login' && url.searchParams.get('error') === 'expired',
     );
@@ -123,9 +185,9 @@ test.describe('authentication', () => {
   test('an expired magic link is refused', async ({ page }) => {
     const email = uniqueEmail('expired');
     const { orgId } = await seedOrg({ email });
-    const { verifyUrl } = await seedLoginToken(orgId, email, { expiresInMs: -60_000 });
+    const { verifyPath } = await seedLoginToken(orgId, email, { expiresInMs: -60_000 });
 
-    await page.goto(verifyUrl);
+    await page.goto(verifyPath);
     await page.waitForURL(
       (url) => url.pathname === '/login' && url.searchParams.get('error') === 'expired',
     );

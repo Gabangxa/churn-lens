@@ -20,7 +20,7 @@ export default function LoginPage() {
   // if the org still has no Stripe key) when nothing is sent.
   const [next, setNext] = useState<string | null>(null);
 
-  // Surfaced when /api/auth/verify bounces an invalid/expired/used link back here,
+  // Surfaced when /login/confirm or /api/auth/verify bounces an invalid/expired/used link back here,
   // or when a plan/next was carried from the landing page or a login-gated route.
   // Read from the URL client-side to avoid a useSearchParams Suspense boundary.
   useEffect(() => {

@@ -117,7 +117,7 @@ describe('POST /api/auth/request — signup vs login', () => {
 
     // The whole point of the account-takeover fix: requesting a link — even
     // one that creates the account — never itself mints a session. Only a
-    // click on the emailed link (/api/auth/verify) can do that.
+    // confirmation of the emailed link (POST /api/auth/verify) can do that.
     expect(res.headers.get('set-cookie')).toBeNull();
   });
 

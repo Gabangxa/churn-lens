@@ -140,6 +140,10 @@ export async function POST(req: NextRequest) {
       [tokenHash, orgId, normEmail, expiresAt, redirectTo],
     );
 
+    // Opening this only forwards to the /login/confirm page; the session is
+    // minted by that page's same-origin POST (see /api/auth/verify). The URL
+    // itself is unchanged from the one-step flow so that links already in
+    // inboxes, and links mailed across a deploy or rollback, keep working.
     const loginUrl = `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/verify?token=${token}`;
 
     try {
@@ -156,9 +160,10 @@ Here's your ChurnLens login link:
 
 → ${loginUrl}
 
-This link signs you in — or, if this is your first time, finishes creating
-your account. It's valid for 15 minutes and can only be used once. If you
-didn't request this, you can safely ignore this email — nothing will happen.
+Open it and confirm to sign in — or, if this is your first time, to finish
+creating your account. It's valid for 15 minutes and can only be used once.
+If you didn't request this, you can safely ignore this email — nothing will
+happen.
 
 — ChurnLens`,
       });
