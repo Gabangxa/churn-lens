@@ -11,10 +11,12 @@ vi.mock('@/lib/db', () => ({
 const requireOrgIdMock = vi.fn();
 const clearOrgCookieMock = vi.fn();
 const assertSameOriginMock = vi.fn();
+const revokeAllSessionsMock = vi.fn();
 vi.mock('@/lib/auth', () => ({
   requireOrgId: (...args: unknown[]) => requireOrgIdMock(...args),
   clearOrgCookie: (...args: unknown[]) => clearOrgCookieMock(...args),
   assertSameOrigin: (...args: unknown[]) => assertSameOriginMock(...args),
+  revokeAllSessions: (...args: unknown[]) => revokeAllSessionsMock(...args),
 }));
 
 const disconnectStripeMock = vi.fn();
@@ -41,6 +43,7 @@ beforeEach(() => {
   clearOrgCookieMock.mockReset();
   disconnectStripeMock.mockReset();
   revokeMock.mockReset();
+  revokeAllSessionsMock.mockReset().mockResolvedValue(undefined);
 
   assertSameOriginMock.mockReset();
   assertSameOriginMock.mockReturnValue(null); // same-origin by default
@@ -208,6 +211,9 @@ describe('POST /api/settings/account/delete — teardown order and cookie', () =
     revokeMock.mockImplementation(async () => {
       order.push('revoke');
     });
+    revokeAllSessionsMock.mockImplementation(async () => {
+      order.push('sign-out-everywhere');
+    });
     clearOrgCookieMock.mockImplementation((res: NextResponse) => {
       order.push('clear-cookie');
       return res;
@@ -217,7 +223,9 @@ describe('POST /api/settings/account/delete — teardown order and cookie', () =
 
     // Billing access has to stop before the founder is told it stopped —
     // "deleted" that still charges a card is the failure that costs money.
-    expect(order).toEqual(['mark', 'disconnect', 'revoke', 'clear-cookie']);
+    // Sessions end last: until billing is settled the founder may still need
+    // one (see the revoke_failed case below).
+    expect(order).toEqual(['mark', 'disconnect', 'revoke', 'sign-out-everywhere', 'clear-cookie']);
   });
 
   it('keeps the session when the Polar revoke failed, so the billing-portal link still works', async () => {
@@ -232,7 +240,46 @@ describe('POST /api/settings/account/delete — teardown order and cookie', () =
     // /api/billing/portal needs the session; clearing it here would dead-end
     // the one remediation the founder is being asked to perform.
     expect(clearOrgCookieMock).not.toHaveBeenCalled();
+    // Same reasoning for signing out everywhere: it would end this browser's
+    // session too, and only /api/auth/verify may mint a replacement.
+    expect(revokeAllSessionsMock).not.toHaveBeenCalled();
     expect(await res.json()).toMatchObject({ ok: true, billing: 'revoke_failed' });
+  });
+
+  it('signs the org out on every device, keyed by the session org id', async () => {
+    await POST(deleteRequest());
+
+    expect(revokeAllSessionsMock).toHaveBeenCalledTimes(1);
+    expect(revokeAllSessionsMock).toHaveBeenCalledWith(ORG_ID);
+  });
+
+  it('does not fail the request when signing out everywhere fails — the deletion already stands — but reports it', async () => {
+    revokeAllSessionsMock.mockRejectedValue(new Error('db down'));
+
+    const res = await POST(deleteRequest());
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toMatchObject({ ok: true, sessions: 'revoke_failed' });
+    // This browser is still signed out; only the other devices were missed.
+    expect(clearOrgCookieMock).toHaveBeenCalledTimes(1);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining(ORG_ID),
+      expect.any(Error),
+    );
+  });
+
+  it('omits `sessions` from the response when signing out everywhere succeeds', async () => {
+    const body = await (await POST(deleteRequest())).json();
+    expect(body).not.toHaveProperty('sessions');
+  });
+
+  it('has no sessions to end when the org row is already gone', async () => {
+    queryOneMock.mockResolvedValue(null);
+
+    await POST(deleteRequest());
+
+    expect(revokeAllSessionsMock).not.toHaveBeenCalled();
   });
 
   it('returns whatever clearOrgCookie produced', async () => {

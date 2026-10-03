@@ -40,6 +40,9 @@ vi.mock('@/lib/db', () => ({
 import { requireOrgId, getOrgIdFromCookieStore, revokeAllSessions } from '../auth';
 import { GET as verifyMagicLink } from '@/app/api/auth/verify/route';
 import { POST as logout } from '@/app/api/auth/logout/route';
+// Runs unmocked: for an org with no Stripe webhook and no Polar subscription
+// (all seedOrg creates) every step it takes is SQL against this database.
+import { POST as requestAccountDeletion } from '@/app/api/settings/account/delete/route';
 
 const COOKIE_NAME = 'churnlens_org_id';
 const ENCRYPTION_KEY = 'e'.repeat(64);
@@ -303,5 +306,30 @@ suite('sessions against a real database', () => {
       [orgId],
     );
     expect((rows[0].sessions_valid_after as Date).getTime()).toBe(t2.getTime());
+  });
+
+  it('requesting account deletion signs the org out on every device, not just the one that asked', async () => {
+    // The founder has asked for their data to be erased; a session left open
+    // on some other device would keep serving their customers' survey answers
+    // for the whole 30-day grace window.
+    const orgId = await seedOrg();
+    const laptop = await signIn(orgId);
+    const phone = await signIn(orgId);
+
+    const res = await requestAccountDeletion(
+      new NextRequest('http://localhost/api/settings/account/delete', {
+        method: 'POST',
+        headers: { cookie: `${COOKIE_NAME}=${laptop}`, 'sec-fetch-site': 'same-origin' },
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true });
+    expect(await sessionOrg(phone)).toBeNull();
+    expect(await sessionOrg(laptop)).toBeNull();
+    // What deletion means is unchanged: the row stays for the grace window,
+    // and a fresh magic link still signs the founder in during it, exactly as
+    // before. Only the sessions that existed at the request are ended.
+    expect(await sessionOrg(await signIn(orgId))).toBe(orgId);
   });
 });
