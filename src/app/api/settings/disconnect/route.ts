@@ -3,8 +3,9 @@ import { queryOne } from '@/lib/db';
 import { assertSameOrigin, requireOrgId } from '@/lib/auth';
 import { redirectUrl } from '@/lib/app-url';
 import { disconnectStripe } from '@/lib/stripe-disconnect';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
-export async function DELETE(req: NextRequest) {
+async function disconnect(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
 
@@ -37,3 +38,5 @@ export async function DELETE(req: NextRequest) {
   // this can never throw on a misconfigured deploy.
   return NextResponse.redirect(redirectUrl('/onboarding', req), { status: 303 });
 }
+
+export const DELETE = withErrorReporting('settings.disconnect', disconnect);

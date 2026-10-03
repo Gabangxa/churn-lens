@@ -5,6 +5,7 @@ import { verifyCronSecret } from '@/lib/auth';
 import { reportingWeek } from '@/lib/week';
 import { claimCronRun, cronRunRecord, finishCronRun, MAX_ATTEMPTS, STALE_RUNNING_MS } from '@/lib/cron';
 import { reportError } from '@/lib/report-error';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 interface ThemeRow {
   org_id: string;
@@ -14,7 +15,7 @@ interface ThemeRow {
   mrr_impact: number;
 }
 
-export async function POST(req: Request) {
+async function runDigest(req: Request) {
   if (!verifyCronSecret(req.headers.get('authorization'))) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
@@ -241,6 +242,8 @@ Manage preferences: ${settingsUrl}`;
 
   return NextResponse.json({ sent, failed, weekOf: weekOfStr });
 }
+
+export const POST = withErrorReporting('cron.digest', runDigest);
 
 // Kept for manual triggering and any external scheduler that issues GET; the
 // in-process scheduler in instrumentation.ts uses POST. Safe to expose as GET

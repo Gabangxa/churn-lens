@@ -521,4 +521,22 @@ describe('POST /api/themes — error reporting', () => {
 
     expect(getErrorReportSnapshot().totalReported).toBe(0);
   });
+
+  it.each([
+    ['claiming the run', () => claimCronRunMock.mockRejectedValueOnce(new Error('connection terminated'))],
+    ['recording a finished run', () => finishCronRunMock.mockRejectedValueOnce(new Error('connection terminated'))],
+  ])('reports a throw outside the run\'s own catch (%s) instead of leaving Next to log a bare 500', async (_label, breakIt) => {
+    breakIt();
+
+    const res = await POST(themesRequest());
+
+    expect(res.status).toBe(500);
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'cron.themes',
+        message: 'connection terminated',
+        meta: { step: 'unhandled', method: 'POST' },
+      }),
+    ]);
+  });
 });

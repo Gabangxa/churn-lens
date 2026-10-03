@@ -421,4 +421,32 @@ describe('POST /api/survey — error reporting', () => {
 
     expect(getErrorReportSnapshot().totalReported).toBe(0);
   });
+
+  it.each([
+    ['JSON', { 'content-type': 'application/json' }, '{"token":"x"}'],
+    ['a multipart body with no boundary', { 'content-type': 'multipart/form-data' }, 'garbage'],
+  ])('answers 400 to a body that is not a form (%s) and reports nothing: anyone can POST here', async (_label, headers, body) => {
+    const res = await POST(new NextRequest('http://localhost/api/survey', { method: 'POST', headers, body }));
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'Expected a form submission' });
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+  });
+
+  it('reports a throw nothing in the route anticipated, and answers 500', async () => {
+    verifySurveyTokenMock.mockImplementation(() => {
+      throw new Error('ENCRYPTION_KEY is not set');
+    });
+
+    const res = await POST(surveyRequest({ token: TOKEN, reason: BUILTIN_REASON }));
+
+    expect(res.status).toBe(500);
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'survey.submit',
+        message: 'ENCRYPTION_KEY is not set',
+        meta: { step: 'unhandled', method: 'POST' },
+      }),
+    ]);
+  });
 });

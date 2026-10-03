@@ -5,8 +5,9 @@ import { verifyCronSecret } from '@/lib/auth';
 import { reportingWeek } from '@/lib/week';
 import { claimCronRun, finishCronRun } from '@/lib/cron';
 import { reportError } from '@/lib/report-error';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
-export async function POST(req: Request) {
+async function runThemes(req: Request) {
   if (!verifyCronSecret(req.headers.get('authorization'))) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
@@ -176,6 +177,8 @@ export async function POST(req: Request) {
 
   return NextResponse.json({ processed, failed, weekOf: weekOfStr });
 }
+
+export const POST = withErrorReporting('cron.themes', runThemes);
 
 // Kept for manual triggering and any external scheduler that issues GET; the
 // in-process scheduler in instrumentation.ts uses POST. Safe to expose as GET

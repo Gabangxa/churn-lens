@@ -25,7 +25,7 @@ vi.mock('@/lib/legal', () => ({ legalFooterReady: () => legalFooterReadyMock() }
 
 import { GET, type StatusResponse, type PipelineJob } from '../route';
 // Real, not mocked: the route must expose exactly what reportError recorded.
-import { reportError, resetErrorReports } from '@/lib/report-error';
+import { getErrorReportSnapshot, reportError, resetErrorReports } from '@/lib/report-error';
 
 // Monday 2026-03-16 08:00 UTC: past both weekly due times, reporting week
 // 2026-03-09, purge keyed by 2026-03-16 and due (after 03:00 UTC).
@@ -273,6 +273,23 @@ describe('GET /api/admin/status — reported errors', () => {
     // reportError writes its JSON line to stderr; keep the test output clean.
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  it('reports a throw the degrade-not-500 sections do not catch, and answers 500', async () => {
+    legalFooterReadyMock.mockImplementation(() => {
+      throw new Error('legal config unreadable');
+    });
+
+    const res = await GET(request());
+
+    expect(res.status).toBe(500);
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'admin.status',
+        message: 'legal config unreadable',
+        meta: { step: 'unhandled', method: 'GET' },
+      }),
+    ]);
   });
 
   it('starts empty, with alerting reported off when ALERT_EMAIL is unset', async () => {

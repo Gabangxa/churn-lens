@@ -5,6 +5,7 @@ import { claimCronRun, finishCronRun, todayDateStr } from '@/lib/cron';
 import { disconnectStripe } from '@/lib/stripe-disconnect';
 import { LEGAL } from '@/lib/legal';
 import { reportError } from '@/lib/report-error';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 /**
  * Daily retention purge.
@@ -23,7 +24,7 @@ import { reportError } from '@/lib/report-error';
  * unrelated steps — a stuck abandoned-signup row shouldn't hold back the
  * survey_responses retention delete, and vice versa.
  */
-export async function POST(req: Request) {
+async function runPurge(req: Request) {
   if (!verifyCronSecret(req.headers.get('authorization'))) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
@@ -214,6 +215,8 @@ export async function POST(req: Request) {
 
   return NextResponse.json(result);
 }
+
+export const POST = withErrorReporting('cron.purge', runPurge);
 
 // Kept for manual triggering and any external scheduler that issues GET; the
 // in-process scheduler in instrumentation.ts uses POST. Safe to expose as GET

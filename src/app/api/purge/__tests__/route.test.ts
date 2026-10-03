@@ -565,4 +565,22 @@ describe('POST /api/purge — error reporting', () => {
 
     expect(getErrorReportSnapshot().totalReported).toBe(0);
   });
+
+  it.each([
+    ['claiming the day', () => claimCronRunMock.mockRejectedValueOnce(new Error('connection terminated'))],
+    ['recording the finished day', () => finishCronRunMock.mockRejectedValueOnce(new Error('connection terminated'))],
+  ])('reports a throw outside the per-step catches (%s) instead of leaving Next to log a bare 500', async (_label, breakIt) => {
+    breakIt();
+
+    const res = await POST(purgeRequest());
+
+    expect(res.status).toBe(500);
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'cron.purge',
+        message: 'connection terminated',
+        meta: { step: 'unhandled', method: 'POST' },
+      }),
+    ]);
+  });
 });

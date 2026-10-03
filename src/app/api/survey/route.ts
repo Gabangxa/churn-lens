@@ -5,9 +5,17 @@ import { redirectUrl } from '@/lib/app-url';
 import { BUILTIN_CANCELLATION_REASONS, loadSurveyConfig } from '@/lib/survey-config';
 import { MAX_COMEBACK_TEXT, MAX_OPEN_TEXT, MAX_REASON, truncateFreeText } from '@/lib/survey-limits';
 import { reportError } from '@/lib/report-error';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
-export async function POST(req: NextRequest) {
-  const body = await req.formData();
+async function submitSurvey(req: NextRequest) {
+  // Anyone can POST here, so a body that is not a form is their mistake, not
+  // a failure: answered here, it never reaches withErrorReporting's alert.
+  let body: FormData;
+  try {
+    body = await req.formData();
+  } catch {
+    return NextResponse.json({ error: 'Expected a form submission' }, { status: 400 });
+  }
 
   const token = body.get('token') as string | null;
   const reason = body.get('reason') as string | null;
@@ -110,6 +118,11 @@ export async function POST(req: NextRequest) {
     // The link is single-use and the customer has already cancelled, so
     // a lost answer does not come back. Org id only: the token is a
     // credential and the answer is the customer's own words.
+    //
+    // Reported even for a Postgres data exception, which other routes answer
+    // as bad input (isBadInputDbError): every value bound here is ours or has
+    // been through truncateFreeText, so one means that sanitising missed
+    // something and a customer's answer was lost. That needs a human.
     reportError('survey.submit', err, { orgId: payload.orgId });
     return NextResponse.json({ error: 'Failed to save response' }, { status: 500 });
   }
@@ -119,3 +132,5 @@ export async function POST(req: NextRequest) {
     { status: 303 },
   );
 }
+
+export const POST = withErrorReporting('survey.submit', submitSurvey);
