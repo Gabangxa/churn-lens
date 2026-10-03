@@ -52,6 +52,9 @@ import { POST } from '../connect/route';
 import { setOrgCookie } from '@/lib/auth';
 import { decryptApiKey, encryptApiKey } from '@/lib/crypto';
 import { LEGAL_DOCS_VERSION } from '@/lib/legal-version';
+// Real: what reaches the operator is asserted on what reportError recorded.
+// ALERT_EMAIL is pinned empty for every suite (vitest.config.ts).
+import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 import { fakeStripeApi, stripeError, stripeJson, type FakeStripeRequest } from '@/__tests__/helpers/fake-stripe-api';
 
 const ENCRYPTION_KEY = 'd'.repeat(64);
@@ -62,12 +65,52 @@ const RESTRICTED_KEY = 'rk_live_db_suite';
 // Terms/DPA; the acceptance suite below pins what happens without it.
 const ACCEPTED = { acceptedLegalVersion: LEGAL_DOCS_VERSION };
 
-/** Stripe's answers for a key created per the onboarding instructions. */
+const OLD_KEY = 'rk_live_old_revoked_key';
+
+/**
+ * Stripe's answers for a key created per the onboarding instructions
+ * (customers:read, subscriptions:read, webhooks:write) on the same account as
+ * the org's existing endpoint, we_existing: the key check's customer list, the
+ * endpoint lookup, registration and deletion work; the account read does not.
+ */
 function onboardingScopedKey(req: FakeStripeRequest): Response {
+  if (req.method === 'GET' && req.path === '/v1/customers') {
+    return stripeJson(200, { object: 'list', data: [], has_more: false, url: '/v1/customers' });
+  }
   if (req.method === 'POST' && req.path === '/v1/webhook_endpoints') {
     return stripeJson(200, { id: 'we_registered', object: 'webhook_endpoint', secret: 'whsec_registered' });
   }
+  if (req.path.startsWith('/v1/webhook_endpoints/')) {
+    const id = req.path.slice('/v1/webhook_endpoints/'.length);
+    return req.method === 'DELETE'
+      ? stripeJson(200, { id, object: 'webhook_endpoint', deleted: true })
+      : stripeJson(200, { id, object: 'webhook_endpoint', status: 'enabled' });
+  }
   return stripeError(403, 'invalid_request_error', `The provided key does not have the required permissions (${req.path}).`);
+}
+
+/** onboardingScopedKey, except that the requests `matches` picks get `response` instead. */
+function except(matches: (req: FakeStripeRequest) => boolean, response: () => Response) {
+  return (req: FakeStripeRequest): Response => (matches(req) ? response() : onboardingScopedKey(req));
+}
+
+const isKeyCheck = (req: FakeStripeRequest) => req.method === 'GET' && req.path === '/v1/customers';
+const isRegistration = (req: FakeStripeRequest) => req.method === 'POST' && req.path === '/v1/webhook_endpoints';
+const isEndpointLookup = (req: FakeStripeRequest) =>
+  req.method === 'GET' && req.path.startsWith('/v1/webhook_endpoints/');
+const isEndpointDelete = (req: FakeStripeRequest) =>
+  req.method === 'DELETE' && req.path.startsWith('/v1/webhook_endpoints/');
+
+const revokedKey = () => stripeError(401, 'invalid_request_error', 'Invalid API Key provided: rk_live_****_key');
+const missingPermission = () =>
+  stripeError(403, 'invalid_request_error', 'The provided key does not have the required permissions.');
+/** What Stripe answers for an endpoint id from another account or mode. */
+const noSuchEndpoint = () =>
+  stripeError(404, 'invalid_request_error', "No such webhook endpoint: 'we_existing'", { code: 'resource_missing' });
+
+/** The requests the route made, as "METHOD /path (key)" lines in order. */
+function stripeCalls(): string[] {
+  return fakeStripeApi.requests.map((r) => `${r.method} ${r.path} (${r.apiKey})`);
 }
 
 /** onboardingScopedKey, plus read access to the account (a permission onboarding does not ask for). */
@@ -86,7 +129,7 @@ interface OrgOpts {
   stripeBusinessName?: string | null;
 }
 
-/** An org that already has a (now revoked) key connected. */
+/** An org that already has a (now revoked) key connected, OLD_KEY. */
 async function seedConnectedOrg(opts: OrgOpts = {}): Promise<string> {
   const { webhookRegistered = true, keyInvalidAgo = null, stripeBusinessName = null } = opts;
   const { rows } = await pool().query<{ id: string }>(
@@ -96,7 +139,7 @@ async function seedConnectedOrg(opts: OrgOpts = {}): Promise<string> {
      VALUES ('Connect suite org', $1, $2, $3, now() - $4::interval, $5)
      RETURNING id`,
     [
-      encryptApiKey('rk_live_old_revoked_key'),
+      encryptApiKey(OLD_KEY),
       webhookRegistered ? 'we_existing' : null,
       webhookRegistered ? encryptApiKey('whsec_existing') : null,
       keyInvalidAgo,
@@ -145,6 +188,33 @@ async function orgRow(orgId: string) {
   return rows[0];
 }
 
+/** The org's Stripe connection, decrypted: what the webhook will use next. */
+async function connection(orgId: string) {
+  const { rows } = await pool().query<{
+    stripe_api_key_enc: string | null;
+    stripe_webhook_id: string | null;
+    stripe_webhook_secret_enc: string | null;
+  }>('SELECT stripe_api_key_enc, stripe_webhook_id, stripe_webhook_secret_enc FROM organizations WHERE id = $1', [
+    orgId,
+  ]);
+  const row = rows[0];
+  return {
+    apiKey: row.stripe_api_key_enc === null ? null : decryptApiKey(row.stripe_api_key_enc),
+    webhookId: row.stripe_webhook_id,
+    webhookSecret: row.stripe_webhook_secret_enc === null ? null : decryptApiKey(row.stripe_webhook_secret_enc),
+  };
+}
+
+/** Everything a never-connected org's row holds about Stripe and the Terms: nothing. */
+const NOTHING_STORED = {
+  stripe_api_key_enc: null,
+  stripe_key_invalid_at: null,
+  stripe_webhook_id: null,
+  stripe_business_name: null,
+  legal_accepted_at: null,
+  legal_accepted_version: null,
+};
+
 /** The database's own clock, read outside any statement under test. */
 async function dbClock(): Promise<Date> {
   const { rows } = await pool().query<{ now: Date }>('SELECT clock_timestamp() AS now');
@@ -180,6 +250,7 @@ suite('POST /api/onboarding/connect against a real database', () => {
     vi.stubEnv('NEXT_PUBLIC_APP_URL', APP_URL);
     await pool().query('TRUNCATE organizations CASCADE');
     fakeStripeApi.reset(onboardingScopedKey);
+    resetErrorReports();
     consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
@@ -188,6 +259,226 @@ suite('POST /api/onboarding/connect against a real database', () => {
     vi.unstubAllEnvs();
     consoleErrorSpy.mockRestore();
     consoleWarnSpy.mockRestore();
+  });
+
+  describe('checking the key with Stripe before anything is stored', () => {
+    // A key Stripe will not answer for can never survey anyone. Stored, it
+    // used to clear the dashboard's warning and read as "sending" until the
+    // next cancellation was skipped as stripe_key_invalid — lost for good.
+
+    it.each([
+      ['revoked or mistyped (401)', revokedKey],
+      ['missing customers:read (403)', missingPermission],
+    ])('refuses a key Stripe rejects as %s, and stores nothing', async (_why, rejection) => {
+      fakeStripeApi.reset(except(isKeyCheck, rejection));
+      const orgId = await seedUnconnectedOrg();
+
+      const res = await POST(connectRequest(orgId, { apiKey: RESTRICTED_KEY, ...ACCEPTED }));
+
+      expect(res.status).toBe(422);
+      expect((await res.json()).error).toMatch(/^Stripe rejected this key/);
+      expect(await orgRow(orgId)).toEqual(NOTHING_STORED);
+      // Checked first: no endpoint is registered for a key that cannot read
+      // the customers its events would name.
+      expect(stripeCalls()).toEqual([`GET /v1/customers (${RESTRICTED_KEY})`]);
+      // The founder's input, answered in the form — not an operator alert.
+      expect(getErrorReportSnapshot().totalReported).toBe(0);
+    });
+
+    it("leaves a flagged org's old key, flag and name alone when the new key is rejected too", async () => {
+      const orgId = await seedConnectedOrg({ keyInvalidAgo: '3 days', stripeBusinessName: 'Acme Analytics' });
+      const before = await orgRow(orgId);
+      fakeStripeApi.reset(except(isKeyCheck, revokedKey));
+
+      const res = await POST(connectRequest(orgId, { apiKey: NEW_KEY, ...ACCEPTED }));
+
+      expect(res.status).toBe(422);
+      // The dashboard keeps saying "reconnect", which is still true.
+      expect(await orgRow(orgId)).toEqual(before);
+      expect((await connection(orgId)).apiKey).toBe(OLD_KEY);
+    });
+
+    it('stores nothing, and alerts the operator, when Stripe cannot be asked at all', async () => {
+      fakeStripeApi.reset(except(isKeyCheck, () => stripeError(503, 'api_error', 'Service unavailable.')));
+      const orgId = await seedUnconnectedOrg();
+
+      const res = await POST(connectRequest(orgId, { apiKey: RESTRICTED_KEY, ...ACCEPTED }));
+
+      expect(res.status).toBe(502);
+      expect((await res.json()).error).toMatch(/Nothing was saved/);
+      expect(await orgRow(orgId)).toEqual(NOTHING_STORED);
+      const { recent } = getErrorReportSnapshot();
+      expect(recent).toEqual([
+        expect.objectContaining({ context: 'onboarding.connect', meta: { orgId, step: 'stripe_key_check' } }),
+      ]);
+      expect(JSON.stringify(recent)).not.toContain(RESTRICTED_KEY);
+    });
+  });
+
+  describe('a first connect whose webhook registration fails', () => {
+    // A stored key with no endpoint is an org no event can ever reach, which
+    // the dashboard used to call "sending automatically".
+
+    it.each([
+      ['rejects the key (401)', revokedKey],
+      ['refuses it webhooks:write (403)', missingPermission],
+    ])('stores nothing when Stripe %s at registration', async (_why, rejection) => {
+      fakeStripeApi.reset(except(isRegistration, rejection));
+      const orgId = await seedUnconnectedOrg();
+
+      const res = await POST(connectRequest(orgId, { apiKey: RESTRICTED_KEY, ...ACCEPTED }));
+
+      expect(res.status).toBe(422);
+      expect((await res.json()).error).toMatch(/^Stripe rejected this key/);
+      expect(await orgRow(orgId)).toEqual(NOTHING_STORED);
+      expect(getErrorReportSnapshot().totalReported).toBe(0);
+    });
+
+    it("stores nothing, and reports it, when registration fails on Stripe's side", async () => {
+      fakeStripeApi.reset(except(isRegistration, () => stripeError(500, 'api_error', 'stripe is down')));
+      const orgId = await seedUnconnectedOrg();
+
+      const res = await POST(connectRequest(orgId, { apiKey: RESTRICTED_KEY, ...ACCEPTED }));
+
+      expect(res.status).toBe(502);
+      expect(await orgRow(orgId)).toEqual(NOTHING_STORED);
+      expect(getErrorReportSnapshot().recent).toEqual([
+        expect.objectContaining({ context: 'onboarding.connect', meta: { orgId, step: 'stripe_webhook' } }),
+      ]);
+    });
+
+    it('stores the key, endpoint and signing secret together once registration succeeds', async () => {
+      const orgId = await seedUnconnectedOrg();
+
+      const res = await POST(connectRequest(orgId, { apiKey: RESTRICTED_KEY, ...ACCEPTED }));
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ success: true });
+      expect(await connection(orgId)).toEqual({
+        apiKey: RESTRICTED_KEY,
+        webhookId: 'we_registered',
+        webhookSecret: 'whsec_registered',
+      });
+      expect(stripeCalls()).toEqual([
+        `GET /v1/customers (${RESTRICTED_KEY})`,
+        `POST /v1/webhook_endpoints (${RESTRICTED_KEY})`,
+        `GET /v1/account (${RESTRICTED_KEY})`,
+      ]);
+    });
+
+    it('deletes the endpoint it just registered when the org is gone before the key is saved', async () => {
+      // The org was deleted between the session check and the save. Nothing
+      // can be stored, and an endpoint left behind would keep posting the
+      // founder's cancellations at a URL that answers for nobody.
+      const orgId = await seedUnconnectedOrg();
+      fakeStripeApi.reset(async (req) => {
+        if (isRegistration(req)) await pool().query('DELETE FROM organizations WHERE id = $1', [orgId]);
+        return onboardingScopedKey(req);
+      });
+
+      const res = await POST(connectRequest(orgId, { apiKey: RESTRICTED_KEY, ...ACCEPTED }));
+
+      expect(res.status).toBe(401);
+      expect(stripeCalls()).toContain(`DELETE /v1/webhook_endpoints/we_registered (${RESTRICTED_KEY})`);
+    });
+  });
+
+  describe('reconnecting an org that already has a webhook endpoint', () => {
+    it('keeps the endpoint when the new key can see it — same Stripe account and mode', async () => {
+      const orgId = await seedConnectedOrg();
+
+      const res = await POST(connectRequest(orgId, { apiKey: NEW_KEY, ...ACCEPTED }));
+
+      expect(res.status).toBe(200);
+      expect(await connection(orgId)).toEqual({
+        apiKey: NEW_KEY,
+        webhookId: 'we_existing',
+        webhookSecret: 'whsec_existing',
+      });
+      // Looked up with the NEW key, which is what decides whose events the
+      // endpoint's customers can be read from. Nothing registered or deleted.
+      expect(stripeCalls()).toEqual([
+        `GET /v1/customers (${NEW_KEY})`,
+        `GET /v1/webhook_endpoints/we_existing (${NEW_KEY})`,
+        `GET /v1/account (${NEW_KEY})`,
+      ]);
+    });
+
+    it('registers a new endpoint when the key is for another account or mode, and removes the old one', async () => {
+      // rk_test_ → rk_live_, or another business's account entirely: the old
+      // endpoint is not visible to the new key, and its events could never be
+      // looked up with it. It used to be kept, so the new account had no
+      // endpoint at all while the dashboard said "sending".
+      const orgId = await seedConnectedOrg({ keyInvalidAgo: '1 day' });
+      fakeStripeApi.reset(except(isEndpointLookup, noSuchEndpoint));
+
+      const res = await POST(connectRequest(orgId, { apiKey: NEW_KEY, ...ACCEPTED }));
+
+      expect(res.status).toBe(200);
+      expect(await connection(orgId)).toEqual({
+        apiKey: NEW_KEY,
+        webhookId: 'we_registered',
+        webhookSecret: 'whsec_registered',
+      });
+      expect((await orgRow(orgId)).stripe_key_invalid_at).toBeNull();
+      expect(stripeCalls()).toEqual([
+        `GET /v1/customers (${NEW_KEY})`,
+        `GET /v1/webhook_endpoints/we_existing (${NEW_KEY})`,
+        `POST /v1/webhook_endpoints (${NEW_KEY})`,
+        `GET /v1/account (${NEW_KEY})`,
+        // The old endpoint lives on the old account, so only the old key can
+        // remove it — and only once the new connection is saved.
+        `DELETE /v1/webhook_endpoints/we_existing (${OLD_KEY})`,
+      ]);
+    });
+
+    it('still connects when the old endpoint cannot be removed, with a warning rather than an alert', async () => {
+      // The usual reason to reconnect is that the old key was revoked.
+      fakeStripeApi.reset((req) => {
+        if (isEndpointLookup(req)) return noSuchEndpoint();
+        if (isEndpointDelete(req) && req.apiKey === OLD_KEY) return revokedKey();
+        return onboardingScopedKey(req);
+      });
+      const orgId = await seedConnectedOrg();
+
+      const res = await POST(connectRequest(orgId, { apiKey: NEW_KEY, ...ACCEPTED }));
+
+      expect(res.status).toBe(200);
+      expect((await connection(orgId)).webhookId).toBe('we_registered');
+      expect(getErrorReportSnapshot().totalReported).toBe(0);
+      const warned = consoleWarnSpy.mock.calls.map((call) => call.map(String).join(' ')).join('\n');
+      expect(warned).toContain(orgId);
+      expect(warned).toContain('we_existing');
+      expect(warned).not.toContain(OLD_KEY);
+      expect(warned).not.toContain(NEW_KEY);
+    });
+
+    it('refuses a new key that may not see webhook endpoints, and keeps the old connection', async () => {
+      fakeStripeApi.reset(except(isEndpointLookup, missingPermission));
+      const orgId = await seedConnectedOrg();
+
+      const res = await POST(connectRequest(orgId, { apiKey: NEW_KEY, ...ACCEPTED }));
+
+      expect(res.status).toBe(422);
+      expect(await connection(orgId)).toEqual({
+        apiKey: OLD_KEY,
+        webhookId: 'we_existing',
+        webhookSecret: 'whsec_existing',
+      });
+    });
+
+    it("keeps the old connection, and reports it, when the endpoint lookup fails on Stripe's side", async () => {
+      fakeStripeApi.reset(except(isEndpointLookup, () => stripeError(500, 'api_error', 'stripe is down')));
+      const orgId = await seedConnectedOrg();
+
+      const res = await POST(connectRequest(orgId, { apiKey: NEW_KEY, ...ACCEPTED }));
+
+      expect(res.status).toBe(502);
+      expect((await connection(orgId)).apiKey).toBe(OLD_KEY);
+      expect(getErrorReportSnapshot().recent).toEqual([
+        expect.objectContaining({ context: 'onboarding.connect', meta: { orgId, step: 'stripe_webhook_lookup' } }),
+      ]);
+    });
   });
 
   describe('reconnecting after Stripe rejected the old key', () => {
@@ -332,26 +623,20 @@ suite('POST /api/onboarding/connect against a real database', () => {
       expect(org.legal_accepted_at!.getTime()).toBeLessThanOrEqual(after.getTime());
     });
 
-    it('keeps the acceptance even when webhook registration then fails — the founder did agree', async () => {
-      // The key is stored before Stripe is called (existing behaviour), and the
-      // acceptance rides in the same statement, so there is never a stored key
-      // without an acceptance beside it.
-      fakeStripeApi.reset((req) =>
-        req.path === '/v1/webhook_endpoints'
-          ? stripeError(500, 'api_error', 'stripe is down')
-          : onboardingScopedKey(req),
-      );
+    it('records no acceptance when the connect then fails — it rides with the key, and no key is stored', async () => {
+      // The acceptance is written in the same statement as the key, and that
+      // statement only runs once Stripe has accepted the key and the webhook.
+      // A failed connect stores no key, so nothing is processed under the
+      // agreement; the founder ticks the box again on the retry.
+      fakeStripeApi.reset(except(isRegistration, () => stripeError(500, 'api_error', 'stripe is down')));
       const orgId = await seedUnconnectedOrg();
 
       const res = await POST(
         connectRequest(orgId, { apiKey: RESTRICTED_KEY, acceptedLegalVersion: LEGAL_DOCS_VERSION }),
       );
 
-      expect(res.status).toBe(422);
-      const org = await orgRow(orgId);
-      expect(org.stripe_api_key_enc).not.toBeNull();
-      expect(org.legal_accepted_version).toBe(LEGAL_DOCS_VERSION);
-      expect(org.legal_accepted_at).not.toBeNull();
+      expect(res.status).toBe(502);
+      expect(await orgRow(orgId)).toEqual(NOTHING_STORED);
     });
 
     it('moves an org that accepted an older version onto the current one, with a fresh time', async () => {

@@ -28,6 +28,12 @@ export interface FakeStripeRequest {
   path: string;
   /** The key from the Authorization header — which stored key the code used. */
   apiKey: string;
+  /**
+   * The form-encoded request body ('' when there is none), e.g. for reading
+   * back the url a webhook endpoint was registered with:
+   * new URLSearchParams(req.body).get('url').
+   */
+  body: string;
 }
 
 export type FakeStripeResponder = (req: FakeStripeRequest) => Response | Promise<Response>;
@@ -47,6 +53,7 @@ class FakeStripeApi {
       method: init?.method ?? 'GET',
       path: new URL(String(url)).pathname,
       apiKey: authorization.replace(/^Bearer /, ''),
+      body: typeof init?.body === 'string' ? init.body : '',
     };
     this.requests.push(req);
     if (!this.respond) throw new Error('fake Stripe API has no responder — call fakeStripeApi.reset() first');

@@ -99,7 +99,11 @@ suite('disconnectStripe against a real database', () => {
     });
     // And the endpoint ChurnLens registered was removed with the stored key.
     expect(fakeStripeApi.requests).toEqual([
-      { method: 'DELETE', path: '/v1/webhook_endpoints/we_registered', apiKey: 'rk_live_disconnect_suite' },
+      expect.objectContaining({
+        method: 'DELETE',
+        path: '/v1/webhook_endpoints/we_registered',
+        apiKey: 'rk_live_disconnect_suite',
+      }),
     ]);
   });
 });
