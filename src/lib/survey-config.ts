@@ -179,16 +179,31 @@ export interface SurveyPresentation extends SurveyConfig {
    * name, as cached in organizations.stripe_business_name by
    * /api/onboarding/connect or the Stripe webhook; else null, which keeps
    * today's generic copy (no new required setup — the 2026-07-12 zero-config
-   * decision). The survey email and the survey page both resolve it here, from
-   * the same row, so they cannot name different businesses.
+   * decision).
+   *
+   * The survey emails resolve it here at send time and record what they
+   * sent in survey_responses.business_name; the survey page shows that
+   * record (loadSurveyPagePresentation), so the page names the business the
+   * email named even if the org's name changed in between.
    */
   businessName: string | null;
 }
 
+/** The config and resolved name for one organizations row. */
+function presentationFromRow(row: { survey_config: unknown; stripe_business_name: unknown }): SurveyPresentation {
+  const config = normalizeStoredConfig(row.survey_config);
+  return {
+    ...config,
+    // Normalized again on read, like every stored config field, so a
+    // hand-edited row cannot put a line break into the email.
+    businessName: config.displayName ?? normalizeBusinessName(row.stripe_business_name),
+  };
+}
+
 /**
- * loadSurveyConfig plus the resolved businessName, in one read. For the
- * customer-facing callers (survey page, survey emails); never throws, with the
- * same fall-back-to-defaults contract as loadSurveyConfig.
+ * loadSurveyConfig plus the resolved businessName, in one read: the org's
+ * name as it is now, for the survey emails. Never throws, with the same
+ * fall-back-to-defaults contract as loadSurveyConfig.
  */
 export async function loadSurveyPresentation(orgId: string): Promise<SurveyPresentation> {
   try {
@@ -197,16 +212,39 @@ export async function loadSurveyPresentation(orgId: string): Promise<SurveyPrese
       [orgId],
     );
     if (!row) return { ...DEFAULT_CONFIG, customReasons: [], businessName: null };
-    const config = normalizeStoredConfig(row.survey_config);
-    return {
-      ...config,
-      // Normalized again on read, like every stored config field, so a
-      // hand-edited row cannot put a line break into the email.
-      businessName: config.displayName ?? normalizeBusinessName(row.stripe_business_name),
-    };
+    return presentationFromRow(row);
   } catch (err) {
     // As loadSurveyConfig: degraded rather than failed, so reported — here the
     // survey also stops naming the business that is asking (POPIA s18).
+    reportError('survey-config.load', err, { orgId });
+    return { ...DEFAULT_CONFIG, customReasons: [], businessName: null };
+  }
+}
+
+/**
+ * The presentation for the survey page a link opens, in one read: the org's
+ * config, with businessName taken from what the email for this token said
+ * (survey_responses.business_name) when that was recorded. Re-resolved when
+ * the page is opened, the name could differ from the email's — after a
+ * rename, a reconnect to another Stripe account, or a disconnect. Without a
+ * record (a row sent before names were recorded, an email that used the
+ * generic copy, a preview link with no row) it is the org's current name, as
+ * loadSurveyPresentation resolves it. Scoped to orgId as well as the token,
+ * so no other org's record can be shown. Never throws.
+ */
+export async function loadSurveyPagePresentation(orgId: string, token: string): Promise<SurveyPresentation> {
+  try {
+    const row = await queryOne<{ survey_config: unknown; stripe_business_name: unknown; sent_business_name: unknown }>(
+      `SELECT o.survey_config, o.stripe_business_name, r.business_name AS sent_business_name
+       FROM organizations o
+       LEFT JOIN survey_responses r ON r.token = $2 AND r.org_id = o.id
+       WHERE o.id = $1`,
+      [orgId, token],
+    );
+    if (!row) return { ...DEFAULT_CONFIG, customReasons: [], businessName: null };
+    const current = presentationFromRow(row);
+    return { ...current, businessName: normalizeBusinessName(row.sent_business_name) ?? current.businessName };
+  } catch (err) {
     reportError('survey-config.load', err, { orgId });
     return { ...DEFAULT_CONFIG, customReasons: [], businessName: null };
   }

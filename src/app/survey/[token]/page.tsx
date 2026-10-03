@@ -4,7 +4,9 @@
  * [token] is an HMAC-signed payload encoding:
  *   { orgId, customerId, subscriptionId, exp }
  * Config (display name / logo / extra reasons) is never encoded in the
- * token — it's loaded from the DB by payload.orgId at render time (CL-1).
+ * token — it's loaded from the DB by payload.orgId at render time (CL-1),
+ * except the business name, which is the one the email for this token
+ * carried when that was recorded (survey_responses.business_name).
  *
  * Audit fixes: rotated sad-face mascot removed (calmer tone for someone who
  * just cancelled); checked pill was off-palette blue-500 and translated 2px
@@ -17,7 +19,7 @@
 
 import Link from 'next/link';
 import { verifySurveyToken } from '@/lib/crypto';
-import { BUILTIN_CANCELLATION_REASONS, loadSurveyPresentation } from '@/lib/survey-config';
+import { BUILTIN_CANCELLATION_REASONS, loadSurveyPagePresentation } from '@/lib/survey-config';
 
 export default async function SurveyPage({ params }: { params: { token: string } }) {
   const payload = verifySurveyToken(params.token);
@@ -42,10 +44,12 @@ export default async function SurveyPage({ params }: { params: { token: string }
     );
   }
 
-  // Same resolver as the survey email, so the page names the business the
-  // email named: configured display name, else the cached Stripe account name,
-  // else the generic copy. Rendered as JSX text, so it is escaped.
-  const config = await loadSurveyPresentation(payload.orgId);
+  // The business the email for this link named, as recorded when it was
+  // sent — not re-resolved now, so a rename or reconnect since cannot make
+  // the page name someone else. Rows with no record resolve the org's
+  // current name (configured display name, else the cached Stripe account
+  // name, else the generic copy). Rendered as JSX text, so it is escaped.
+  const config = await loadSurveyPagePresentation(payload.orgId, params.token);
   const builtinReasons = BUILTIN_CANCELLATION_REASONS.filter((reason) => reason !== 'Other');
   // Built-ins → custom reasons → 'Other' last (Resolved decisions #2). Zero-config
   // orgs have no custom reasons, so this is byte-identical to the original 8.

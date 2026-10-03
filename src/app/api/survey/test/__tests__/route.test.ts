@@ -125,6 +125,21 @@ describe('POST /api/survey/test — guards', () => {
       expect.objectContaining({ displayName: 'Acme From Stripe' }),
     );
   });
+
+  it('records the name the email carried, with the sent stamp, for the survey page to repeat', async () => {
+    loadSurveyPresentationMock.mockResolvedValue({
+      displayName: null,
+      logoUrl: null,
+      customReasons: [],
+      businessName: 'Acme From Stripe',
+    });
+
+    await POST(testSurveyRequest());
+
+    const stamp = executeMock.mock.calls.find(([sql]) => /survey_email_sent_at = now\(\)/.test(sql as string));
+    expect(stamp?.[0]).toMatch(/business_name = \$3/);
+    expect(stamp?.[1]).toEqual([expect.stringMatching(/^test_/), ORG_ID, 'Acme From Stripe']);
+  });
 });
 
 describe('POST /api/survey/test — error reporting', () => {

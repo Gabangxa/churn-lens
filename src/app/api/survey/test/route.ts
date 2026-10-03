@@ -84,14 +84,16 @@ export async function POST(req: NextRequest) {
 
     // Same delivery bookkeeping as the webhook path so the two never drift:
     // survey_email_sent_at NULL always means "no email ever went out", whichever
-    // route wrote the row. Its own try/catch keeps a bookkeeping failure from
-    // reporting an email that did send as a failed one.
+    // route wrote the row, and business_name is the name the email carried,
+    // which the survey page repeats. Its own try/catch keeps a bookkeeping
+    // failure from reporting an email that did send as a failed one.
     try {
       await execute(
         `UPDATE survey_responses
-         SET survey_email_sent_at = now(), survey_email_attempts = survey_email_attempts + 1
+         SET survey_email_sent_at = now(), survey_email_attempts = survey_email_attempts + 1,
+             business_name = $3
          WHERE stripe_subscription_id = $1 AND org_id = $2`,
-        [testSubscriptionId, orgId],
+        [testSubscriptionId, orgId, presentation.businessName],
       );
     } catch (bookkeepingErr) {
       reportError('survey.test', bookkeepingErr, {

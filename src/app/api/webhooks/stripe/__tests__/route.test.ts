@@ -314,7 +314,8 @@ describe('first delivery of a cancellation', () => {
     const [sql, params] = executeMock.mock.calls[1];
     expect(sql).toMatch(/UPDATE survey_responses/);
     expect(sql).toMatch(/survey_email_sent_at\s*=\s*now\(\)/);
-    expect(params).toEqual([SUB_ID, ORG_ID]);
+    // Plus the name the email carried (none here), for the survey page.
+    expect(params).toEqual([SUB_ID, ORG_ID, null]);
   });
 
   it('claims the send in the INSERT, before the email goes out', async () => {

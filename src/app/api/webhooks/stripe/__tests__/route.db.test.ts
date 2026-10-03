@@ -75,7 +75,7 @@ vi.mock('stripe', async (importOriginal) => {
 
 import { POST } from '../[orgId]/route';
 import SurveyPage from '@/app/survey/[token]/page';
-import { encryptApiKey } from '@/lib/crypto';
+import { encryptApiKey, signSurveyToken } from '@/lib/crypto';
 import { FREE_TIER_MONTHLY_SURVEYS } from '@/lib/plan';
 // Real: what reaches the operator is asserted on what reportError recorded.
 // ALERT_EMAIL is pinned empty for every suite (vitest.config.ts).
@@ -842,7 +842,7 @@ suite('Stripe webhook against a real database', () => {
       expect(email.text).toContain('Sent on behalf of Acme Analytics by ChurnLens.');
       // The page the link opens names the same business.
       expect(await surveyPageFor(email)).toContain('the Acme Analytics team');
-      // Cached, which is how the page (it never calls Stripe) resolves it too.
+      // Cached too, so later emails name it without asking Stripe again.
       expect(await cachedBusinessName(orgId)).toBe('Acme Analytics');
     });
 
@@ -884,6 +884,106 @@ suite('Stripe webhook against a real database', () => {
       expect(await cachedBusinessName(orgId)).toBeNull();
       // Not in the email either: the survey page could not have named it.
       expect(sentEmails[0].text).not.toContain('Old Account Ltd');
+    });
+
+    describe('when the name changes between the email and the click', () => {
+      // The page used to re-resolve the name when it was opened, so a rename,
+      // a reconnect to another account, or a disconnect after the email went
+      // out made the page name a different business than the email had.
+
+      async function sentBusinessName(orgId: string): Promise<string | null> {
+        const { rows } = await pool().query<{ business_name: string | null }>(
+          'SELECT business_name FROM survey_responses WHERE org_id = $1',
+          [orgId],
+        );
+        return rows[0].business_name;
+      }
+
+      it('keeps naming the business the email named', async () => {
+        const orgId = await seedOrg({ stripeBusinessName: 'Acme Cached' });
+        await deliver(orgId, cancelledSubscription());
+        expect(sentEmails[0].text).toContain('Sent on behalf of Acme Cached by ChurnLens.');
+        expect(await sentBusinessName(orgId)).toBe('Acme Cached');
+
+        // The founder renames the business in Settings, then reconnects with
+        // another account's key, which drops the cached Stripe name.
+        await pool().query(
+          `UPDATE organizations SET survey_config = $1, stripe_business_name = NULL WHERE id = $2`,
+          [JSON.stringify({ display_name: 'Renamed Co' }), orgId],
+        );
+
+        const page = await surveyPageFor(sentEmails[0]);
+        expect(page).toContain('the Acme Cached team');
+        expect(page).not.toContain('Renamed Co');
+      });
+
+      it('records the name the RE-sent email carried, when a retry sends after a rename', async () => {
+        // A send that failed is re-sent on Stripe's retry with the name as it
+        // is then; the page must follow the email that actually went out.
+        const orgId = await seedOrg({ stripeBusinessName: 'Acme Cached' });
+        const subscription = cancelledSubscription();
+        await deliver(orgId, subscription);
+        const [firstEmail] = sentEmails;
+        await pool().query(
+          `UPDATE survey_responses
+           SET survey_email_sent_at = NULL, survey_email_last_attempt_at = now() - interval '1 hour'
+           WHERE org_id = $1`,
+          [orgId],
+        );
+        await pool().query('UPDATE organizations SET survey_config = $1 WHERE id = $2', [
+          JSON.stringify({ display_name: 'Renamed Co' }),
+          orgId,
+        ]);
+
+        await deliver(orgId, subscription);
+
+        expect(sentEmails).toHaveLength(2);
+        expect(sentEmails[1].text).toContain('Sent on behalf of Renamed Co by ChurnLens.');
+        expect(await sentBusinessName(orgId)).toBe('Renamed Co');
+        // Same token both times (the row's), so either email opens this page.
+        expect(await surveyPageFor(firstEmail)).toContain('the Renamed Co team');
+      });
+
+      it("records no name when the email named none, and the page shows the org's current one", async () => {
+        // A row with no name recorded is either from before names were
+        // recorded or an email that used the generic copy; the page resolves
+        // the org's name as it is now, as every page did before. Naming the
+        // business where the email did not adds to it rather than
+        // contradicting it.
+        const orgId = await seedOrg();
+        await deliver(orgId, cancelledSubscription());
+        expect(sentEmails[0].text).toContain('Sent on behalf of the business you cancelled with by ChurnLens.');
+        expect(await sentBusinessName(orgId)).toBeNull();
+
+        await pool().query('UPDATE organizations SET survey_config = $1 WHERE id = $2', [
+          JSON.stringify({ display_name: 'Acme Configured' }),
+          orgId,
+        ]);
+
+        expect(await surveyPageFor(sentEmails[0])).toContain('the Acme Configured team');
+      });
+
+      it("never shows another org's recorded name, whatever row a token matches", async () => {
+        // The lookup is scoped to the org the signed token names.
+        const orgA = await seedOrg({ stripeBusinessName: 'Org A Ltd' });
+        const orgB = await seedOrg({ displayName: 'Org B Ltd' });
+        const token = signSurveyToken({
+          orgId: orgB,
+          customerId: CUSTOMER_ID,
+          subscriptionId: 'sub_shared_token',
+          exp: Date.now() + 60_000,
+        });
+        await pool().query(
+          `INSERT INTO survey_responses (org_id, customer_email, stripe_subscription_id, token, mrr_lost, business_name)
+           VALUES ($1, 'x@example.com', 'sub_shared_token', $2, 0, 'Org A Ltd')`,
+          [orgA, token],
+        );
+
+        const page = renderToStaticMarkup(await SurveyPage({ params: { token } }));
+
+        expect(page).toContain('the Org B Ltd team');
+        expect(page).not.toContain('Org A Ltd');
+      });
     });
 
     it('uses the configured display name first, without asking Stripe for the account at all', async () => {

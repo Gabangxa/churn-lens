@@ -655,17 +655,21 @@ export async function POST(
   }
 
   try {
+    // business_name: what this email said, for the survey page to repeat
+    // (see loadSurveyPagePresentation). In the same statement as the sent
+    // stamp, so a re-send overwrites it with what the re-send said.
     await execute(
       `UPDATE survey_responses
-       SET survey_email_sent_at = now()
+       SET survey_email_sent_at = now(), business_name = $3
        WHERE stripe_subscription_id = $1 AND org_id = $2`,
-      [subscription.id, org.id],
+      [subscription.id, org.id, presentation.businessName],
     );
   } catch (err) {
     // The email is already out. A 5xx here would make Stripe retry and send a
     // second copy to someone who just cancelled, so we accept the bookkeeping
     // gap and report it instead: the row now reads as never emailed, so a
-    // later redelivery could mail the customer a second time.
+    // later redelivery could mail the customer a second time, and the survey
+    // page falls back to the org's current name.
     reportError('webhook.stripe', err, {
       orgId: org.id,
       subscriptionId: subscription.id,

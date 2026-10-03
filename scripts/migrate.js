@@ -672,6 +672,22 @@ async function migrate() {
     END $$;
   `);
 
+  // The business name the survey email for this row actually carried: the
+  // configured display name or cached Stripe account name it was sent with,
+  // or NULL for the generic copy. Written in the same UPDATE that stamps
+  // survey_email_sent_at (Stripe webhook and Settings test send alike), so
+  // a re-sent email overwrites it with what the re-send said. The survey
+  // page shows this instead of re-resolving the org's name when the link is
+  // opened, so a rename, reconnect or disconnect in between cannot make the
+  // page name a different business than the email did (POPIA s18).
+  // Nullable, no default, no backfill: existing rows — like rows whose
+  // email named no business — fall back to the org's current name, which is
+  // what every survey page did before this column.
+  await pool.query(`
+    ALTER TABLE survey_responses
+      ADD COLUMN IF NOT EXISTS business_name text;
+  `);
+
   console.log('Database migration complete');
   await pool.end();
 }
