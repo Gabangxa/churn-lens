@@ -257,11 +257,16 @@ almost always well past even the 8h-capped backoff window, so the next poll (wit
    Also set `ALERT_EMAIL=<an inbox you read>` (optional, but nothing pages you without it).
    `src/lib/report-error.ts` emails it when a cron job, the scheduler, a survey email or
    save, the Stripe or Polar webhook, billing, a login-link send, logout, account deletion,
-   onboarding, the database pool or the process itself fails: first
-   occurrence at once, then at most one per error fingerprint per hour (carrying how many
-   were suppressed) and 10 per hour overall, since alerts share the Resend quota with
-   survey emails. Anything email-shaped is redacted. Unset, errors are still logged as one
-   JSON line each and listed by the monitor below; the server warns once at boot.
+   onboarding, the database pool or the process itself fails, and when an API route
+   throws something it did not handle (`src/lib/with-error-reporting.ts`). A failure
+   alerts at once; while it keeps recurring, the next alert for it waits 1 hour, then 4,
+   then a day (starting over after a quiet day), each carrying how many occurrences were
+   suppressed. At most 10 alerts an hour and 24 a day overall, sent at least 600 ms apart,
+   since alerts share the Resend quota and rate limit with survey emails and login links.
+   A request's own bad input (a value Postgres refuses for its type, say) is a 400 and a
+   warning line, never an alert. Anything email-shaped is redacted. Unset, errors are
+   still logged as one JSON line each and listed by the monitor below; the server warns
+   once at boot.
 4. **Settings → Networking → Generate Domain** (populates `RAILWAY_PUBLIC_DOMAIN`), then deploy.
    The pre-deploy step runs `scripts/migrate.js`; the healthcheck waits on `/api/health`.
 
