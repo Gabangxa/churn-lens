@@ -172,20 +172,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ received: true, skipped: `status_${subscription.status}` });
   }
 
-  if (decision === 'grant' && !planForProduct(subscription.productId)) {
-    // Recorded below all the same, granting nothing: guessing a tier either
-    // gives away the more expensive plan or withholds what was paid for. Once
-    // the mapping is fixed, this subscription's next event grants it.
-    reportError(
-      'webhook.polar',
-      new Error(
-        `Polar ${type}: product maps to no known plan — check POLAR_PRODUCT_STARTER / ` +
-          'POLAR_PRODUCT_GROWTH. The subscription grants nothing until it does.',
-      ),
-      { orgId, productId: subscription.productId, subscriptionId: subscription.id, step: 'unknown_product' },
-    );
-  }
-
   let result: Applied;
   try {
     result = await withTransaction(async (client): Promise<Applied> => {
@@ -235,6 +221,22 @@ export async function POST(req: Request) {
   }
   if (result.kind === 'stale') {
     return NextResponse.json({ received: true, skipped: 'stale_event' });
+  }
+
+  if (decision === 'grant' && !planForProduct(subscription.productId)) {
+    // Recorded all the same, granting nothing: guessing a tier either gives
+    // away the more expensive plan or withholds what was paid for. Once the
+    // mapping is fixed, the org's next event grants it. Reported only once the
+    // event has landed: a redelivery, or an org that is not in this database
+    // (another environment's, whose product ids are not ours to map), is noise.
+    reportError(
+      'webhook.polar',
+      new Error(
+        `Polar ${type}: product maps to no known plan — check POLAR_PRODUCT_STARTER / ` +
+          'POLAR_PRODUCT_GROWTH. The subscription grants nothing until it does.',
+      ),
+      { orgId, productId: subscription.productId, subscriptionId: subscription.id, step: 'unknown_product' },
+    );
   }
 
   console.log(

@@ -321,6 +321,25 @@ suite('POST /api/webhooks/polar against a real database', () => {
       expect(await ledger(org)).toEqual([{ id: 'sub_A', status: 'active', product_id: 'prod_unknown' }]);
     });
 
+    it('reports an unknown product once, not again on a redelivery of the same event', async () => {
+      const org = await seedOrg();
+      await deliver(org, SUB_A, active(aug(2), 'prod_unknown'));
+
+      const again = await deliver(org, SUB_A, active(aug(2), 'prod_unknown'));
+
+      expect(again.body).toEqual({ received: true, skipped: 'stale_event' });
+      expect(getErrorReportSnapshot().totalReported).toBe(1);
+    });
+
+    it('does not report an unknown product for an org that is not in this database', async () => {
+      // A purged org, or another environment's org on a shared Polar
+      // organization — whose product ids are not this environment's to map.
+      const res = await deliver(randomUUID(), SUB_A, active(aug(2), 'prod_unknown'));
+
+      expect(res.body).toEqual({ received: true, skipped: 'unknown_org' });
+      expect(getErrorReportSnapshot().totalReported).toBe(0);
+    });
+
     it('still revokes when the product is unknown, and does not report it', async () => {
       // Ending access needs no tier. Failing to revoke would leave a
       // non-paying org on a paid plan.
