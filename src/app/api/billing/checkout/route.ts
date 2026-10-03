@@ -4,6 +4,8 @@ import { assertSameOrigin, requireOrgId } from '@/lib/auth';
 import { publicAppUrl } from '@/lib/app-url';
 import { getPolar } from '@/lib/polar';
 import { isPlan, type Plan } from '@/lib/plan';
+import { reportError } from '@/lib/report-error';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 /**
  * Start a Polar checkout for the signed-in org and redirect the founder to it.
@@ -19,11 +21,11 @@ function productIdForPlan(plan: Plan): string | undefined {
   return undefined;
 }
 
-export async function GET(req: NextRequest) {
+async function startCheckout(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
 
-  const authResult = requireOrgId(req);
+  const authResult = await requireOrgId(req);
   if ('error' in authResult) return authResult.error;
   const { orgId } = authResult;
 
@@ -69,14 +71,22 @@ export async function GET(req: NextRequest) {
       // Copied onto the resulting subscription, so the plan this checkout was
       // for stays legible in Polar's dashboard next to the raw product id.
       metadata: { orgId, plan },
+    }, {
+      // The SDK sets no deadline of its own, so without this a stalled Polar
+      // API holds the founder's tab and a Node socket open for minutes.
+      timeoutMs: 10_000,
     });
 
     return NextResponse.redirect(checkout.url, { status: 303 });
   } catch (err) {
-    console.error(`Polar checkout creation failed for org ${orgId}:`, err);
+    // A founder trying to pay cannot. reportError redacts the prefilled owner
+    // email if Polar's error echoes it back.
+    reportError('billing.checkout', err, { orgId, plan });
     return NextResponse.json(
       { error: 'Could not start checkout. Please try again.' },
       { status: 502 },
     );
   }
 }
+
+export const GET = withErrorReporting('billing.checkout', startCheckout);

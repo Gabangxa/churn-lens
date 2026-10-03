@@ -26,6 +26,9 @@ vi.mock('stripe', () => {
 });
 
 import { disconnectStripe } from '../stripe-disconnect';
+// Real: the error-reporting tests assert on what was reported. ALERT_EMAIL is
+// pinned empty for every suite (vitest.config.ts).
+import { getErrorReportSnapshot, resetErrorReports } from '../report-error';
 
 const ORG_ID = 'org-1';
 
@@ -72,15 +75,14 @@ describe('disconnectStripe', () => {
     expect(webhookDelMock).toHaveBeenCalledTimes(1);
   });
 
-  it('clears every stored Stripe credential column for that org', async () => {
+  it('clears every stored Stripe column for that org, and only that org', async () => {
+    // What the row looks like afterwards is pinned against a real database in
+    // stripe-disconnect.db.test.ts; this pins the scope.
     await disconnectStripe(ORG_ID);
 
     const update = clearingUpdate();
     expect(update).not.toBeNull();
-    expect(update!.sql).toBe(
-      'UPDATE organizations SET stripe_api_key_enc = NULL, stripe_account_id = NULL, ' +
-        'stripe_webhook_id = NULL, stripe_webhook_secret_enc = NULL WHERE id = $1',
-    );
+    expect(update!.sql).toMatch(/^UPDATE organizations SET .* WHERE id = \$1$/);
     expect(update!.params).toEqual([ORG_ID]);
   });
 
@@ -142,5 +144,47 @@ describe('disconnectStripe', () => {
     queryMock.mockRejectedValue(new Error('db down'));
 
     await expect(disconnectStripe(ORG_ID)).rejects.toThrow('db down');
+  });
+});
+
+describe('disconnectStripe — error reporting', () => {
+  /** A Stripe API error as the SDK raises it: every one carries the HTTP status. */
+  function stripeApiError(statusCode: number, message: string): Error {
+    return Object.assign(new Error(message), { statusCode });
+  }
+
+  beforeEach(() => {
+    resetErrorReports();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  it('reports an endpoint delete that failed for a reason nobody expected — the endpoint is still live', async () => {
+    webhookDelMock.mockRejectedValue(stripeApiError(500, 'An unknown error occurred'));
+
+    await disconnectStripe(ORG_ID);
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'stripe.disconnect',
+        message: 'An unknown error occurred',
+        meta: { orgId: ORG_ID, step: 'webhook_delete' },
+      }),
+    ]);
+    // Reporting never stands in the way of clearing the credentials.
+    expect(clearingUpdate()).not.toBeNull();
+  });
+
+  it.each([
+    ['the key was revoked (401)', 401],
+    ['the key lost the permission (403)', 403],
+    ['the endpoint is already gone (404)', 404],
+  ])('only warns when %s — nothing an operator can do', async (_label, statusCode) => {
+    webhookDelMock.mockRejectedValue(stripeApiError(statusCode, 'refused'));
+
+    await disconnectStripe(ORG_ID);
+
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining(ORG_ID));
+    expect(clearingUpdate()).not.toBeNull();
   });
 });

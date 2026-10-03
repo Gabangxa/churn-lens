@@ -5,6 +5,8 @@ import { assertSameOrigin, requireOrgId } from '@/lib/auth';
 import { publicAppUrl, redirectUrl } from '@/lib/app-url';
 import { getPolar, isPolarConfigured } from '@/lib/polar';
 import { checkRateLimit } from '@/lib/ratelimit';
+import { reportError } from '@/lib/report-error';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 /**
  * Send the signed-in founder into Polar's hosted customer portal.
@@ -29,7 +31,7 @@ import { checkRateLimit } from '@/lib/ratelimit';
  * founder on its email one-time-code form — which is why this route needs no
  * fallback of its own.
  */
-export async function GET(req: NextRequest) {
+async function openBillingPortal(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
 
@@ -49,7 +51,7 @@ export async function GET(req: NextRequest) {
   // The sibling api/billing/checkout still answers in JSON. That is a real
   // inconsistency and this is the side worth copying — checkout is reached the
   // same way and has the same problem.
-  const authResult = requireOrgId(req);
+  const authResult = await requireOrgId(req);
   if ('error' in authResult) {
     // Not /onboarding: onboarding now requires a session too, so an
     // unauthenticated visitor bounces straight to where they can get one.
@@ -162,6 +164,22 @@ export async function GET(req: NextRequest) {
       });
     }
 
+    // Anything else is a real failure: a founder who asked to manage (or
+    // cancel) a paid plan cannot reach the portal. Reported with the same
+    // redaction as the log line above — a PolarError's own message and body
+    // echo Polar's response, so only its status and field paths go out.
+    reportError(
+      'billing.portal',
+      err instanceof PolarError
+        ? new Error(
+            `Polar customer session creation failed (status ${status})` +
+              (validationFields.length ? ` fields=${validationFields.join(',')}` : ''),
+          )
+        : err,
+      { orgId },
+    );
     return NextResponse.redirect(new URL('/settings?billing=error', appUrl), { status: 303 });
   }
 }
+
+export const GET = withErrorReporting('billing.portal', openBillingPortal);

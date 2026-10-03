@@ -4,6 +4,8 @@ import { getResend, FROM_EMAIL } from '@/lib/resend';
 import { verifyCronSecret } from '@/lib/auth';
 import { reportingWeek } from '@/lib/week';
 import { claimCronRun, cronRunRecord, finishCronRun, MAX_ATTEMPTS, STALE_RUNNING_MS } from '@/lib/cron';
+import { ALREADY_REPORTED_HEADER, reportError } from '@/lib/report-error';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 interface ThemeRow {
   org_id: string;
@@ -13,7 +15,7 @@ interface ThemeRow {
   mrr_impact: number;
 }
 
-export async function POST(req: Request) {
+async function runDigest(req: Request) {
   if (!verifyCronSecret(req.headers.get('authorization'))) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
@@ -180,7 +182,11 @@ Manage preferences: ${settingsUrl}`;
           });
 
           if (error) {
-            console.error(`Digest: send failed for org ${org.id}, week ${weekOfStr}:`, error);
+            // Its own context so a Resend problem (unverified domain, spent
+            // quota) reads as exactly that in the alert. reportError redacts
+            // the message, which for a validation error can quote the founder's
+            // address.
+            reportError('cron.digest.send', error, { orgId: org.id, weekOf: weekOfStr });
             failed++;
             continue;
           }
@@ -195,21 +201,25 @@ Manage preferences: ${settingsUrl}`;
         } catch (err) {
           // One org's DB error (or anything else unexpected) must not abort the
           // rest of the run — every other founder still gets their digest.
-          console.error(`Digest: org ${org.id} failed for week ${weekOfStr}:`, err);
+          reportError('cron.digest', err, { orgId: org.id, weekOf: weekOfStr });
           failed++;
         }
       }
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`Digest: run failed for week ${weekOfStr}:`, err);
+    reportError('cron.digest', err, { weekOf: weekOfStr });
     await finishCronRun('digest', weekOfStr, {
       status: 'failed',
       processed: sent,
       failed,
       error: message,
     });
-    return NextResponse.json({ error: message, weekOf: weekOfStr }, { status: 500 });
+    // Reported just above; the mark keeps the scheduler from reporting it again.
+    return NextResponse.json(
+      { error: message, weekOf: weekOfStr },
+      { status: 500, headers: { [ALREADY_REPORTED_HEADER]: '1' } },
+    );
   }
 
   if (!themes.length) {
@@ -236,6 +246,8 @@ Manage preferences: ${settingsUrl}`;
 
   return NextResponse.json({ sent, failed, weekOf: weekOfStr });
 }
+
+export const POST = withErrorReporting('cron.digest', runDigest);
 
 // Kept for manual triggering and any external scheduler that issues GET; the
 // in-process scheduler in instrumentation.ts uses POST. Safe to expose as GET

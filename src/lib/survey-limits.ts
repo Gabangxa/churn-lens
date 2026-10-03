@@ -28,7 +28,47 @@ export interface TruncationResult {
 }
 
 /**
- * Truncate free text to `max` characters.
+ * C0 control characters other than tab, line feed and carriage return.
+ *
+ * NUL is the one that bites: Postgres `text` cannot hold U+0000 at all, so a
+ * single NUL anywhere in an answer failed the whole UPDATE (SQLSTATE 22021).
+ * The customer's answer was lost for good — the link is single-use — and
+ * anyone holding a survey link could fire an operator alert at will. The rest
+ * of C0 is stored fine but never belongs in typed prose (a browser textarea
+ * cannot produce it), so it goes too, rather than special-casing one byte.
+ * Tab and line breaks are what people actually type and are kept.
+ */
+// eslint-disable-next-line no-control-regex
+const UNTYPEABLE_CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g;
+
+/** Every C0 control character and DEL, line breaks and tabs included. */
+// eslint-disable-next-line no-control-regex
+const ALL_CONTROL_CHARS = /[\u0000-\u001F\u007F]/g;
+
+/**
+ * Prose from a provider (a Stripe Customer Portal cancellation comment), made
+ * storable: the untypeable control characters truncateFreeText strips, NUL
+ * among them, removed; tab and line breaks kept. Not truncated — the
+ * provider bounds its own length.
+ */
+export function storableProse(value: string): string {
+  return value.replace(UNTYPEABLE_CONTROL_CHARS, '');
+}
+
+/**
+ * A provider-supplied name (a Stripe customer's name) for one line of copy —
+ * "Hi <name>," in the survey email — and a dashboard cell: every control
+ * character removed, line breaks included, then trimmed. Null when nothing is
+ * left, which every caller already treats as "no name".
+ */
+export function singleLineName(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null;
+  const clean = value.replace(ALL_CONTROL_CHARS, '').trim();
+  return clean === '' ? null : clean;
+}
+
+/**
+ * Strip untypeable control characters, then truncate to `max` characters.
  *
  * WHY truncate instead of rejecting: this is a churned customer's one-shot
  * feedback. They will not come back and re-submit a shorter version — the link
@@ -44,9 +84,13 @@ export interface TruncationResult {
  * than rejected.
  */
 export function truncateFreeText(value: string, max: number): TruncationResult {
-  if (value.length <= max) return { value, truncated: false };
+  // Stripped first, so the cap measures what is actually stored. `truncated`
+  // still means only "lost a tail to the cap": a stripped NUL is not text the
+  // customer wrote.
+  const clean = storableProse(value);
+  if (clean.length <= max) return { value: clean, truncated: false };
 
-  let cut = value.slice(0, max);
+  let cut = clean.slice(0, max);
 
   // A slice can land between the two halves of a surrogate pair (an emoji at
   // the boundary), leaving a lone high surrogate that has no valid UTF-8

@@ -5,10 +5,14 @@ import { getOrgIdFromCookieStore } from '@/lib/auth';
 import { query, queryOne } from '@/lib/db';
 import type { Theme, SurveyResponse } from '@/lib/db';
 import { legalFooterReady } from '@/lib/legal';
+import { currentLegalDocsVersion } from '@/lib/legal-version';
 import { countFreeTierSurveys, surveySendStatus } from '@/lib/survey-status';
+import { loadSurveyPresentation } from '@/lib/survey-config';
+import { reportError } from '@/lib/report-error';
 import type { SurveySendStatus } from '@/lib/survey-status';
 import Wordmark from '@/components/Wordmark';
 import ThemeToggle from '@/components/ThemeToggle';
+import LegalAcceptanceBanner from './LegalAcceptanceBanner';
 
 // Audit fixes: stat cards labelled by timeframe (this week vs all time);
 // theme badge colours hashed from the label (stable week over week) instead
@@ -48,17 +52,27 @@ async function getDashboardData(orgId: string) {
   const org = await queryOne<{
     stripe_api_key_enc: string | null;
     stripe_account_id: string | null;
+    stripe_webhook_id: string | null;
+    stripe_webhook_secret_enc: string | null;
     plan: string;
     deletion_requested_at: string | null;
+    stripe_key_invalid_at: Date | null;
+    legal_accepted_version: string | null;
   }>(
-    'SELECT stripe_api_key_enc, stripe_account_id, plan, deletion_requested_at FROM organizations WHERE id = $1',
+    `SELECT stripe_api_key_enc, stripe_account_id, stripe_webhook_id, stripe_webhook_secret_enc, plan,
+            deletion_requested_at, stripe_key_invalid_at, legal_accepted_version
+     FROM organizations WHERE id = $1`,
     [orgId],
   );
   const stripeConnected = !!(org?.stripe_api_key_enc || org?.stripe_account_id);
   const plan = org?.plan ?? 'free';
   const sendStatus = surveySendStatus({
     stripeConnected,
+    // Both, as the Stripe webhook needs the secret to accept anything.
+    stripeWebhookRegistered: !!(org?.stripe_webhook_id && org?.stripe_webhook_secret_enc),
     deletionRequested: !!org?.deletion_requested_at,
+    // node-postgres parses timestamptz into a Date.
+    stripeKeyInvalidSince: org?.stripe_key_invalid_at ?? null,
     legalFooterReady: legalFooterReady(),
     plan,
     surveysThisMonth: plan === 'free' ? await countFreeTierSurveys(orgId) : 0,
@@ -98,11 +112,40 @@ async function getDashboardData(orgId: string) {
   const responded = parseInt(stats?.responded ?? '0', 10);
   const mrrLost = parseInt(stats?.mrr_lost ?? '0', 10);
   const responseRate = totalSent > 0 ? Math.round((responded / totalSent) * 100) : 0;
+  // Who the survey emails say is asking, resolved exactly as they resolve
+  // it: the Settings display name, else the cached Stripe account name.
+  const { businessName } = await loadSurveyPresentation(orgId);
+
   const weekMrr = themes.reduce((acc, t) => acc + t.mrr_impact, 0);
   const weekResponses = themes.reduce((acc, t) => acc + t.response_count, 0);
   const pending = totalSent - responded;
 
-  return { themes, responses, latestWeek: latestWeek?.week_of ?? null, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending, plan, sendStatus };
+  return { themes, responses, latestWeek: latestWeek?.week_of ?? null, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending, plan, sendStatus, legalAcceptedVersion: org?.legal_accepted_version ?? null, businessNamed: businessName !== null };
+}
+
+/**
+ * Asks for a business name when surveys would go out without one. POPIA s18
+ * wants the churned customer told who is asking, but the Stripe account name
+ * is only readable with a permission onboarding does not request, so for
+ * most orgs nothing names the business until the founder sets a display
+ * name. Asks, never blocks: the generic copy still sends (the zero-config
+ * decision), and nothing is made required.
+ */
+function BusinessNamePrompt() {
+  return (
+    <div className="mt-6 rounded-3xl border-2 border-amber-500/40 bg-amber-500/10 px-6 py-5">
+      <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200 leading-relaxed">
+        Your survey emails don&apos;t say which business is asking.{' '}
+        <Link
+          href="/settings"
+          className="font-bold text-teal-700 dark:text-teal-300 underline underline-offset-2 hover:text-teal-900 dark:hover:text-teal-200"
+        >
+          Add your business name in Settings
+        </Link>
+        .
+      </p>
+    </div>
+  );
 }
 
 /** One-line answer to "is a cancellation right now going to be surveyed?" */
@@ -112,7 +155,15 @@ function SendStatusLine({ status }: { status: SurveySendStatus }) {
   );
   switch (status.kind) {
     case 'sending':
-      return <p className="text-sm font-medium text-muted">{dot('ok')} Stripe connected · surveys sending automatically</p>;
+      // The webhook skips cancellations Stripe made itself after a failed or
+      // disputed payment (involuntary churn). Said here so a founder comparing
+      // Stripe's cancellation count with surveys sent is not left guessing.
+      return (
+        <p className="text-sm font-medium text-muted">
+          {dot('ok')} Stripe connected · surveys sending automatically. Cancellations caused by a
+          failed or disputed payment are not surveyed.
+        </p>
+      );
     case 'stripe_not_connected':
       return (
         <p className="text-sm font-medium text-muted">
@@ -122,8 +173,36 @@ function SendStatusLine({ status }: { status: SurveySendStatus }) {
           </Link>
         </p>
       );
+    case 'setup_incomplete':
+      // A key with no webhook endpoint: Stripe has nowhere to send
+      // cancellations. Saving a key on /onboarding registers one.
+      return (
+        <p className="text-sm font-medium text-muted">
+          {dot('warn')} Stripe setup is incomplete — cancellations can&apos;t reach ChurnLens yet, so
+          no surveys will send.{' '}
+          <Link href="/onboarding" className="underline underline-offset-2 hover:text-zinc-900 dark:hover:text-white">
+            Finish connecting Stripe
+          </Link>
+        </p>
+      );
     case 'deletion_pending':
       return <p className="text-sm font-medium text-muted">{dot('warn')} Account deletion requested — surveys have stopped.</p>;
+    case 'stripe_key_invalid':
+      // Set for two causes — Stripe rejecting the key, and a key from another
+      // account or mode than the events — so the copy has to be true of both.
+      // /onboarding is where a key is pasted; saving one there clears this
+      // and re-registers the webhook in that key's account and mode.
+      return (
+        <p className="text-sm font-medium text-muted">
+          {dot('warn')} Since{' '}
+          {status.since.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}, Stripe has
+          rejected your API key, or the key belongs to a different Stripe account or mode (test or
+          live) than your cancellations — so they are not being surveyed.{' '}
+          <Link href="/onboarding" className="underline underline-offset-2 hover:text-zinc-900 dark:hover:text-white">
+            Reconnect Stripe with a new key
+          </Link>
+        </p>
+      );
     case 'paused_by_churnlens':
       return (
         <p className="text-sm font-medium text-muted">
@@ -143,14 +222,37 @@ function SendStatusLine({ status }: { status: SurveySendStatus }) {
 }
 
 export default async function DashboardPage() {
-  const orgId = getOrgIdFromCookieStore(cookies());
+  // Outside the try: during `next build` cookies() throws Next's own
+  // dynamic-rendering signal, which must reach Next untouched and unreported.
+  const cookieStore = cookies();
+
+  // A failed load is reported, then rethrown so Next still renders its error
+  // page. Next 14 logs a throw from a server component but tells nobody, so
+  // a dashboard down for every founder (a dead database, a bad query) would
+  // otherwise go unnoticed until someone complained.
+  let orgId: string | null;
+  try {
+    // Reads the database too: the session check honours revocations.
+    orgId = await getOrgIdFromCookieStore(cookieStore);
+  } catch (err) {
+    reportError('dashboard.load', err, { step: 'session' });
+    throw err;
+  }
   // Not /onboarding: onboarding now requires a session too (it no longer
   // creates one), so an unauthenticated visitor goes to /login, which carries
-  // them back here once they've signed in or signed up.
+  // them back here once they've signed in or signed up. Outside any try:
+  // redirect() works by throwing.
   if (!orgId) redirect('/login?next=/dashboard');
 
-  const { themes, responses, latestWeek, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending, plan, sendStatus } =
-    await getDashboardData(orgId);
+  let data: Awaited<ReturnType<typeof getDashboardData>>;
+  try {
+    data = await getDashboardData(orgId);
+  } catch (err) {
+    reportError('dashboard.load', err, { orgId, step: 'data' });
+    throw err;
+  }
+  const { themes, responses, latestWeek, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending, plan, sendStatus, legalAcceptedVersion, businessNamed } =
+    data;
   // /api/themes only clusters paid orgs, so a free org must not be told themes are on their way.
   const themesIncluded = plan !== 'free';
 
@@ -209,6 +311,15 @@ export default async function DashboardPage() {
             Dashboard
           </h1>
           <SendStatusLine status={sendStatus} />
+          {/* Asks, never blocks: nothing on the dashboard or in the survey
+              pipeline is gated on acceptance until legal advice says it
+              should be. Shown for orgs with no acceptance on record and for
+              any whose recorded version is not currentLegalDocsVersion() —
+              including a '-draft' acceptance once legal.ts is filled in. */}
+          {legalAcceptedVersion !== currentLegalDocsVersion() && (
+            <LegalAcceptanceBanner previouslyAccepted={legalAcceptedVersion !== null} />
+          )}
+          {!businessNamed && <BusinessNamePrompt />}
         </div>
 
         {/* ── Empty state ── */}

@@ -9,17 +9,41 @@ import { FREE_TIER_MONTHLY_SURVEYS, freeTierWindowStart } from '@/lib/plan';
  * events with a 200 for each of these reasons, and nothing else reported
  * them — the dashboard said "surveys firing automatically" while every event
  * was being dropped. This mirrors those gates so the two cannot disagree.
+ *
+ * Only org-wide gates are states here. Skips decided by the individual
+ * cancellation (involuntary churn, an opted-out or email-less customer, a
+ * duplicate delivery) say nothing about whether the *next* one will be
+ * surveyed; the dashboard's 'sending' line names involuntary churn in its copy
+ * instead, because that is a whole class of cancellations rather than a rare one.
  */
 export type SurveySendStatus =
   | { kind: 'sending' }
   | { kind: 'stripe_not_connected' }
+  | { kind: 'setup_incomplete' }
   | { kind: 'deletion_pending' }
+  | { kind: 'stripe_key_invalid'; since: Date }
   | { kind: 'paused_by_churnlens' }
   | { kind: 'free_tier_limit'; limit: number; resetsOn: Date };
 
 export function surveySendStatus(input: {
   stripeConnected: boolean;
+  /**
+   * Whether the org has a webhook endpoint registered with Stripe
+   * (stripe_webhook_id and its signing secret). Without one the webhook
+   * answers 404 "Unknown organization" to anything that arrives — in
+   * practice nothing does, since no endpoint posts to it — so no
+   * cancellation can be surveyed however the rest of the setup looks.
+   */
+  stripeWebhookRegistered: boolean;
   deletionRequested: boolean;
+  /**
+   * organizations.stripe_key_invalid_at: when the webhook first found the
+   * stored key unable to serve it — Stripe rejected it (401/403), or it
+   * belongs to a different Stripe account or mode than the events
+   * ('stripe_mode_mismatch', 'customer_not_found') — or null when no problem
+   * is known.
+   */
+  stripeKeyInvalidSince: Date | null;
   /** legalFooterReady() from src/lib/legal — injected so this stays pure. */
   legalFooterReady: boolean;
   plan: string;
@@ -27,7 +51,19 @@ export function surveySendStatus(input: {
   now?: Date;
 }): SurveySendStatus {
   if (!input.stripeConnected) return { kind: 'stripe_not_connected' };
+  // A key with no endpoint: what a failed first connect used to leave (it
+  // stored the key before registering). Ahead of the rest because none of
+  // them matters until events can arrive, and /onboarding fixes it.
+  if (!input.stripeWebhookRegistered) return { kind: 'setup_incomplete' };
   if (input.deletionRequested) return { kind: 'deletion_pending' };
+  // Ahead of the platform pause, whose copy tells the founder nothing in their
+  // setup needs fixing — untrue while their key is rejected — and of the
+  // free-tier cap, which lifts on the 1st while an unusable key stays unusable.
+  // The webhook checks the key later than both, but this is the one the
+  // founder has to act on.
+  if (input.stripeKeyInvalidSince !== null) {
+    return { kind: 'stripe_key_invalid', since: input.stripeKeyInvalidSince };
+  }
   if (!input.legalFooterReady) return { kind: 'paused_by_churnlens' };
   if (input.plan === 'free' && input.surveysThisMonth >= FREE_TIER_MONTHLY_SURVEYS) {
     const start = freeTierWindowStart(input.now);
@@ -44,6 +80,11 @@ export function surveySendStatus(input: {
  * Surveys counted against the free-tier cap this month. Counted by created_at
  * (surveys sent), not surveyed_at (responses): most customers never respond,
  * so counting responses would let a free org send without limit.
+ *
+ * The webhook applies the cap only to a subscription with no row yet — a
+ * redelivery of one already counted here is retried or reported as a
+ * duplicate as usual — so the dashboard's "new cancellations won't be
+ * surveyed" is exactly what happens once this reaches the cap.
  */
 export function countFreeTierSurveys(orgId: string, now: Date = new Date()): Promise<number> {
   return queryCount(

@@ -34,6 +34,9 @@ const DATE_STR = '2026-09-01';
 
 import { POST } from '../route';
 import { LEGAL } from '@/lib/legal';
+// Real: these tests assert on what the route reported. ALERT_EMAIL is pinned
+// empty for every suite (vitest.config.ts), so nothing is emailed.
+import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 
 function purgeRequest() {
   return new Request('http://localhost/api/purge', {
@@ -328,6 +331,7 @@ describe('POST /api/purge — one broken step does not stop the others', () => {
     ['DELETE FROM organizations o', 'abandoned_signups'],
     ['DELETE FROM unsubscribes', 'orphaned_unsubscribes'],
     ['DELETE FROM cron_runs', 'cron_runs'],
+    ['DELETE FROM users_dedupe_backup', 'users_dedupe_backup'],
   ];
 
   it.each(STEPS)('names %s in `failed` as "%s"', async (needle, stepName) => {
@@ -475,6 +479,7 @@ describe('POST /api/purge — guards', () => {
       if (sql.includes('DELETE FROM organizations WHERE id')) return 1; // org-a hard-deleted
       if (sql.includes('DELETE FROM unsubscribes')) return 6;
       if (sql.includes('DELETE FROM cron_runs')) return 7;
+      if (sql.includes('DELETE FROM users_dedupe_backup')) return 8;
       return 0;
     });
 
@@ -484,7 +489,98 @@ describe('POST /api/purge — guards', () => {
       'purge',
       DATE_STR,
       // 3 + 2 + 5 + 1 org hard-deleted + 4 abandoned + 6 orphaned unsubscribes + 7 old cron_runs
-      expect.objectContaining({ status: 'succeeded', processed: 28, failed: 0 }),
+      // + 8 expired dedupe snapshots
+      expect.objectContaining({ status: 'succeeded', processed: 36, failed: 0 }),
     );
+  });
+});
+
+describe('POST /api/purge — error reporting', () => {
+  beforeEach(() => {
+    resetErrorReports();
+  });
+
+  it('reports a failing step by name and date, the same label it records in `failed`', async () => {
+    executeMock.mockImplementation(async (sql: string) => {
+      if (sql.includes('DELETE FROM themes')) throw new Error('themes delete boom');
+      return 0;
+    });
+
+    await POST(purgeRequest());
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'cron.purge',
+        message: 'themes delete boom',
+        meta: { step: 'themes', date: DATE_STR },
+      }),
+    ]);
+  });
+
+  it('reports the users_dedupe_backup step like every other step — it is the one holding email addresses', async () => {
+    executeMock.mockImplementation(async (sql: string) => {
+      if (sql.includes('DELETE FROM users_dedupe_backup')) throw new Error('dedupe backup delete boom');
+      return 0;
+    });
+
+    await POST(purgeRequest());
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'cron.purge',
+        message: 'dedupe backup delete boom',
+        meta: { step: 'users_dedupe_backup', date: DATE_STR },
+      }),
+    ]);
+  });
+
+  it('reports a failed hard-delete with the org id — an erasure the policy promised did not happen', async () => {
+    queryMock.mockImplementation(async (sql: string) =>
+      sql.includes('deletion_requested_at') ? [{ id: 'org-a' }] : [],
+    );
+    disconnectStripeMock.mockRejectedValue(new Error('stripe teardown boom'));
+
+    await POST(purgeRequest());
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'cron.purge',
+        meta: { step: 'org_delete', orgId: 'org-a', date: DATE_STR },
+      }),
+    ]);
+  });
+
+  it('reports a failed lookup of orgs due for deletion', async () => {
+    queryMock.mockRejectedValue(new Error('connection terminated'));
+
+    await POST(purgeRequest());
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({ context: 'cron.purge', meta: { step: 'org_delete_query', date: DATE_STR } }),
+    ]);
+  });
+
+  it('reports nothing on a clean run', async () => {
+    await POST(purgeRequest());
+
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+  });
+
+  it.each([
+    ['claiming the day', () => claimCronRunMock.mockRejectedValueOnce(new Error('connection terminated'))],
+    ['recording the finished day', () => finishCronRunMock.mockRejectedValueOnce(new Error('connection terminated'))],
+  ])('reports a throw outside the per-step catches (%s) instead of leaving Next to log a bare 500', async (_label, breakIt) => {
+    breakIt();
+
+    const res = await POST(purgeRequest());
+
+    expect(res.status).toBe(500);
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'cron.purge',
+        message: 'connection terminated',
+        meta: { step: 'unhandled', method: 'POST' },
+      }),
+    ]);
   });
 });

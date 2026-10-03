@@ -95,8 +95,21 @@ export function signSurveyToken(payload: SurveyTokenPayload): string {
   return `${data}.${sig}`;
 }
 
+/** Unpadded base64url, the only alphabet signSurveyToken's signature uses. */
+const BASE64URL_CHARS = /^[A-Za-z0-9_-]+$/;
+
 /**
  * Verify a survey token. Returns the decoded payload or null if invalid/tampered.
+ *
+ * The signature is compared as the exact string signSurveyToken emits, not as
+ * the bytes it decodes to. Node's base64url decoder skips characters outside
+ * the alphabet and ignores the unused low bits of the last character, so a
+ * genuine token with a NUL, '!' or space appended (or its last character
+ * nudged) decoded to the genuine signature and verified. Callers bind the
+ * token into SQL (survey_responses.token), where a NUL fails the query: a
+ * 500 and an operator alert from anyone holding a link, as often as they
+ * liked. A token that verifies now is byte-for-byte the one that was signed,
+ * so what callers bind is always the canonical token.
  */
 export function verifySurveyToken(token: string): SurveyTokenPayload | null {
   const lastDot = token.lastIndexOf('.');
@@ -105,10 +118,10 @@ export function verifySurveyToken(token: string): SurveyTokenPayload | null {
   const sig = token.substring(lastDot + 1);
   const key = getEncryptionKey();
   const expected = createHmac('sha256', key).update(`survey_token.${data}`).digest('base64url');
-  const sigBuf = Buffer.from(sig, 'base64url');
-  const expectedBuf = Buffer.from(expected, 'base64url');
-  if (sigBuf.length !== expectedBuf.length) return null;
-  if (!timingSafeEqual(sigBuf, expectedBuf)) return null;
+  // Alphabet first, so every character is one byte and equal string lengths
+  // mean equal buffer lengths, which timingSafeEqual requires.
+  if (!BASE64URL_CHARS.test(sig) || sig.length !== expected.length) return null;
+  if (!timingSafeEqual(Buffer.from(sig, 'ascii'), Buffer.from(expected, 'ascii'))) return null;
   try {
     return JSON.parse(Buffer.from(data, 'base64url').toString()) as SurveyTokenPayload;
   } catch {

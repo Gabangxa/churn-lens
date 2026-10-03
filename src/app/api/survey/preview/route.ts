@@ -2,13 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import { signSurveyToken } from '@/lib/crypto';
 import { assertSameOrigin, requireOrgId } from '@/lib/auth';
 import { publicAppUrl, redirectUrl } from '@/lib/app-url';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 /**
  * Redirect the logged-in founder to a live preview of their exit survey.
  * The token is marked kind:'preview' — the survey renders normally but
  * submitting it never writes to the database.
  */
-export async function GET(req: NextRequest) {
+async function redirectToPreview(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
 
@@ -17,7 +18,7 @@ export async function GET(req: NextRequest) {
   // fall back below, because a preview link on the wrong host is useless.
   const appUrl = publicAppUrl();
 
-  const authResult = requireOrgId(req);
+  const authResult = await requireOrgId(req);
   if ('error' in authResult) {
     // Not /onboarding: onboarding now requires a session too, so an
     // unauthenticated visitor bounces straight to where they can get one.
@@ -41,3 +42,5 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.redirect(new URL(`/survey/${token}`, appUrl));
 }
+
+export const GET = withErrorReporting('survey.preview', redirectToPreview);

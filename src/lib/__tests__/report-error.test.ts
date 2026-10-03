@@ -1,0 +1,760 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+/**
+ * reportError is driven through its public surface only: what it writes to the
+ * log, what getErrorReportSnapshot() (read by GET /api/admin/status) says, and
+ * what reaches Resend. Resend is the one genuine boundary stubbed here — it is
+ * a network call, and the behaviour under test is what this module does with
+ * its success, its `{ error }` resolution, and its throws.
+ */
+
+const sendMock = vi.fn();
+const getResendMock = vi.fn();
+vi.mock('@/lib/resend', () => ({
+  getResend: () => getResendMock(),
+  FROM_EMAIL: 'alerts@churnlens.test',
+}));
+
+import {
+  reportError,
+  getErrorReportSnapshot,
+  installProcessErrorHandlers,
+  resetErrorReports,
+  ALERT_SEND_SPACING_MS,
+  MAX_ALERTS_PER_DAY,
+  MAX_ALERTS_PER_HOUR,
+  RECENT_ERRORS_LIMIT,
+} from '../report-error';
+
+const ALERT_TO = 'founder-alerts@ops.test';
+const T0 = new Date('2026-10-03T12:00:00Z');
+
+let errorSpy: ReturnType<typeof vi.spyOn>;
+let warnSpy: ReturnType<typeof vi.spyOn>;
+
+/** Every JSON line reportError (or its alert path) wrote via console.error. */
+function errorLines(): Record<string, unknown>[] {
+  return errorSpy.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>);
+}
+
+/** The one alert email Resend was asked to send, by call index. */
+function sentEmail(index = 0): { from: string; to: string; subject: string; text: string } {
+  return sendMock.mock.calls[index][0] as { from: string; to: string; subject: string; text: string };
+}
+
+/** Run the send queue's spacing timers until every queued alert has been handed to Resend and settled. */
+async function drainAlertQueue(): Promise<void> {
+  await vi.runAllTimersAsync();
+}
+
+/** Wait until `count` alerts have been delivered (alertsSent is stamped when Resend's promise resolves). */
+async function alertsSettled(count: number): Promise<void> {
+  await vi.waitFor(() => expect(getErrorReportSnapshot().alertsSent).toBe(count));
+}
+
+beforeEach(() => {
+  // setTimeout too: the alert send queue spaces bursts out on a timer.
+  vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+  vi.setSystemTime(T0);
+  resetErrorReports();
+
+  sendMock.mockReset().mockResolvedValue({ data: { id: 'email_1' }, error: null });
+  getResendMock.mockReset().mockImplementation(() => ({ emails: { send: (...args: unknown[]) => sendMock(...args) } }));
+
+  vi.stubEnv('ALERT_EMAIL', ALERT_TO);
+  vi.stubEnv('RAILWAY_ENVIRONMENT_NAME', 'production');
+
+  errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+});
+
+afterEach(() => {
+  // Also detaches any process listeners a test installed.
+  resetErrorReports();
+  vi.useRealTimers();
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+});
+
+describe('reportError — the log line', () => {
+  it('writes exactly one structured JSON line carrying context, error, fingerprint, environment and ids', () => {
+    reportError('cron.themes', new Error('connection terminated'), { orgId: 'org_123', weekOf: '2026-09-28' });
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    const [line] = errorLines();
+    expect(line).toMatchObject({
+      level: 'error',
+      context: 'cron.themes',
+      name: 'Error',
+      // Prefixed for Railway's log view and the monitor's tail, which show only `message`.
+      message: '[cron.themes] connection terminated',
+      environment: 'production',
+      meta: { orgId: 'org_123', weekOf: '2026-09-28' },
+    });
+    expect(line.fingerprint).toMatch(/^[0-9a-f]{8}$/);
+    expect(String(line.stack)).toContain('connection terminated');
+  });
+
+  it('falls back to NODE_ENV when Railway has not named the environment', () => {
+    vi.stubEnv('RAILWAY_ENVIRONMENT_NAME', '');
+    vi.stubEnv('NODE_ENV', 'test');
+
+    reportError('survey.submit', new Error('boom'));
+
+    expect(errorLines()[0].environment).toBe('test');
+  });
+
+  it('describes non-Error throwables instead of logging "[object Object]"', () => {
+    // The Resend SDK hands back a plain { name, message } object, not an Error.
+    reportError('cron.digest.send', { name: 'rate_limit_exceeded', message: 'Too many requests' });
+    reportError('cron.scheduler', 'a bare string');
+
+    const [resendLine, stringLine] = errorLines();
+    expect(resendLine).toMatchObject({ name: 'rate_limit_exceeded', message: '[cron.digest.send] Too many requests' });
+    expect(stringLine).toMatchObject({ message: '[cron.scheduler] a bare string' });
+  });
+
+  it('never throws, even when the thing thrown cannot be stringified', () => {
+    // reportError runs inside catch blocks and inside the process-level
+    // uncaughtException monitor, where a throw of its own would crash the
+    // process outright.
+    const hostile = {
+      toString() {
+        throw new Error('nope');
+      },
+    };
+
+    expect(() => reportError('process.uncaughtException', hostile)).not.toThrow();
+    // Still recorded: losing the report would hide that something was thrown.
+    expect(getErrorReportSnapshot().recent[0]).toMatchObject({
+      context: 'process.uncaughtException',
+      message: '[unprintable thrown value]',
+    });
+  });
+
+  it('never throws even when its own bookkeeping fails, and says so without echoing the original error', () => {
+    const meta = {
+      get orgId(): string {
+        throw new Error('getter exploded');
+      },
+    };
+
+    expect(() => reportError('survey.submit', new Error('original for jane@customer.example'), meta)).not.toThrow();
+    const raw = errorSpy.mock.calls.map(([line]) => String(line)).join('\n');
+    expect(raw).toContain('reportError failed while reporting survey.submit: getter exploded');
+    expect(raw).not.toContain('jane@customer.example');
+  });
+});
+
+describe('reportError — PII redaction', () => {
+  const MESSAGE = 'Key (lower(email))=(jane.doe+billing@customer.example) already exists';
+
+  it('redacts anything email-shaped from the log line, message and stack alike', () => {
+    reportError('auth.login-request', new Error(MESSAGE));
+
+    const raw = String(errorSpy.mock.calls[0][0]);
+    expect(raw).not.toContain('jane.doe');
+    expect(raw).not.toContain('customer.example');
+    const [line] = errorLines();
+    expect(line.message).toBe('[auth.login-request] Key (lower(email))=([redacted email]) already exists');
+    expect(String(line.stack)).toContain('[redacted email]');
+  });
+
+  it('redacts URL-encoded addresses too (a failed fetch URL with ?email=)', () => {
+    reportError('cron.digest.send', new Error('GET https://api.example/v1/users?email=jane%40customer.example failed'));
+
+    const raw = String(errorSpy.mock.calls[0][0]);
+    expect(raw).not.toContain('jane%40customer.example');
+    expect(raw).toContain('[redacted email]');
+  });
+
+  it('does not leak a partial address when the length bound splits one', () => {
+    // The message is bounded (to 2 x the 1000-char message limit) before the
+    // regex runs. Redaction then shrinks it well under 1000, so the final
+    // truncation never happens: whatever the bound left at the end is output.
+    const prefix = `${'p'.repeat(21)} `;
+    const addresses = Array.from(
+      { length: 39 },
+      (_, i) => `someone.with.a.long.name${String(i).padStart(2, '0')}@customer-domain.example`,
+    );
+    const message = prefix + addresses.join(' ');
+    const lastStart = message.lastIndexOf('someone.with.a.long.name38');
+    // Sanity: the 2000-char bound falls after the last address's '@' and
+    // before its end — the split this test is about.
+    expect(message.indexOf('@', lastStart)).toBeLessThan(2000);
+    expect(message.length).toBeGreaterThan(2000);
+
+    reportError('cron.themes', new Error(message));
+
+    const raw = String(errorSpy.mock.calls[0][0]);
+    expect(raw).not.toContain('name38');
+    expect(raw).not.toContain('customer-domai');
+    // Only the message: the stack legitimately holds paths like node_modules/@vitest.
+    expect(String(errorLines()[0].message)).not.toContain('@');
+  });
+
+  it.each([
+    ['a non-ASCII local part and domain', 'jöhn.dœ@exämple.de', ['jöhn', 'exämple']],
+    ['a fully non-Latin address', 'андрей@почта.рф', ['андрей', 'почта']],
+    ['an ideographic address', '用户@例子.广告', ['用户', '例子']],
+    ['a fullwidth at sign', 'jane＠customer.example', ['jane', 'customer.example']],
+    ['a double-encoded at sign (%2540)', 'jane%2540customer.example', ['jane', 'customer.example']],
+    ['a percent-encoded non-ASCII domain', 'jane%40caf%C3%A9.example', ['jane', 'caf%C3%A9']],
+    ['an astral-plane character in the local part', 'j𝒶ne@customer.example', ['j𝒶ne', 'customer.example']],
+    // The typographic quotes go with it: non-ASCII counts as address text.
+    ['an address in typographic quotes', '“jane@customer.example”', ['jane', 'customer.example']],
+  ])('redacts %s', (_label, address, fragments) => {
+    reportError('auth.login-request', new Error(`lookup failed for ${address} (retrying)`), { who: address });
+
+    const raw = errorSpy.mock.calls.map(([line]) => String(line)).join('\n') + JSON.stringify(getErrorReportSnapshot());
+    for (const fragment of fragments) expect(raw).not.toContain(fragment);
+    expect(errorLines()[0].message).toBe('[auth.login-request] lookup failed for [redacted email] (retrying)');
+    expect(sentEmail().text).not.toContain(fragments[0]);
+  });
+
+  it('stays fast on separator-shaped junk, since request input reaches these messages', () => {
+    // Postgres quotes a rejected value into its message ("invalid input syntax
+    // for type uuid: …"). One backtracking address pattern over "%2540" runs
+    // took ~1.8 s per 2000 chars; the bound is generous so only that regression trips it.
+    const started = performance.now();
+    reportError('webhook.stripe', new Error(`invalid input syntax for type uuid: "${'%2540'.repeat(400)}"`));
+    reportError('webhook.stripe', new Error('%40'.repeat(700)));
+
+    expect(performance.now() - started).toBeLessThan(250);
+    expect(getErrorReportSnapshot().totalReported).toBe(2);
+  });
+
+  it('leaves version strings and scoped package paths alone', () => {
+    reportError('cron.themes', new Error('resolved @scope+pkg@1.2.3 from node_modules/@vitest/runner'));
+
+    expect(errorLines()[0].message).toBe('[cron.themes] resolved @scope+pkg@1.2.3 from node_modules/@vitest/runner');
+  });
+
+  it('drops a non-ASCII address the length bound splits, not just an ASCII one', () => {
+    // Same geometry as the ASCII split test above: few, long addresses, so
+    // redaction shrinks the bounded text under the 1000-char final cut and
+    // whatever the 2000-char bound left at the end is output as-is. The walk
+    // back from the cut has to step over non-ASCII letters too, or it stops
+    // at the 'ä' and leaves "jöhn.dœ.with.a.long.name38@ex" behind.
+    const prefix = `${'p'.repeat(59)} `;
+    const addresses = Array.from(
+      { length: 39 },
+      (_, i) => `jöhn.dœ.with.a.long.name${String(i).padStart(2, '0')}@exämple-domain.example`,
+    );
+    const message = prefix + addresses.join(' ');
+    const lastStart = message.lastIndexOf('jöhn.dœ.with.a.long.name38');
+    // Sanity: the bound falls after the last address's '@' and before its end.
+    expect(message.indexOf('@', lastStart)).toBeLessThan(2000);
+    expect(lastStart + addresses[38].length).toBeGreaterThan(2000);
+
+    reportError('cron.themes', new Error(message));
+
+    const loggedMessage = String(errorLines()[0].message);
+    expect(loggedMessage).not.toMatch(/jöhn|exämple|name38/);
+    expect(loggedMessage).not.toContain('@');
+  });
+
+  it('redacts a caller that mistakenly passes an email as a meta value', () => {
+    reportError('survey.submit', new Error('boom'), { orgId: 'org_1', who: 'jane@customer.example' });
+
+    expect(errorLines()[0].meta).toEqual({ orgId: 'org_1', who: '[redacted email]' });
+  });
+
+  it('keeps addresses out of the status snapshot and the alert email', () => {
+    reportError('auth.login-request', new Error(MESSAGE));
+
+    const snapshot = getErrorReportSnapshot();
+    expect(JSON.stringify(snapshot)).not.toContain('jane.doe');
+
+    const email = sentEmail();
+    expect(email.subject).not.toContain('jane.doe');
+    expect(email.text).not.toContain('jane.doe');
+    expect(email.text).toContain('[redacted email]');
+  });
+
+  it('groups errors that differ only by address or id under one fingerprint', () => {
+    reportError('cron.themes', new Error('org 6f1c2a9e-1b2c-4d5e-8f90-123456789abc failed for alice@a.example'));
+    reportError('cron.themes', new Error('org 0a9b8c7d-6e5f-4a3b-9c2d-abcdefabcdef failed for bob@b.example'));
+
+    const { fingerprints } = getErrorReportSnapshot();
+    expect(fingerprints).toHaveLength(1);
+    expect(fingerprints[0].count).toBe(2);
+  });
+
+  it('keeps distinct contexts on distinct fingerprints even for an identical message', () => {
+    reportError('cron.themes', new Error('connection terminated'));
+    reportError('survey.submit', new Error('connection terminated'));
+
+    expect(getErrorReportSnapshot().fingerprints).toHaveLength(2);
+  });
+});
+
+describe('reportError — fingerprints group by kind of failure, not by the ids in it', () => {
+  // Every pair differs only in an id or a quoted value. Splitting them would
+  // send one immediate alert per occurrence and churn real entries out of the
+  // 100-entry fingerprint map.
+  it.each([
+    ['Stripe-style prefixed ids', 'No such customer: cus_Q1a2B3c4D5e6F7', 'No such customer: cus_Zz9y8X7w6V5u4T'],
+    ['request ids', 'Request req_8fK2mQ9xLp3n failed', 'Request req_a1B2c3D4e5F6 failed'],
+    ['hex runs', 'object 3f9a0c7be12d not found', 'object 0be4419ac7f2 not found'],
+    ['base62 runs', 'token aB3dE5gH7jK9 rejected', 'token Zx81Qw72Er63 rejected'],
+    ['double-quoted values', 'invalid input syntax for type uuid: "not-a-uuid"', 'invalid input syntax for type uuid: "x"'],
+    ['single-quoted values', "Unexpected token 'S' in reply", "Unexpected token '<' in reply"],
+    ['backtick-quoted values', 'Invalid `to` field', 'Invalid `from` field'],
+  ])('groups %s', (_label, first, second) => {
+    reportError('webhook.stripe', new Error(first));
+    reportError('webhook.stripe', new Error(second));
+
+    const { fingerprints } = getErrorReportSnapshot();
+    expect(fingerprints).toHaveLength(1);
+    expect(fingerprints[0].count).toBe(2);
+    expect(sendMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['different words', 'connection terminated unexpectedly', 'transaction aborted unexpectedly'],
+    ['different snake_case tables', 'deadlock on survey_responses', 'deadlock on login_tokens'],
+    ["an apostrophe in prose", "can't reach the server", "can't parse the reply"],
+  ])('still separates %s', (_label, first, second) => {
+    reportError('cron.purge', new Error(first));
+    reportError('cron.purge', new Error(second));
+
+    expect(getErrorReportSnapshot().fingerprints).toHaveLength(2);
+  });
+
+  it('does not let a flood of distinct ids evict the fingerprints that matter', () => {
+    reportError('cron.themes', new Error('connection terminated'));
+    for (let i = 0; i < 150; i++) {
+      const id = `cus_${i.toString(36).padStart(4, 'Q')}X${(i * 7919).toString(36)}`;
+      reportError('webhook.stripe', new Error(`No such customer: ${id}`));
+    }
+
+    const { fingerprints } = getErrorReportSnapshot();
+    expect(fingerprints.map((f) => f.context).sort()).toEqual(['cron.themes', 'webhook.stripe']);
+  });
+});
+
+describe('getErrorReportSnapshot — the in-process ring buffer', () => {
+  it('lists recent errors newest first and counts each fingerprint', () => {
+    reportError('cron.themes', new Error('first'));
+    vi.setSystemTime(new Date(T0.getTime() + 1000));
+    reportError('cron.digest', new Error('second'));
+    reportError('cron.digest', new Error('second'));
+
+    const snapshot = getErrorReportSnapshot();
+    expect(snapshot.totalReported).toBe(3);
+    expect(snapshot.recent.map((e) => e.message)).toEqual(['second', 'second', 'first']);
+    expect(snapshot.recent[2]).toMatchObject({ context: 'cron.themes', at: T0.toISOString() });
+
+    const digest = snapshot.fingerprints.find((f) => f.context === 'cron.digest')!;
+    expect(digest).toMatchObject({ count: 2, message: 'second', firstSeenAt: new Date(T0.getTime() + 1000).toISOString() });
+  });
+
+  it('keeps only the most recent RECENT_ERRORS_LIMIT entries but counts all of them', () => {
+    for (let i = 0; i < RECENT_ERRORS_LIMIT + 7; i++) reportError('cron.scheduler', new Error(`tick ${i}`));
+
+    const snapshot = getErrorReportSnapshot();
+    expect(snapshot.recent).toHaveLength(RECENT_ERRORS_LIMIT);
+    expect(snapshot.totalReported).toBe(RECENT_ERRORS_LIMIT + 7);
+    expect(snapshot.fingerprints[0].count).toBe(RECENT_ERRORS_LIMIT + 7);
+  });
+
+  it('hands out a copy, so a reader cannot mutate the live buffer', () => {
+    reportError('cron.themes', new Error('boom'));
+    const snapshot = getErrorReportSnapshot();
+    snapshot.recent.length = 0;
+    snapshot.fingerprints[0].count = 99;
+
+    const fresh = getErrorReportSnapshot();
+    expect(fresh.recent).toHaveLength(1);
+    expect(fresh.fingerprints[0].count).toBe(1);
+  });
+
+  it('survives a module re-import (the globalThis guarantee next dev relies on)', async () => {
+    reportError('cron.themes', new Error('boom'));
+
+    vi.resetModules();
+    const fresh = await import('../report-error');
+
+    expect(fresh.getErrorReportSnapshot().totalReported).toBe(1);
+  });
+});
+
+describe('reportError — alert email throttle', () => {
+  const HOUR = 60 * 60 * 1000;
+  const at = (offsetMs: number) => vi.setSystemTime(new Date(T0.getTime() + offsetMs));
+  const recurring = () => reportError('cron.themes', new Error('connection terminated'));
+  const fingerprint = () => getErrorReportSnapshot().fingerprints[0];
+
+  it('emails the first occurrence immediately, with the environment and context in the subject', () => {
+    reportError('cron.themes', new Error('connection terminated'), { weekOf: '2026-09-28' });
+
+    expect(sendMock).toHaveBeenCalledTimes(1);
+    const email = sentEmail();
+    expect(email.to).toBe(ALERT_TO);
+    expect(email.from).toBe('alerts@churnlens.test');
+    expect(email.subject).toContain('production');
+    expect(email.subject).toContain('cron.themes');
+    expect(email.text).toContain('connection terminated');
+    expect(email.text).toContain('weekOf: 2026-09-28');
+  });
+
+  it('backs a recurring fingerprint off from hourly to every 4 hours to daily, each alert carrying its backlog', async () => {
+    recurring();
+    await alertsSettled(1);
+    expect(sentEmail(0).text).toContain(`no sooner than ${new Date(T0.getTime() + HOUR).toISOString()}`);
+
+    at(10 * 60 * 1000);
+    recurring();
+    recurring();
+    at(HOUR - 1);
+    recurring();
+    expect(sendMock).toHaveBeenCalledTimes(1);
+    expect(fingerprint()).toMatchObject({ count: 4, suppressedSinceAlert: 3 });
+
+    at(HOUR);
+    recurring();
+    await alertsSettled(2);
+    expect(sentEmail(1).text).toContain('3 more occurrence(s) were suppressed');
+    expect(sentEmail(1).text).toContain(`no sooner than ${new Date(T0.getTime() + 5 * HOUR).toISOString()}`);
+    expect(fingerprint()).toMatchObject({ suppressedSinceAlert: 0, lastAlertAt: new Date(T0.getTime() + HOUR).toISOString() });
+
+    // Second step: four hours.
+    at(HOUR + 4 * HOUR - 1);
+    recurring();
+    expect(sendMock).toHaveBeenCalledTimes(2);
+    at(HOUR + 4 * HOUR);
+    recurring();
+    await alertsSettled(3);
+
+    // Third step, and every one after while it keeps recurring: a day. The
+    // occurrences 12 hours apart keep it from ever counting as quiet.
+    at(5 * HOUR + 12 * HOUR);
+    recurring();
+    at(5 * HOUR + 24 * HOUR - 1);
+    recurring();
+    expect(sendMock).toHaveBeenCalledTimes(3);
+    at(5 * HOUR + 24 * HOUR);
+    recurring();
+    await alertsSettled(4);
+    at(29 * HOUR + 12 * HOUR);
+    recurring();
+    at(29 * HOUR + 23 * HOUR);
+    recurring();
+    expect(sendMock).toHaveBeenCalledTimes(4);
+    at(29 * HOUR + 24 * HOUR);
+    recurring();
+    await alertsSettled(5);
+    expect(sentEmail(4).text).toContain('2 more occurrence(s) were suppressed');
+  });
+
+  it('starts the backoff over once a fingerprint has gone a whole day without occurring', async () => {
+    recurring();
+    await alertsSettled(1);
+    at(HOUR);
+    recurring();
+    await alertsSettled(2);
+
+    // Quiet for exactly a day: a new episode, alerted at once…
+    at(HOUR + 24 * HOUR);
+    recurring();
+    await alertsSettled(3);
+    // …and its next repeat is due after one hour again, not the four the old episode had reached.
+    at(26 * HOUR);
+    recurring();
+    await alertsSettled(4);
+  });
+
+  it('throttles each fingerprint independently', async () => {
+    reportError('cron.themes', new Error('connection terminated'));
+    reportError('survey.submit', new Error('connection terminated'));
+    reportError('cron.themes', new Error('connection terminated'));
+    await drainAlertQueue();
+
+    expect(sendMock).toHaveBeenCalledTimes(2);
+    expect(sendMock.mock.calls.map(([e]) => (e as { subject: string }).subject)).toEqual([
+      expect.stringContaining('cron.themes'),
+      expect.stringContaining('survey.submit'),
+    ]);
+  });
+
+  it('spaces a burst of first alerts ALERT_SEND_SPACING_MS apart, under Resend’s 2 requests a second', async () => {
+    reportError('cron.themes', new Error('connection terminated'));
+    reportError('cron.digest', new Error('connection terminated'));
+    reportError('cron.purge', new Error('connection terminated'));
+    expect(sendMock).toHaveBeenCalledTimes(1);
+    expect(getErrorReportSnapshot().alertBudget.queued).toBe(2);
+
+    await vi.advanceTimersByTimeAsync(ALERT_SEND_SPACING_MS - 1);
+    expect(sendMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sendMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(ALERT_SEND_SPACING_MS);
+    expect(sendMock).toHaveBeenCalledTimes(3);
+    expect(sendMock.mock.calls.map(([e]) => (e as { subject: string }).subject)).toEqual([
+      expect.stringContaining('cron.themes'),
+      expect.stringContaining('cron.digest'),
+      expect.stringContaining('cron.purge'),
+    ]);
+  });
+
+  it('counts a repeat that arrives while its alert is still queued as suppressed, not as a second alert', async () => {
+    reportError('cron.themes', new Error('first'));
+    reportError('cron.digest', new Error('connection terminated'));
+    reportError('cron.digest', new Error('connection terminated'));
+    await drainAlertQueue();
+
+    expect(sendMock).toHaveBeenCalledTimes(2);
+    expect(sentEmail(1).text).not.toContain('were suppressed');
+    const digest = getErrorReportSnapshot().fingerprints.find((f) => f.context === 'cron.digest')!;
+    expect(digest).toMatchObject({ count: 2, suppressedSinceAlert: 1 });
+  });
+
+  it('caps alert emails across all fingerprints per hour, so an outage cannot drain the Resend quota surveys share', async () => {
+    for (let i = 0; i < MAX_ALERTS_PER_HOUR + 3; i++) {
+      reportError(`context.${i}`, new Error('connection terminated'));
+    }
+    await drainAlertQueue();
+
+    expect(sendMock).toHaveBeenCalledTimes(MAX_ALERTS_PER_HOUR);
+    const capped = getErrorReportSnapshot().fingerprints.filter((f) => f.lastAlertAt === null);
+    expect(capped).toHaveLength(3);
+    expect(capped.every((f) => f.suppressedSinceAlert === 1)).toBe(true);
+    expect(warnSpy.mock.calls.filter(([line]) => String(line).includes('per hour'))).toHaveLength(1);
+
+    // The budget is a sliding hour: once the first sends age out, a capped
+    // fingerprint's next occurrence goes out and carries its backlog.
+    at(HOUR);
+    reportError(capped[0].context, new Error('connection terminated'));
+    expect(sendMock).toHaveBeenCalledTimes(MAX_ALERTS_PER_HOUR + 1);
+    expect(sentEmail(MAX_ALERTS_PER_HOUR).text).toContain('1 more occurrence(s) were suppressed');
+  });
+
+  it('caps alert emails per rolling day too, however the hours spread them', async () => {
+    // Six new failures an hour stays under the hourly cap every hour, and
+    // used to add up to 240 emails a day.
+    for (let hour = 0; hour < 6; hour++) {
+      at(hour * HOUR);
+      for (let i = 0; i < 6; i++) reportError(`context.${hour}.${i}`, new Error('connection terminated'));
+      await drainAlertQueue();
+    }
+
+    expect(sendMock).toHaveBeenCalledTimes(MAX_ALERTS_PER_DAY);
+    const capped = getErrorReportSnapshot().fingerprints.filter((f) => f.lastAlertAt === null);
+    expect(capped).toHaveLength(36 - MAX_ALERTS_PER_DAY);
+    expect(capped.every((f) => f.suppressedSinceAlert === 1)).toBe(true);
+    expect(warnSpy.mock.calls.filter(([line]) => String(line).includes('per day'))).toHaveLength(1);
+    expect(getErrorReportSnapshot().alertBudget).toMatchObject({
+      maxPerHour: MAX_ALERTS_PER_HOUR,
+      maxPerDay: MAX_ALERTS_PER_DAY,
+      attemptsLastDay: MAX_ALERTS_PER_DAY,
+      queued: 0,
+    });
+
+    // Rolling: once hour 0's six sends are a day old, capped ones go out again.
+    at(24 * HOUR);
+    reportError(capped[0].context, new Error('connection terminated'));
+    expect(sendMock).toHaveBeenCalledTimes(MAX_ALERTS_PER_DAY + 1);
+    expect(sentEmail(MAX_ALERTS_PER_DAY).text).toContain('1 more occurrence(s) were suppressed');
+  });
+});
+
+describe('reportError — alerting not configured', () => {
+  it('sends nothing, still records the error, and warns once per process', () => {
+    vi.stubEnv('ALERT_EMAIL', '');
+
+    reportError('cron.themes', new Error('one'));
+    reportError('cron.digest', new Error('two'));
+
+    expect(getResendMock).not.toHaveBeenCalled();
+    expect(sendMock).not.toHaveBeenCalled();
+    expect(getErrorReportSnapshot()).toMatchObject({ alertingConfigured: false, totalReported: 2 });
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(String(warnSpy.mock.calls[0][0])).toContain('ALERT_EMAIL');
+  });
+
+  it('treats a whitespace-only ALERT_EMAIL as unset', () => {
+    vi.stubEnv('ALERT_EMAIL', '   ');
+
+    reportError('cron.themes', new Error('one'));
+
+    expect(sendMock).not.toHaveBeenCalled();
+    expect(getErrorReportSnapshot().alertingConfigured).toBe(false);
+  });
+});
+
+describe('reportError — a failing alert send', () => {
+  const failureLogged = () =>
+    errorLines().find((l) => String(l.message).startsWith('[report-error.alert] alert email send failed'));
+
+  it('logs a Resend { error } resolution and never re-enters reportError', async () => {
+    sendMock.mockResolvedValue({
+      data: null,
+      error: { name: 'validation_error', message: 'Invalid `to` field: founder-alerts@ops.test' },
+    });
+
+    reportError('cron.themes', new Error('boom'));
+
+    await vi.waitFor(() => expect(failureLogged()).toBeDefined());
+    expect(sendMock).toHaveBeenCalledTimes(1);
+    const snapshot = getErrorReportSnapshot();
+    expect(snapshot.totalReported).toBe(1);
+    expect(snapshot.recent).toHaveLength(1);
+    expect(snapshot).toMatchObject({ alertsSent: 0, alertsFailed: 1 });
+    // The failure text is scrubbed like everything else this module writes.
+    expect(snapshot.lastAlertError).toContain('[redacted email]');
+    expect(JSON.stringify(failureLogged())).not.toContain('founder-alerts@ops.test');
+  });
+
+  it('logs a rejected send the same way', async () => {
+    sendMock.mockRejectedValue(new Error('fetch failed'));
+
+    reportError('cron.themes', new Error('boom'));
+
+    await vi.waitFor(() => expect(failureLogged()).toBeDefined());
+    expect(getErrorReportSnapshot()).toMatchObject({ totalReported: 1, alertsFailed: 1, lastAlertError: 'fetch failed' });
+  });
+
+  it('logs a synchronous throw from the client (RESEND_API_KEY unset) without throwing itself', async () => {
+    getResendMock.mockImplementation(() => {
+      throw new Error('RESEND_API_KEY is not set');
+    });
+
+    expect(() => reportError('cron.themes', new Error('boom'))).not.toThrow();
+
+    await vi.waitFor(() => expect(failureLogged()).toBeDefined());
+    expect(getErrorReportSnapshot()).toMatchObject({ totalReported: 1, alertsFailed: 1 });
+  });
+
+  it('does not mute a fingerprint whose alert failed: its next occurrence retries, carrying the backlog', async () => {
+    // Stamping lastAlertAt before a send that then failed (a Resend 429 in a
+    // burst, say) silenced that failure for the next hour.
+    sendMock.mockRejectedValueOnce(new Error('rate_limit_exceeded'));
+
+    reportError('cron.themes', new Error('boom'));
+    await vi.waitFor(() => expect(getErrorReportSnapshot().alertsFailed).toBe(1));
+    expect(getErrorReportSnapshot().fingerprints[0]).toMatchObject({ lastAlertAt: null, suppressedSinceAlert: 1 });
+
+    vi.setSystemTime(new Date(T0.getTime() + 60 * 1000));
+    reportError('cron.themes', new Error('boom'));
+    await drainAlertQueue();
+
+    expect(sendMock).toHaveBeenCalledTimes(2);
+    expect(sentEmail(1).text).toContain('1 more occurrence(s) were suppressed');
+    await alertsSettled(1);
+    expect(getErrorReportSnapshot().fingerprints[0]).toMatchObject({
+      lastAlertAt: new Date(T0.getTime() + 60 * 1000).toISOString(),
+      suppressedSinceAlert: 0,
+    });
+  });
+
+  it('still bounds retries during a Resend outage: failed sends count against the hourly cap', async () => {
+    sendMock.mockRejectedValue(new Error('fetch failed'));
+
+    for (let minute = 0; minute < 30; minute++) {
+      vi.setSystemTime(new Date(T0.getTime() + minute * 60 * 1000));
+      reportError('cron.themes', new Error('boom'));
+      await drainAlertQueue();
+    }
+
+    expect(sendMock).toHaveBeenCalledTimes(MAX_ALERTS_PER_HOUR);
+    expect(getErrorReportSnapshot()).toMatchObject({ alertsSent: 0, alertsFailed: MAX_ALERTS_PER_HOUR });
+    expect(getErrorReportSnapshot().fingerprints[0].suppressedSinceAlert).toBe(30);
+  });
+});
+
+describe('installProcessErrorHandlers — reports process-level failures without deciding survival', () => {
+  /**
+   * Runs `fn` with `unhandledRejection` listeners replaced by `standIns`, then
+   * puts the runner's own back. Vitest listens for unhandled rejections to fail
+   * the run, so emitting one by hand must happen with its listener detached.
+   */
+  /**
+   * Emit the monitor event the way Node does. Node passes listeners an
+   * `origin` second argument; @types/node's emit() overload omits it.
+   */
+  function emitUncaughtMonitor(err: Error, origin: 'uncaughtException' | 'unhandledRejection') {
+    const emit = process.emit.bind(process) as (event: string, ...args: unknown[]) => boolean;
+    emit('uncaughtExceptionMonitor', err, origin);
+  }
+
+  function withRejectionListeners(standIns: Array<(reason: unknown) => void>, fn: () => void) {
+    const prior = process.listeners('unhandledRejection');
+    process.removeAllListeners('unhandledRejection');
+    for (const listener of standIns) process.on('unhandledRejection', listener);
+    try {
+      fn();
+    } finally {
+      resetErrorReports();
+      process.removeAllListeners('unhandledRejection');
+      for (const listener of prior) process.on('unhandledRejection', listener);
+    }
+  }
+
+  it('reports an uncaught exception through the observe-only monitor, adding no uncaughtException listener', () => {
+    // An 'uncaughtException' listener would be a decision to keep the process
+    // alive. Under `next start` Next has already made it; anywhere else Node's
+    // default crash must stand.
+    const before = process.listenerCount('uncaughtException');
+
+    installProcessErrorHandlers();
+    emitUncaughtMonitor(new Error('kaboom'), 'uncaughtException');
+
+    expect(getErrorReportSnapshot().recent[0]).toMatchObject({ context: 'process.uncaughtException', message: 'kaboom' });
+    expect(process.listenerCount('uncaughtException')).toBe(before);
+  });
+
+  it('labels a crash that began as an unhandled rejection by that origin', () => {
+    installProcessErrorHandlers();
+    emitUncaughtMonitor(new Error('nobody awaited me'), 'unhandledRejection');
+
+    expect(getErrorReportSnapshot().recent[0].context).toBe('process.unhandledRejection');
+  });
+
+  it('reports unhandled rejections when the host has already chosen to keep the process alive', () => {
+    const nextKeepAlive = vi.fn();
+
+    withRejectionListeners([nextKeepAlive], () => {
+      installProcessErrorHandlers();
+      process.emit('unhandledRejection', new Error('nobody awaited me'), Promise.resolve());
+
+      expect(nextKeepAlive).toHaveBeenCalledTimes(1);
+      expect(getErrorReportSnapshot().recent[0]).toMatchObject({
+        context: 'process.unhandledRejection',
+        message: 'nobody awaited me',
+      });
+    });
+  });
+
+  it('does not take over unhandled rejections when nothing else would keep the process alive', () => {
+    // With no listener Node 15+ crashes on an unhandled rejection; adding one
+    // here would silently turn that crash into survival.
+    withRejectionListeners([], () => {
+      installProcessErrorHandlers();
+
+      expect(process.listenerCount('unhandledRejection')).toBe(0);
+    });
+  });
+
+  it('installs once, however many times register() runs in a process', () => {
+    const before = process.listenerCount('uncaughtExceptionMonitor');
+
+    installProcessErrorHandlers();
+    installProcessErrorHandlers();
+    installProcessErrorHandlers();
+
+    expect(process.listenerCount('uncaughtExceptionMonitor')).toBe(before + 1);
+  });
+
+  it('says at boot that alerts are disabled, rather than waiting for the first error', () => {
+    vi.stubEnv('ALERT_EMAIL', '');
+
+    installProcessErrorHandlers();
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(String(warnSpy.mock.calls[0][0])).toContain('ALERT_EMAIL is not set');
+    // …and only once: the first reported error does not repeat it.
+    reportError('cron.themes', new Error('boom'));
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+});

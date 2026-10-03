@@ -1,6 +1,46 @@
 import type { Metadata } from 'next';
+import { Inter, JetBrains_Mono, Space_Grotesk } from 'next/font/google';
 import './globals.css';
 import BackgroundBlobs from '@/components/BackgroundBlobs';
+
+// Self-hosted fonts. next/font/google fetches these from Google once, at BUILD
+// time, and serves them from /_next/static/media — so a visitor's browser
+// (including a churned customer opening a survey link) never contacts Google
+// and never hands it their IP address. The runtime Google Fonts @import this
+// replaces did exactly that on every page, to a recipient the privacy policy
+// does not name.
+//
+// Weights and display mirror that old @import exactly so rendering is
+// unchanged: font-extrabold (800) still resolves to the 700 face, as it did
+// before. Space Grotesk tops out at 700 — the old import asked for 800 and
+// Google silently ignored it; next/font rejects it at build time instead.
+// `subsets` only chooses what gets <link rel="preload">: every subset's
+// @font-face is still self-hosted, so non-Latin text renders as it did.
+//
+// Each font is exposed as a CSS variable on <html>; tailwind.config.js builds
+// the font-sans / font-display / font-mono stacks from these variables.
+const inter = Inter({
+  subsets: ['latin'],
+  weight: ['400', '500', '600', '700'],
+  display: 'swap',
+  variable: '--font-inter',
+});
+
+const spaceGrotesk = Space_Grotesk({
+  subsets: ['latin'],
+  weight: ['400', '500', '600', '700'],
+  display: 'swap',
+  variable: '--font-space-grotesk',
+});
+
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ['latin'],
+  weight: ['400', '500'],
+  display: 'swap',
+  variable: '--font-jetbrains-mono',
+});
+
+const fontVariables = `${inter.variable} ${spaceGrotesk.variable} ${jetbrainsMono.variable}`;
 
 export const metadata: Metadata = {
   title: {
@@ -34,7 +74,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className="scroll-smooth dark" suppressHydrationWarning>
+    <html lang="en" className={`${fontVariables} scroll-smooth dark`} suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
       </head>

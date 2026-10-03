@@ -23,6 +23,8 @@ vi.mock('@/lib/db', () => {
 });
 
 import { GET } from '../route';
+// Real: ALERT_EMAIL is pinned empty for every suite (vitest.config.ts).
+import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 
 const ORG_ID = 'org-abc';
 const APP_URL = 'https://app.churnlens.com';
@@ -78,5 +80,29 @@ describe('GET /api/survey/preview — guards', () => {
       expect.objectContaining({ orgId: ORG_ID, kind: 'preview' }),
     );
     expect(res.headers.get('location')).toBe(`${APP_URL}/survey/signed.preview.token`);
+  });
+});
+
+describe('GET /api/survey/preview — an unexpected failure', () => {
+  beforeEach(() => {
+    resetErrorReports();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it('is reported and answered 500 — the session check reads the database', async () => {
+    requireOrgIdMock.mockRejectedValue(new Error('connection terminated'));
+
+    const res = await GET(previewRequest());
+
+    expect(res.status).toBe(500);
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'survey.preview',
+        message: 'connection terminated',
+        meta: { step: 'unhandled', method: 'GET' },
+      }),
+    ]);
   });
 });

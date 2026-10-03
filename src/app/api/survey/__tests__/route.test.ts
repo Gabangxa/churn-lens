@@ -29,6 +29,9 @@ vi.mock('@/lib/survey-config', async (importOriginal) => {
 });
 
 import { POST } from '../route';
+// Real: these tests assert on what the route reported. ALERT_EMAIL is pinned
+// empty for every suite (vitest.config.ts), so nothing is emailed.
+import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 import { BUILTIN_CANCELLATION_REASONS } from '@/lib/survey-config';
 import { MAX_COMEBACK_TEXT, MAX_OPEN_TEXT, MAX_REASON } from '@/lib/survey-limits';
 
@@ -183,6 +186,17 @@ describe('POST /api/survey — free-text caps', () => {
     const params = updateParams();
     expect(params[P_OPEN_TEXT]).toBeNull();
     expect(params[P_COMEBACK_TEXT]).toBeNull();
+  });
+
+  it('measures the cap after stripping NULs, so they neither cost the customer a tail nor log a truncation', async () => {
+    // Postgres text cannot hold U+0000 (see route.db.test.ts for the real write).
+    const openText = 'a'.repeat(MAX_OPEN_TEXT) + '\u0000'.repeat(5);
+
+    const res = await POST(surveyRequest({ token: TOKEN, reason: BUILTIN_REASON, open_text: openText }));
+
+    expect(res.status).toBe(303);
+    expect(updateParams()[P_OPEN_TEXT]).toBe('a'.repeat(MAX_OPEN_TEXT));
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 
   it('never stores a lone surrogate when the cut lands mid-emoji', async () => {
@@ -373,5 +387,103 @@ describe('POST /api/survey — write outcomes', () => {
     expect(sql).toMatch(/UPDATE survey_responses/);
     expect(params[4]).toBe(TOKEN);
     expect(params[5]).toBe(ORG_ID);
+  });
+});
+
+describe('POST /api/survey — error reporting', () => {
+  beforeEach(() => {
+    resetErrorReports();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("reports a failed save with the org id, never the token or the customer's answer", async () => {
+    // The response is single-use and the customer has already cancelled: a
+    // lost answer is gone for good, so this one must reach a human.
+    executeMock.mockRejectedValue(new Error('connection reset'));
+
+    const res = await POST(surveyRequest({ token: TOKEN, reason: BUILTIN_REASON, open_text: 'the export kept failing' }));
+
+    expect(res.status).toBe(500);
+    const { recent } = getErrorReportSnapshot();
+    expect(recent).toEqual([
+      expect.objectContaining({ context: 'survey.submit', message: 'connection reset', meta: { orgId: ORG_ID } }),
+    ]);
+    expect(JSON.stringify(recent)).not.toContain(TOKEN);
+    expect(JSON.stringify(recent)).not.toContain('export kept failing');
+  });
+
+  it('answers 400 to a value Postgres refuses as malformed, logs one warning and reports nothing', async () => {
+    // Every bound value is sanitised or the verified token, so this should not
+    // happen; if it does, the value still arrived in a request anyone holding
+    // a link can repeat, so it must not be a way to page the operator.
+    executeMock.mockRejectedValue(
+      Object.assign(new Error('invalid byte sequence for encoding "UTF8": 0x00'), { code: '22021' }),
+    );
+
+    const res = await POST(surveyRequest({ token: TOKEN, reason: BUILTIN_REASON }));
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'Invalid request' });
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('rejected request input'));
+  });
+
+  it('reports nothing for a normal submission', async () => {
+    await POST(surveyRequest({ token: TOKEN, reason: BUILTIN_REASON }));
+
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+  });
+
+  it.each([
+    ['JSON', { 'content-type': 'application/json' }, '{"token":"x"}'],
+    ['a multipart body with no boundary', { 'content-type': 'multipart/form-data' }, 'garbage'],
+  ])('answers 400 to a body that is not a form (%s) and reports nothing: anyone can POST here', async (_label, headers, body) => {
+    const res = await POST(new NextRequest('http://localhost/api/survey', { method: 'POST', headers, body }));
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'Expected a form submission' });
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+  });
+
+  it.each(['token', 'reason', 'open_text', 'comeback_text'])(
+    'answers 400 to a file where the %s text field belongs, and reports nothing',
+    async (field) => {
+      // FormData.get() returns a File for a file part; treated as a string it
+      // threw a TypeError, which would page the operator from anyone's POST.
+      const form = new FormData();
+      const fields: Record<string, string> = { token: TOKEN, reason: BUILTIN_REASON, open_text: 'x', comeback_text: 'y' };
+      for (const [key, value] of Object.entries(fields)) {
+        if (key === field) form.append(key, new Blob(['not text']), 'upload.bin');
+        else form.append(key, value);
+      }
+
+      const res = await POST(new NextRequest('http://localhost/api/survey', { method: 'POST', body: form }));
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: `Invalid ${field}` });
+      expect(executeMock).not.toHaveBeenCalled();
+      expect(getErrorReportSnapshot().totalReported).toBe(0);
+    },
+  );
+
+  it('reports a throw nothing in the route anticipated, and answers 500', async () => {
+    verifySurveyTokenMock.mockImplementation(() => {
+      throw new Error('ENCRYPTION_KEY is not set');
+    });
+
+    const res = await POST(surveyRequest({ token: TOKEN, reason: BUILTIN_REASON }));
+
+    expect(res.status).toBe(500);
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'survey.submit',
+        message: 'ENCRYPTION_KEY is not set',
+        meta: { step: 'unhandled', method: 'POST' },
+      }),
+    ]);
   });
 });

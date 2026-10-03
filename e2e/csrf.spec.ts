@@ -15,6 +15,17 @@ test.describe('cross-site request rejection', () => {
     await closeDb();
   });
 
+  test('no page can be framed, the sign-in confirmation above all', async ({ request }) => {
+    // /login/confirm's one button spends a magic link; framed invisibly on
+    // another site it could be clickjacked. next.config.js refuses framing
+    // everywhere, so the login page (which renders for anyone) shows it.
+    const res = await request.get('/login');
+
+    expect(res.status()).toBe(200);
+    expect(res.headers()['x-frame-options']).toBe('DENY');
+    expect(res.headers()['content-security-policy']).toContain("frame-ancestors 'none'");
+  });
+
   test('connecting Stripe without a session is unauthorized', async ({ request }) => {
     const res = await request.post('/api/onboarding/connect', {
       data: { apiKey: 'rk_live_whatever' },
@@ -35,6 +46,16 @@ test.describe('cross-site request rejection', () => {
       data: { email: 'victim@e2e.test' },
     });
     expect(login.status()).toBe(403);
+
+    // The magic-link confirmation — the one request that mints a session. A
+    // foreign page submitting it is login CSRF; auth.spec.ts covers it with a
+    // real token in a signed-in browser.
+    const confirm = await request.post('/api/auth/verify', {
+      headers: { origin: EVIL_ORIGIN },
+      form: { token: 'not-a-real-token' },
+      maxRedirects: 0,
+    });
+    expect(confirm.status()).toBe(403);
 
     // A GET, but it starts a checkout against the signed-in org, so it is
     // state-changing in every way that matters.

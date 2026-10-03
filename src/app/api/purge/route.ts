@@ -4,6 +4,8 @@ import { verifyCronSecret } from '@/lib/auth';
 import { claimCronRun, finishCronRun, todayDateStr } from '@/lib/cron';
 import { disconnectStripe } from '@/lib/stripe-disconnect';
 import { LEGAL } from '@/lib/legal';
+import { reportError } from '@/lib/report-error';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 /**
  * Daily retention purge.
@@ -22,7 +24,7 @@ import { LEGAL } from '@/lib/legal';
  * unrelated steps — a stuck abandoned-signup row shouldn't hold back the
  * survey_responses retention delete, and vice versa.
  */
-export async function POST(req: Request) {
+async function runPurge(req: Request) {
   if (!verifyCronSecret(req.headers.get('authorization'))) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
@@ -43,6 +45,7 @@ export async function POST(req: Request) {
   let abandonedDeleted = 0;
   let unsubscribesOrphaned = 0;
   let cronRunsPurged = 0;
+  let dedupeBackupsPurged = 0;
   const failed: string[] = [];
 
   // (a) Survey-response retention (privacy policy s8 / DPA s9). Interval math
@@ -53,7 +56,7 @@ export async function POST(req: Request) {
       [LEGAL.surveyResponseRetentionMonths],
     );
   } catch (err) {
-    console.error(`Purge ${dateStr}: survey_responses retention step failed:`, err);
+    reportError('cron.purge', err, { step: 'survey_responses', date: dateStr });
     failed.push('survey_responses');
   }
 
@@ -63,7 +66,7 @@ export async function POST(req: Request) {
       [LEGAL.surveyResponseRetentionMonths],
     );
   } catch (err) {
-    console.error(`Purge ${dateStr}: themes retention step failed:`, err);
+    reportError('cron.purge', err, { step: 'themes', date: dateStr });
     failed.push('themes');
   }
 
@@ -75,14 +78,15 @@ export async function POST(req: Request) {
       `DELETE FROM login_tokens WHERE expires_at < now() - interval '1 day'`,
     );
   } catch (err) {
-    console.error(`Purge ${dateStr}: login_tokens cleanup step failed:`, err);
+    reportError('cron.purge', err, { step: 'login_tokens', date: dateStr });
     failed.push('login_tokens');
   }
 
   // (c) Hard-delete orgs whose 30-day deletion grace period has elapsed.
   // Stripe disconnect first (best-effort, logs and continues on its own
   // failure — see disconnectStripe), then the row itself; ON DELETE CASCADE
-  // takes users/survey_responses/themes/login_tokens/digest_sends with it —
+  // takes users/survey_responses/themes/login_tokens/digest_sends/
+  // legal_acceptances with it —
   // every one of those tables carries an org_id FK. unsubscribes and
   // cron_runs are the two things that do NOT go with it: unsubscribes'
   // FK was dropped in the migration precisely so this DELETE cannot take the
@@ -100,12 +104,14 @@ export async function POST(req: Request) {
         await execute('DELETE FROM organizations WHERE id = $1', [org.id]);
         orgsDeleted++;
       } catch (err) {
-        console.error(`Purge ${dateStr}: hard-delete failed for org ${org.id}:`, err);
+        // An erasure the privacy policy promised has not happened; the org
+        // is retried tomorrow, but someone should know why it failed today.
+        reportError('cron.purge', err, { step: 'org_delete', orgId: org.id, date: dateStr });
         failed.push(`org_delete:${org.id}`);
       }
     }
   } catch (err) {
-    console.error(`Purge ${dateStr}: querying orgs due for deletion failed:`, err);
+    reportError('cron.purge', err, { step: 'org_delete_query', date: dateStr });
     failed.push('org_delete_query');
   }
 
@@ -133,7 +139,7 @@ export async function POST(req: Request) {
          )`,
     );
   } catch (err) {
-    console.error(`Purge ${dateStr}: abandoned-signup cleanup step failed:`, err);
+    reportError('cron.purge', err, { step: 'abandoned_signups', date: dateStr });
     failed.push('abandoned_signups');
   }
 
@@ -150,7 +156,7 @@ export async function POST(req: Request) {
        WHERE NOT EXISTS (SELECT 1 FROM organizations o WHERE o.id = u.org_id)`,
     );
   } catch (err) {
-    console.error(`Purge ${dateStr}: orphaned unsubscribes cleanup step failed:`, err);
+    reportError('cron.purge', err, { step: 'orphaned_unsubscribes', date: dateStr });
     failed.push('orphaned_unsubscribes');
   }
 
@@ -161,8 +167,24 @@ export async function POST(req: Request) {
   try {
     cronRunsPurged = await execute(`DELETE FROM cron_runs WHERE ran_at < now() - interval '90 days'`);
   } catch (err) {
-    console.error(`Purge ${dateStr}: cron_runs cleanup step failed:`, err);
+    reportError('cron.purge', err, { step: 'cron_runs', date: dateStr });
     failed.push('cron_runs');
+  }
+
+  // (g) users_dedupe_backup: the recoverable-delete snapshot scripts/migrate.js
+  // takes of every duplicate users row its email dedupe removes. Each row is a
+  // whole users row as jsonb — email address included — and the table has no
+  // org_id column, so no org deletion in step (c) ever reaches it; without
+  // this step it is personal data kept indefinitely with no purpose. The
+  // snapshot exists only so a dedupe can be audited or undone, and 30 days
+  // from removed_at is ample time to notice a wrong one.
+  try {
+    dedupeBackupsPurged = await execute(
+      `DELETE FROM users_dedupe_backup WHERE removed_at < now() - interval '30 days'`,
+    );
+  } catch (err) {
+    reportError('cron.purge', err, { step: 'users_dedupe_backup', date: dateStr });
+    failed.push('users_dedupe_backup');
   }
 
   const result = {
@@ -173,6 +195,7 @@ export async function POST(req: Request) {
     abandonedDeleted,
     unsubscribesOrphaned,
     cronRunsPurged,
+    dedupeBackupsPurged,
     failed,
   };
   console.log(`[purge] ${dateStr} →`, result);
@@ -180,12 +203,21 @@ export async function POST(req: Request) {
   await finishCronRun('purge', dateStr, {
     status: failed.length > 0 ? 'failed' : 'succeeded',
     processed:
-      responses + themes + tokens + orgsDeleted + abandonedDeleted + unsubscribesOrphaned + cronRunsPurged,
+      responses +
+      themes +
+      tokens +
+      orgsDeleted +
+      abandonedDeleted +
+      unsubscribesOrphaned +
+      cronRunsPurged +
+      dedupeBackupsPurged,
     failed: failed.length,
   });
 
   return NextResponse.json(result);
 }
+
+export const POST = withErrorReporting('cron.purge', runPurge);
 
 // Kept for manual triggering and any external scheduler that issues GET; the
 // in-process scheduler in instrumentation.ts uses POST. Safe to expose as GET

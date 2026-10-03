@@ -4,8 +4,10 @@ import { MAX_RESPONSES_PER_BATCH, clusterResponses } from '@/lib/openai';
 import { verifyCronSecret } from '@/lib/auth';
 import { reportingWeek } from '@/lib/week';
 import { claimCronRun, finishCronRun } from '@/lib/cron';
+import { ALREADY_REPORTED_HEADER, reportError } from '@/lib/report-error';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
-export async function POST(req: Request) {
+async function runThemes(req: Request) {
   if (!verifyCronSecret(req.headers.get('authorization'))) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
@@ -79,7 +81,9 @@ export async function POST(req: Request) {
         try {
           themes = await clusterResponses(input);
         } catch (err) {
-          console.error(`Theme clustering failed for org ${org.id}:`, err);
+          // Its own context so an OpenAI outage (or a spent quota) reads as
+          // exactly that in the alert, not as a generic themes failure.
+          reportError('cron.themes.openai', err, { orgId: org.id, weekOf: weekOfStr });
           failed++;
           continue;
         }
@@ -142,20 +146,24 @@ export async function POST(req: Request) {
       } catch (err) {
         // One org's DB error (or anything else unexpected) must not abort the
         // rest of the run — every other org still gets clustered this week.
-        console.error(`Themes: org ${org.id} failed for week ${weekOfStr}:`, err);
+        reportError('cron.themes', err, { orgId: org.id, weekOf: weekOfStr });
         failed++;
       }
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`Themes: run failed for week ${weekOfStr}:`, err);
+    reportError('cron.themes', err, { weekOf: weekOfStr });
     await finishCronRun('themes', weekOfStr, {
       status: 'failed',
       processed,
       failed,
       error: message,
     });
-    return NextResponse.json({ error: message, weekOf: weekOfStr }, { status: 500 });
+    // Reported just above; the mark keeps the scheduler from reporting it again.
+    return NextResponse.json(
+      { error: message, weekOf: weekOfStr },
+      { status: 500, headers: { [ALREADY_REPORTED_HEADER]: '1' } },
+    );
   }
 
   // Deliberately outside the try/catch above: if this UPDATE itself throws (a
@@ -173,6 +181,8 @@ export async function POST(req: Request) {
 
   return NextResponse.json({ processed, failed, weekOf: weekOfStr });
 }
+
+export const POST = withErrorReporting('cron.themes', runThemes);
 
 // Kept for manual triggering and any external scheduler that issues GET; the
 // in-process scheduler in instrumentation.ts uses POST. Safe to expose as GET

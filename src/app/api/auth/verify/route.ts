@@ -1,65 +1,148 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryOne } from '@/lib/db';
-import { hashLoginToken } from '@/lib/crypto';
-import { setOrgCookie } from '@/lib/auth';
+import { assertSameOrigin, setOrgCookie } from '@/lib/auth';
 import { redirectUrl } from '@/lib/app-url';
 import { sanitizeNext } from '@/lib/next-paths';
+import { consumeLoginToken } from '@/lib/login-token';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 /**
- * Consume a magic-link token and establish the session. The ONLY place a
- * session is ever minted — every other route either requires an existing
- * session (requireOrgId) or has none. That is what closes the account
- * takeover this route accompanies: nothing upstream of a proven click on a
- * link sent to a specific inbox can end in a set-cookie.
+ * Magic-link sign-in, in two steps: the link in the email (GET) only forwards
+ * to a confirm page, and the confirm page's same-origin form (POST) is what
+ * uses the link up and mints the session.
  *
- * Single-use is enforced atomically by the UPDATE guard (used_at IS NULL) rather
- * than a check-then-act, so a replayed or concurrent second click can't log in.
- * On any failure (missing/invalid/expired/already-used) we redirect to /login
- * with a generic error rather than distinguishing cases.
+ * A GET that signed you in was a login-CSRF primitive. An attacker requests a
+ * link for their OWN address and navigates a victim's browser to it — a
+ * link, a redirect, an <img> — and the victim is silently signed into the
+ * attacker's org, sitting on /onboarding, one paste away from handing over
+ * their Stripe key (and with it, their customers' survey answers). It also
+ * let mail scanners and link prefetchers, which GET or HEAD every URL in an
+ * email, spend a single-use link before the founder ever clicked it.
+ *
+ * The emailed URL is unchanged (/api/auth/verify?token=...), so links already
+ * sitting in inboxes keep working across this deploy, and across a rollback.
  */
-export async function GET(req: NextRequest) {
-  const fail = () =>
-    NextResponse.redirect(redirectUrl('/login?error=expired', req), { status: 303 });
 
-  const token = req.nextUrl.searchParams.get('token');
-  if (!token) return fail();
-
-  const row = await queryOne<{ org_id: string; redirect_to: string | null }>(
-    `UPDATE login_tokens SET used_at = now()
-     WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now()
-     RETURNING org_id, redirect_to`,
-    [hashLoginToken(token)],
-  );
-
-  if (!row) return fail();
-
-  // Stamped in the same statement as the lookup (UPDATE ... RETURNING, not a
-  // separate SELECT + UPDATE): this is the one place a real, inbox-verified
-  // sign-in happens, and the purge job's abandoned-signup rule (src/app/api/
-  // purge) depends on last_login_at surviving as long as this org keeps being
-  // used, distinct from login_tokens rows, which the same job deletes a day
-  // after they expire regardless of whether anyone ever used them.
-  const org = await queryOne<{ stripe_api_key_enc: string | null }>(
-    'UPDATE organizations SET last_login_at = now() WHERE id = $1 RETURNING stripe_api_key_enc',
-    [row.org_id],
-  );
-
-  // Re-validate redirect_to against the same allow-list /api/auth/request wrote
-  // it under, rather than trusting the stored value verbatim. Today request is
-  // the only writer and it already allow-lists on the way in, so this is
-  // defense in depth, not the primary guard — but a row this route trusts
-  // blindly is one bad migration, admin query, or future writer away from an
-  // open redirect on the one route that also hands out a session.
-  const validRedirectTo = sanitizeNext(row.redirect_to);
-
-  // No key yet (brand-new signup, or a founder who never finished connecting)
-  // means onboarding is where they belong regardless of what redirect_to says
-  // — except redirect_to itself may BE an onboarding link carrying the plan a
-  // pricing-page click chose, in which case it already is the destination.
-  const destination = !org?.stripe_api_key_enc
-    ? (validRedirectTo?.startsWith('/onboarding') ? validRedirectTo : '/onboarding')
-    : (validRedirectTo ?? '/dashboard');
-
-  const response = NextResponse.redirect(redirectUrl(destination, req), { status: 303 });
-  return setOrgCookie(response, row.org_id);
+function failedSignIn(req: NextRequest): NextResponse {
+  // One generic answer for missing, unknown, used and expired: telling them
+  // apart would tell a guesser which tokens exist.
+  return NextResponse.redirect(redirectUrl('/login?error=expired', req), { status: 303 });
 }
+
+/**
+ * The link in the email. Inert by design: no database, no cookie. A link
+ * scanner may fetch it any number of times (Next answers HEAD with this same
+ * handler) and the founder can still sign in afterwards.
+ */
+async function openMagicLink(req: NextRequest) {
+  const token = req.nextUrl.searchParams.get('token');
+  if (!token) return failedSignIn(req);
+  return NextResponse.redirect(
+    redirectUrl(`/login/confirm?token=${encodeURIComponent(token)}`, req),
+    { status: 303 },
+  );
+}
+
+/**
+ * The confirm page's "Sign in" button. The ONLY place a session is ever
+ * minted — every other route either requires an existing session
+ * (requireOrgId) or has none — so nothing short of a same-origin submission
+ * carrying a link that was emailed to a specific inbox can end in a
+ * set-cookie.
+ *
+ * assertSameOrigin runs first: a foreign page's auto-submitting form is the
+ * login-CSRF attack itself, and it must be refused before the token is so
+ * much as looked up (leaving the link usable by its owner).
+ */
+async function confirmSignIn(req: NextRequest) {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
+  const token = await readSubmittedToken(req);
+  if (!token) return failedSignIn(req);
+
+  const consumed = await consumeLoginToken(token);
+  if (!consumed) return failedSignIn(req);
+
+  // Stamped on every real, inbox-verified sign-in: the purge job's
+  // abandoned-signup rule (src/app/api/purge) depends on last_login_at
+  // surviving as long as this org keeps being used, distinct from
+  // login_tokens rows, which the same job deletes a day after they expire
+  // regardless of whether anyone ever used them. RETURNING the connection
+  // columns in the same statement saves a second round trip for the
+  // destination below.
+  const org = await queryOne<StripeConnectionColumns>(
+    `UPDATE organizations SET last_login_at = now() WHERE id = $1
+     RETURNING stripe_api_key_enc, stripe_webhook_id, stripe_webhook_secret_enc`,
+    [consumed.orgId],
+  );
+
+  const destination = destinationAfterSignIn(org, consumed.redirectTo);
+  const response = NextResponse.redirect(redirectUrl(destination, req), { status: 303 });
+  return setOrgCookie(response, consumed.orgId);
+}
+
+/**
+ * The token from the confirm page's form body. A body that is not a form at
+ * all (wrong content type, truncated) is answered like a missing token: the
+ * only legitimate caller is our own <form>, so anything else is a client we
+ * owe the generic failure, not a 500.
+ */
+async function readSubmittedToken(req: NextRequest): Promise<string | null> {
+  let form: FormData;
+  try {
+    form = await req.formData();
+  } catch {
+    return null;
+  }
+  const token = form.get('token');
+  return typeof token === 'string' && token !== '' ? token : null;
+}
+
+/** The organizations columns that say whether Stripe is fully connected. */
+interface StripeConnectionColumns {
+  stripe_api_key_enc: string | null;
+  stripe_webhook_id: string | null;
+  stripe_webhook_secret_enc: string | null;
+}
+
+/**
+ * Where a founder goes once signed in.
+ *
+ * Onboarding until the org is actually connected — a Stripe key stored AND
+ * ChurnLens's webhook registered on that account, with the signing secret the
+ * webhook verifies its events with — whatever redirect_to says. No key means
+ * a brand-new signup; a key with no endpoint is what a connect that failed
+ * half-way used to leave behind (it saved the key before registering the
+ * webhook), so Stripe never calls us. Either way no survey goes out until
+ * connect is finished, and onboarding is the page that finishes it. The
+ * exception is a redirect_to that is itself an onboarding link carrying the
+ * plan a pricing-page click chose: that already is the destination.
+ *
+ * The same test as the dashboard's "Stripe setup is incomplete" line
+ * (stripeWebhookRegistered in src/app/dashboard/page.tsx), so sign-in and the
+ * dashboard never disagree about whether an org is connected.
+ *
+ * redirect_to is re-validated against the same allow-list /api/auth/request
+ * wrote it under rather than trusted as stored. Request is the only writer
+ * and allow-lists on the way in, so this is defense in depth — but a row this
+ * route trusted blindly would be one bad migration, admin query or future
+ * writer away from an open redirect on the one route that hands out a session.
+ *
+ * A missing org row (deleted out from under a live token) is treated as not
+ * connected; the session minted for it fails its next check anyway.
+ */
+function destinationAfterSignIn(
+  org: StripeConnectionColumns | null,
+  storedRedirectTo: string | null,
+): string {
+  const redirectTo = sanitizeNext(storedRedirectTo);
+  const fullyConnected = !!(org?.stripe_api_key_enc && org.stripe_webhook_id && org.stripe_webhook_secret_enc);
+  if (!fullyConnected) {
+    return redirectTo?.startsWith('/onboarding') ? redirectTo : '/onboarding';
+  }
+  return redirectTo ?? '/dashboard';
+}
+
+export const GET = withErrorReporting('auth.verify', openMagicLink);
+export const POST = withErrorReporting('auth.verify', confirmSignIn);

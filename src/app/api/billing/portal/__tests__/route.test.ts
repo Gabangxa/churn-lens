@@ -47,6 +47,9 @@ import { GET } from '../route';
 // PolarError`, so a duck-typed stub would exercise nothing.
 import { PolarError } from '@polar-sh/sdk/models/errors/polarerror.js';
 import { HTTPValidationError } from '@polar-sh/sdk/models/errors/httpvalidationerror.js';
+// Real: the error-reporting tests assert on what the route reported.
+// ALERT_EMAIL is pinned empty for every suite (vitest.config.ts).
+import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 
 const ORG_ID = 'org-abc';
 const APP_URL = 'https://app.churnlens.com';
@@ -418,6 +421,54 @@ describe('GET /api/billing/portal — Polar failures', () => {
     await GET(portalRequest());
 
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining(ORG_ID), err);
+  });
+});
+
+// ─── error reporting ─────────────────────────────────────────────────────────
+
+describe('GET /api/billing/portal — error reporting', () => {
+  beforeEach(() => {
+    resetErrorReports();
+  });
+
+  it('reports a Polar failure that strands the founder, with only the status — never the body', async () => {
+    createMock.mockRejectedValue(
+      polarError(500, { body: `{"detail":"bad ${PORTAL_TOKEN} for founder@acme.com"}` }),
+    );
+
+    await GET(portalRequest());
+
+    const { recent } = getErrorReportSnapshot();
+    expect(recent).toEqual([
+      expect.objectContaining({
+        context: 'billing.portal',
+        message: 'Polar customer session creation failed (status 500)',
+        meta: { orgId: ORG_ID },
+      }),
+    ]);
+    expect(JSON.stringify(getErrorReportSnapshot())).not.toContain(PORTAL_TOKEN);
+  });
+
+  it('reports a failure on our side (network, timeout) whole', async () => {
+    createMock.mockRejectedValue(new Error('getaddrinfo ENOTFOUND api.polar.sh'));
+
+    await GET(portalRequest());
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({ context: 'billing.portal', message: 'getaddrinfo ENOTFOUND api.polar.sh' }),
+    ]);
+  });
+
+  it.each([
+    ['an org Polar has never seen (404)', () => polarError(404)],
+    ['a 422 naming external_customer_id', () => validationError(['body', 'external_customer_id'])],
+    ['a rate limit (429)', () => polarError(429)],
+  ])('does not report %s — an expected answer with its own redirect', async (_label, makeError) => {
+    createMock.mockRejectedValue(makeError());
+
+    await GET(portalRequest());
+
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
   });
 });
 

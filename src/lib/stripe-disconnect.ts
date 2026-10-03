@@ -1,6 +1,19 @@
 import { query, queryOne } from '@/lib/db';
 import { decryptApiKey } from '@/lib/crypto';
 import Stripe from 'stripe';
+import { reportError } from '@/lib/report-error';
+
+/**
+ * Stripe answers that need no operator: 401/403 mean the founder already
+ * revoked or restricted the key (nobody can delete the endpoint with it now,
+ * and Stripe disables an endpoint that keeps failing), and 404 means the
+ * endpoint is already gone. Read off statusCode, which every Stripe API error
+ * carries, rather than the error classes.
+ */
+function isExpectedEndpointDeleteFailure(err: unknown): boolean {
+  const statusCode = (err as { statusCode?: unknown } | null)?.statusCode;
+  return statusCode === 401 || statusCode === 403 || statusCode === 404;
+}
 
 /**
  * Disconnects an org's Stripe integration: best-effort deletes the webhook
@@ -29,19 +42,31 @@ export async function disconnectStripe(orgId: string): Promise<void> {
       const stripeClient = new Stripe(apiKey, { apiVersion: '2024-04-10', typescript: true });
       await stripeClient.webhookEndpoints.del(org.stripe_webhook_id);
     } catch (err) {
-      // Log but don't block disconnect — the org's credentials must be cleared
-      // (or the org row deleted, for the purge caller) regardless of whether
-      // Stripe's own cleanup succeeded.
-      console.error(`Failed to delete Stripe webhook endpoint for org ${orgId}:`, err);
+      // Don't block disconnect — the org's credentials must be cleared (or the
+      // org row deleted, for the purge caller) regardless of whether Stripe's
+      // own cleanup succeeded. Anything but the expected answers above (a
+      // Stripe outage, a key that no longer decrypts) leaves a live endpoint
+      // on the founder's account that someone has to remove by hand.
+      if (isExpectedEndpointDeleteFailure(err)) {
+        console.warn(`Stripe webhook endpoint for org ${orgId} was not deleted (${String(err)}).`);
+      } else {
+        reportError('stripe.disconnect', err, { orgId, step: 'webhook_delete' });
+      }
     }
   }
 
+  // Everything that described the connected account goes with its key: the
+  // business name read from it (or survey copy keeps naming a business that
+  // is no longer connected, and the dashboard never asks for a name) and the
+  // record that Stripe rejected its key (a flag about a key no longer stored).
   await query(
     `UPDATE organizations
      SET stripe_api_key_enc = NULL,
          stripe_account_id = NULL,
          stripe_webhook_id = NULL,
-         stripe_webhook_secret_enc = NULL
+         stripe_webhook_secret_enc = NULL,
+         stripe_business_name = NULL,
+         stripe_key_invalid_at = NULL
      WHERE id = $1`,
     [orgId],
   );
