@@ -13,9 +13,13 @@ vi.mock('@polar-sh/sdk/webhooks', () => ({
   WebhookVerificationError: FakeVerificationError,
 }));
 
+// Which subscription a revoke may touch, and why a skipped one is reported as
+// it is, are pinned against a real database in route.db.test.ts.
 const executeMock = vi.fn();
+const queryOneMock = vi.fn();
 vi.mock('@/lib/db', () => ({
   execute: (...args: unknown[]) => executeMock(...args),
+  queryOne: (...args: unknown[]) => queryOneMock(...args),
 }));
 
 vi.mock('@/lib/polar', () => ({
@@ -59,6 +63,7 @@ const updateParams = () => executeMock.mock.calls[0][1];
 beforeEach(() => {
   validateEventMock.mockReset();
   executeMock.mockReset().mockResolvedValue(1);
+  queryOneMock.mockReset().mockResolvedValue(null);
   process.env.POLAR_PRODUCT_STARTER = STARTER;
   process.env.POLAR_PRODUCT_GROWTH = GROWTH;
   vi.spyOn(console, 'log').mockImplementation(() => {});

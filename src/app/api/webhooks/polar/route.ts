@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { validateEvent, WebhookVerificationError } from '@polar-sh/sdk/webhooks';
-import { execute } from '@/lib/db';
+import { execute, queryOne } from '@/lib/db';
 import { getPolarWebhookSecret } from '@/lib/polar';
 import { entitlementForStatus, planForProduct } from '@/lib/plan';
 
@@ -15,6 +15,16 @@ import { entitlementForStatus, planForProduct } from '@/lib/plan';
  * the checkout session is created. Polar echoes it back on every subscription
  * event as data.customer.external_id, so no lookup table is needed and no
  * Polar-side id has to be resolved before the plan can be written.
+ *
+ * An org has one current subscription, organizations.polar_subscription_id.
+ * That relies on a customer never holding two active subscriptions at once,
+ * which is a Polar organization setting (allow_multiple_subscriptions, to be
+ * kept off), not a guarantee: the SDK's checkout calls can refuse a customer
+ * who already has one (AlreadyActiveSubscriptionError), and nothing here can
+ * check the setting is actually off. If two are ever active at once, the org
+ * follows whichever was granted last and drops to free when that one ends,
+ * until the other's next event; tracking each subscription separately is what
+ * it would take to do better.
  */
 
 /** Subscription events carry the whole subscription; the rest we acknowledge and ignore. */
@@ -109,6 +119,21 @@ export async function POST(req: Request) {
   // write conditional on this event being newer than the last one applied.
   const eventAt = subscription.modifiedAt ?? subscription.createdAt;
 
+  // A grant always makes its subscription the org's current one — that is how
+  // an org moves to a new subscription. A revoke only counts for the current
+  // one: once an org has moved from A to B, A ending (or a late event about A
+  // having ended) must not downgrade an org that is paying through B. With no
+  // subscription recorded yet the revoke still applies, because it is what sets
+  // the watermark that stops that subscription's delayed grant from landing
+  // after it.
+  //
+  // A skipped revoke writes nothing, watermark included: the watermark is per
+  // org, and advancing it for A would throw away B's own delayed events.
+  //
+  // Both conditions sit in this one UPDATE rather than a read followed by a
+  // write. A grant for B committing between a read and a write would otherwise
+  // be overwritten by A's revoke; here Postgres re-evaluates the WHERE against
+  // the row version it waited for, so the revoke sees B and matches nothing.
   const updated = await execute(
     `UPDATE organizations
      SET plan = $1,
@@ -116,9 +141,30 @@ export async function POST(req: Request) {
          polar_subscription_id = $3,
          polar_synced_at = $4
      WHERE id = $5
-       AND (polar_synced_at IS NULL OR polar_synced_at < $4)`,
-    [plan, subscription.customerId, subscription.id, eventAt, orgId],
+       AND (polar_synced_at IS NULL OR polar_synced_at < $4)
+       AND ($6::text = 'grant'
+            OR polar_subscription_id IS NULL
+            OR polar_subscription_id = $3)`,
+    [plan, subscription.customerId, subscription.id, eventAt, orgId, decision],
   );
+
+  if (updated === 0 && decision === 'revoke') {
+    // Only names the skip — the UPDATE above has already decided it. A delivery
+    // landing between the two statements can at worst mislabel this response,
+    // never change what was written.
+    const org = await queryOne<{ polar_subscription_id: string | null }>(
+      `SELECT polar_subscription_id FROM organizations WHERE id = $1`,
+      [orgId],
+    );
+    if (org?.polar_subscription_id && org.polar_subscription_id !== subscription.id) {
+      // Expected after a move to a new subscription, so not a warning.
+      console.log(
+        `Polar ${event.type}: subscription ${subscription.id} is not org ${orgId}'s current ` +
+          `subscription (${org.polar_subscription_id}) — revoke ignored.`,
+      );
+      return NextResponse.json({ received: true, skipped: 'not_current_subscription' });
+    }
+  }
 
   if (updated === 0) {
     // Either the org is gone or this event is stale. Both are acknowledged —
