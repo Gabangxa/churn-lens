@@ -17,10 +17,18 @@ async function submitSurvey(req: NextRequest) {
     return NextResponse.json({ error: 'Expected a form submission' }, { status: 400 });
   }
 
-  const token = body.get('token') as string | null;
-  const reason = body.get('reason') as string | null;
-  const openText = body.get('open_text') as string | null;
-  const comebackText = body.get('comeback_text') as string | null;
+  // FormData.get() hands back a File for a file part. Every field here is
+  // text, so a File is a malformed request, answered before string methods
+  // throw on it (which, wrapped, would page the operator from anyone's POST).
+  const fields: Record<string, string | null> = {};
+  for (const name of ['token', 'reason', 'open_text', 'comeback_text']) {
+    const value = body.get(name);
+    if (value !== null && typeof value !== 'string') {
+      return NextResponse.json({ error: `Invalid ${name}` }, { status: 400 });
+    }
+    fields[name] = value;
+  }
+  const { token, reason, open_text: openText, comeback_text: comebackText } = fields;
 
   if (!token || !reason) {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });

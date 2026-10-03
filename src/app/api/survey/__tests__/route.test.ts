@@ -433,6 +433,27 @@ describe('POST /api/survey — error reporting', () => {
     expect(getErrorReportSnapshot().totalReported).toBe(0);
   });
 
+  it.each(['token', 'reason', 'open_text', 'comeback_text'])(
+    'answers 400 to a file where the %s text field belongs, and reports nothing',
+    async (field) => {
+      // FormData.get() returns a File for a file part; treated as a string it
+      // threw a TypeError, which would page the operator from anyone's POST.
+      const form = new FormData();
+      const fields: Record<string, string> = { token: TOKEN, reason: BUILTIN_REASON, open_text: 'x', comeback_text: 'y' };
+      for (const [key, value] of Object.entries(fields)) {
+        if (key === field) form.append(key, new Blob(['not text']), 'upload.bin');
+        else form.append(key, value);
+      }
+
+      const res = await POST(new NextRequest('http://localhost/api/survey', { method: 'POST', body: form }));
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: `Invalid ${field}` });
+      expect(executeMock).not.toHaveBeenCalled();
+      expect(getErrorReportSnapshot().totalReported).toBe(0);
+    },
+  );
+
   it('reports a throw nothing in the route anticipated, and answers 500', async () => {
     verifySurveyTokenMock.mockImplementation(() => {
       throw new Error('ENCRYPTION_KEY is not set');
