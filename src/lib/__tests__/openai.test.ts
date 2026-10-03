@@ -297,6 +297,20 @@ describe('clusterResponses — malformed model output never becomes themes', () 
     });
   });
 
+  it('clamps an inflated count, logging the numbers but not the model\'s label', async () => {
+    // Labels are the model's words, and it echoes customers' answers into them.
+    const label = 'Jane says "the export kept failing"';
+    modelRepliesWithThemes([{ label, quotes: ['the export kept failing'], count: 50 }]);
+
+    const result = await clusterResponses(makeResponses(10));
+
+    expect(result).toEqual([{ label, quotes: ['the export kept failing'], count: 10 }]);
+    const logged = warnSpy.mock.calls.map(([line]) => String(line)).join('\n');
+    expect(logged).toMatch(/count 50 .*batch of 10/);
+    expect(logged).not.toContain('export');
+    expect(logged).not.toContain('Jane');
+  });
+
   it('returns an empty list, without warning, when the model reports no themes', async () => {
     modelRepliesWithThemes([]);
 

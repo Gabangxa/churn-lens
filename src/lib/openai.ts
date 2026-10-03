@@ -108,9 +108,9 @@ function parseThemes(raw: string, batchSize: number): ThemeCluster[] {
     // it found are still worth keeping.
     let safeCount = count;
     if (safeCount > batchSize) {
-      console.warn(
-        `OpenAI returned count ${count} for theme "${label}" over a batch of ${batchSize} — clamping.`,
-      );
+      // Numbers only: the label is the model's words, and it echoes
+      // customers' survey answers into them.
+      console.warn(`OpenAI returned count ${count} for a theme over a batch of ${batchSize} — clamping.`);
       safeCount = batchSize;
     }
 
