@@ -57,12 +57,25 @@ function stripControlChars(value: string): string {
   return value.replace(/[\x00-\x1F\x7F]/g, '');
 }
 
-function isHttpsUrl(value: string): boolean {
+// The same character class, for values where removing a character would
+// change their meaning (a URL) and which are refused instead.
+function hasControlChars(value: string): boolean {
+  // eslint-disable-next-line no-control-regex
+  return /[\x00-\x1F\x7F]/.test(value);
+}
+
+/**
+ * The URL as the browser will request it (its parsed href), or null when it
+ * is not an https URL. Callers refuse control characters first: the parser
+ * accepts them, percent-encoding some (NUL becomes %00) and silently dropping
+ * others (tab, newline), so the saved value would differ from what was typed.
+ */
+function httpsHref(value: string): string | null {
   try {
     const url = new URL(value);
-    return url.protocol === 'https:';
+    return url.protocol === 'https:' ? url.href : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -111,15 +124,14 @@ function normalizeStoredConfig(raw: unknown): SurveyConfig {
 
   const displayName = normalizeBusinessName(obj.display_name);
 
+  // The same rules validateSurveyConfig applies, so a hand-edited row cannot
+  // render a URL the write path would have refused.
   let logoUrl: string | null = null;
   if (typeof obj.logo_url === 'string') {
     const trimmed = obj.logo_url.trim();
-    if (
-      trimmed.length > 0 &&
-      trimmed.length <= SURVEY_CONFIG_LIMITS.logoUrlMaxLen &&
-      isHttpsUrl(trimmed)
-    ) {
-      logoUrl = trimmed;
+    const href = hasControlChars(trimmed) ? null : httpsHref(trimmed);
+    if (href !== null && href.length <= SURVEY_CONFIG_LIMITS.logoUrlMaxLen) {
+      logoUrl = href;
     }
   }
 
@@ -251,17 +263,28 @@ export function validateSurveyConfig(input: unknown): SurveyConfigValidationResu
     }
     const trimmed = rawLogoUrl.trim();
     if (trimmed.length > 0) {
+      const tooLongError = `Logo URL must be ${SURVEY_CONFIG_LIMITS.logoUrlMaxLen} characters or fewer.`;
       if (trimmed.length > SURVEY_CONFIG_LIMITS.logoUrlMaxLen) {
-        return {
-          ok: false,
-          error: `Logo URL must be ${SURVEY_CONFIG_LIMITS.logoUrlMaxLen} characters or fewer.`,
-          field: 'logoUrl',
-        };
+        return { ok: false, error: tooLongError, field: 'logoUrl' };
       }
-      if (!isHttpsUrl(trimmed)) {
+      // Refused, not stripped: a URL with a character removed is a different
+      // URL. And Postgres jsonb cannot store a NUL at all (22P05), so letting
+      // one through turned a pasted typo into a failed save and an operator
+      // alert instead of this field error.
+      if (hasControlChars(trimmed)) {
+        return { ok: false, error: 'Logo URL must not contain control characters.', field: 'logoUrl' };
+      }
+      const href = httpsHref(trimmed);
+      if (href === null) {
         return { ok: false, error: 'Logo URL must be a valid https:// URL.', field: 'logoUrl' };
       }
-      logoUrl = trimmed;
+      // Stored as parsed, so it is exactly what the survey page will request.
+      // Checked again because parsing can lengthen it (a space becomes %20),
+      // and the read path drops anything over the limit.
+      if (href.length > SURVEY_CONFIG_LIMITS.logoUrlMaxLen) {
+        return { ok: false, error: tooLongError, field: 'logoUrl' };
+      }
+      logoUrl = href;
     }
   }
 
