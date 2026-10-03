@@ -105,14 +105,14 @@ const DAY_MS = 24 * HOUR_MS;
  * spends the shared Resend quota, while 1h → 4h → daily still says "still
  * broken" and each alert carries the suppressed count.
  */
-export const ALERT_BACKOFF_MS = [HOUR_MS, 4 * HOUR_MS, DAY_MS] as const;
+const ALERT_BACKOFF_MS = [HOUR_MS, 4 * HOUR_MS, DAY_MS] as const;
 
 /**
  * A fingerprint not seen for this long starts a new episode: its next
  * occurrence alerts at once and the backoff starts over at the first step.
  * Never shorter than the longest backoff step, so a new episode is always due.
  */
-export const QUIET_RESET_MS = DAY_MS;
+const QUIET_RESET_MS = DAY_MS;
 
 /**
  * Hard ceiling on alert emails across ALL fingerprints per sliding hour. The
