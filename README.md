@@ -292,9 +292,12 @@ The first deploy of this branch over `main`:
    (`.env.example`, Polar section) are not needed before then; without them checkout answers
    503 "Billing is not configured for this plan yet." and reports nothing, and
    `/api/webhooks/polar` answers 503 "Polar webhooks not configured", logs one warning per
-   process and reports nothing. Set `POLAR_WEBHOOK_SECRET` in the same change that registers
-   the webhook: Polar's deliveries get that 503 until it is set. Once it is set, a delivery
-   whose signature does not verify gets 403.
+   process and reports nothing. Set `POLAR_WEBHOOK_SECRET` before, or together with,
+   `POLAR_ACCESS_TOKEN` and the product ids, and in the same change that registers the
+   webhook: Polar's deliveries get that 503 until it is set. If the token or a product id is
+   set but the secret is not, checkout can take money whose events are refused, so the first
+   refused delivery in each process is reported as `webhook.polar` (`step: not_configured`).
+   Once the secret is set, a delivery whose signature does not verify gets 403.
 3. **Expect every founder to be signed out once.** The session cookie format changed
    (`<orgId>.<issuedAt>.<hmac>`), and the old `<orgId>.<hmac>` cookies are refused. Every org
    also sees the Terms/DPA banner on the dashboard, since none has an acceptance on record;
@@ -343,12 +346,17 @@ The first deploy of this branch over `main`:
      UPDATE organizations SET polar_subscription_id = NULL WHERE id = '<org id>';
      ```
 
-   then recompute through the admin route, re-sending the org's current `comp_plan` (`null`
-   if it has none), and check the response no longer says `held`:
+   then recompute through the admin route, re-sending the org's current `comp_plan` so the
+   comp is not changed, and check the response no longer says `held`:
+
+   ```sql
+   SELECT comp_plan FROM organizations WHERE id = '<org id>';
+   ```
 
    ```sh
+   # "plan" is that comp_plan as a JSON string ("starter" / "growth"), or null if it was NULL.
    curl -X POST "$NEXT_PUBLIC_APP_URL/api/admin/plan" -H "Authorization: Bearer $CRON_SECRET" \
-     -H 'content-type: application/json' -d '{"orgId":"<org id>","plan":null}'
+     -H 'content-type: application/json' -d '{"orgId":"<org id>","plan":<comp_plan or null>}'
    ```
 5. **If the pre-deploy migrate fails with "Gave up waiting for a table lock"**, another session
    held a lock past the 5 s `lock_timeout`. Nothing is half-applied and the old build keeps
