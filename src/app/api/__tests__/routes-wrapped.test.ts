@@ -24,10 +24,16 @@ function routeFiles(dir: string): string[] {
 function unwrappedExports(source: string): string[] {
   const problems: string[] = [];
   const methods = METHODS.join('|');
-  for (const match of source.matchAll(new RegExp(`export\\s+(?:async\\s+)?function\\s+(${methods})\\b`, 'g'))) {
+  // Array.from: tsconfig has no target, so tsc's ES5 default cannot iterate a matchAll.
+  const bareFunctions = Array.from(
+    source.matchAll(new RegExp(`export\\s+(?:async\\s+)?function\\s+(${methods})\\b`, 'g')),
+  );
+  for (const match of bareFunctions) {
     problems.push(`${match[1]} is exported as a bare function`);
   }
-  const constExports = [...source.matchAll(new RegExp(`export\\s+const\\s+(${methods})\\s*=\\s*([^;]+);`, 'g'))];
+  const constExports = Array.from(
+    source.matchAll(new RegExp(`export\\s+const\\s+(${methods})\\s*=\\s*([^;]+);`, 'g')),
+  );
   const wrapped = new Set(
     constExports.filter(([, , value]) => value.trim().startsWith('withErrorReporting(')).map(([, method]) => method),
   );
