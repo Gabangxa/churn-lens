@@ -273,6 +273,34 @@ almost always well past even the 8h-capped backoff window, so the next poll (wit
 DB TLS is handled automatically: no SSL over Railway's `*.railway.internal` private network
 (override with `DATABASE_SSL=require`), verified TLS elsewhere when `DATABASE_CA_CERT` is set.
 
+### Rolling back
+
+Migrations are additive and idempotent, so older code generally runs against the newer
+schema and Railway's "redeploy a previous deployment" is safe for most changes.
+**Sessions are the exception: never roll back to `c3e33d7` (main as of the session
+rewrite) or anything older once the session commits (`609b947`, `5621af0`, `3805068`,
+`e8df58a`) have been deployed.** That code signs the cookie with `ENCRYPTION_KEY` itself, gives it 365 days,
+and never reads `organizations.sessions_valid_after`. Rolling back to it:
+
+- **revives every pre-deploy cookie.** The new code refuses old `<orgId>.<hmac>` cookies
+  but only deletes one when a browser presents it to an API route, so plenty are still
+  in browsers — and a stolen or copied one is not in a browser at all. After a rollback
+  each is valid again for the rest of its 365 days.
+- **voids every revocation.** "Log out" signing the org out on every device, and account
+  deletion doing the same, both work by stamping `sessions_valid_after`, which the old
+  code ignores. Nothing the founder ended stays ended.
+- **brings back the one-step magic link**, where merely opening `/api/auth/verify?token=`
+  signs the browser in: login CSRF into an attacker's org, and mail scanners burning
+  links. (The emailed URL never changed, so links already in inboxes work either way.)
+- signs out everyone who signed in after the deploy: the old code cannot verify the
+  new `<orgId>.<issuedAt>.<hmac>` cookie. Rolling forward again does the same to anyone
+  who signed in during the rollback.
+
+So after a security-motivated logout (a lost laptop, a leaked cookie), or once anyone has
+used "Log out" to end other sessions, **roll forward** with a fix — never back to
+`c3e33d7`. Rotating `ENCRYPTION_KEY` is not a way out of a bad rollback: it also
+encrypts every stored Stripe key, which would stop decrypting.
+
 ### Local monitor
 
 `scripts/monitor.js` is a founder-only dashboard: app health, scheduler/cron pipeline
