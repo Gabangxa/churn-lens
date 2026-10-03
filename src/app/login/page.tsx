@@ -20,7 +20,7 @@ export default function LoginPage() {
   const [logoutPartial, setLogoutPartial] = useState(false);
   // The redirect to send along with this request, computed once from the URL.
   // Null means "omit it" — the server defaults to /dashboard (or /onboarding,
-  // if the org still has no Stripe key) when nothing is sent.
+  // until the org has a Stripe key AND a registered webhook) when nothing is sent.
   const [next, setNext] = useState<string | null>(null);
 
   // Surfaced when /login/confirm or /api/auth/verify bounces an invalid/expired/used link back here,
