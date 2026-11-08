@@ -101,8 +101,9 @@ function OnboardingFormInner() {
           ChurnLens listens for{' '}
           <code className="rounded bg-[#f8f9fa] dark:bg-[#18181b] border border-zinc-100 dark:border-zinc-800 px-1.5 py-0.5 font-mono text-xs text-teal-700 dark:text-teal-300">
             customer.subscription.deleted
-          </code>{' '}
-          — read-only, nothing else. Takes about 60 seconds.
+          </code>
+          . The key only needs to read customers and subscriptions, and to register that one
+          webhook. Takes about 60 seconds.
         </p>
 
         {/* Primary path: OAuth. Hidden until /api/stripe/oauth/start exists —

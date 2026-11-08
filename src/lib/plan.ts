@@ -73,3 +73,17 @@ export function planForProduct(productId: string): Plan | null {
   if (growth && productId === growth) return 'growth';
   return null;
 }
+
+/** Surveys a free org may send per calendar month. The Stripe webhook enforces it. */
+export const FREE_TIER_MONTHLY_SURVEYS = 10;
+
+/**
+ * Midnight on the 1st of the month containing `now`, in server time: the start
+ * of the window the free-tier cap counts surveys in.
+ */
+export function freeTierWindowStart(now: Date = new Date()): Date {
+  const start = new Date(now);
+  start.setDate(1);
+  start.setHours(0, 0, 0, 0);
+  return start;
+}

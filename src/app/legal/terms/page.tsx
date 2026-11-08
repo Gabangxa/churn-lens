@@ -254,9 +254,9 @@ export default function TermsPage() {
         <p>
           On termination we stop processing and delete Your Data — including survey responses
           collected on your behalf — within {LEGAL.deletionWindow}, except where we must
-          retain it by law and except for opt-out records, which we keep so that suppression
-          continues to be honoured. You may export your data before closing your account, and
-          on request within the deletion window.
+          retain it by law. Opt-out records are deleted along with your account, as set out
+          in the Data Processing Agreement. You may request a copy of your data before closing
+          your account, or within the deletion window, by emailing {LEGAL.privacyEmail}.
         </p>
       </Section>
 

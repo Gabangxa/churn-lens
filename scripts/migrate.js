@@ -405,11 +405,12 @@ async function migrate() {
     CREATE INDEX IF NOT EXISTS survey_responses_created_at ON survey_responses (created_at);
   `);
 
-  // Opt-out records must survive org deletion: the privacy policy (s8) and DPA
-  // (s9) promise the suppression list is retained even after an account is
-  // erased, so a customer who unsubscribed can never be re-surveyed. unsubscribes
-  // was created with an implicit ON DELETE CASCADE to organizations, which would
-  // silently take the suppression list down with the org the purge job deletes.
+  // Drops the unsubscribes → organizations FK. Written when the privacy policy
+  // and DPA promised opt-outs would outlive an erased account. That promise has
+  // since changed: both documents now say opt-outs are erased with the account,
+  // and the purge job's orphan step (e) deletes them once the org row is gone.
+  // With the FK absent, the org delete in step (c) leaves them in place and
+  // step (e) removes them; it never keeps them indefinitely.
   // The constraint name is looked up rather than assumed — Postgres's
   // auto-generated name is deterministic today, but guessing it is exactly the
   // kind of thing that quietly no-ops after an unrelated schema change.

@@ -13,7 +13,7 @@ const FEATURES = [
     shape: 'rounded-full bg-teal-500 dark:bg-teal-400/30',
     title: 'AI theme synthesis',
     description:
-      'AI clusters responses nightly into plain-English themes. Stop reading raw text; start reading patterns.',
+      'Every week, AI clusters responses into plain-English themes. Stop reading raw text; start reading patterns.',
   },
   {
     shape: 'rounded-lg rotate-45 scale-90 bg-cyan-600 dark:bg-cyan-500/30',
@@ -59,9 +59,9 @@ const PLANS = [
     limit: 'Unlimited cancellations',
     features: [
       'Everything in Starter',
-      'Slack integration',
-      'CSV export',
-      'Custom survey questions',
+      'Slack integration (coming soon)',
+      'CSV export (coming soon)',
+      'Custom survey questions (coming soon)',
     ],
     cta: 'Start 14-day trial',
     href: '/login?plan=growth',
@@ -216,7 +216,7 @@ export default function LandingPage() {
                 step: '01',
                 color: 'text-teal-700 dark:text-teal-300',
                 title: 'Connect Stripe',
-                body: 'OAuth or a restricted API key. Takes 60 seconds — ChurnLens registers a webhook and is live immediately.',
+                body: 'Paste a restricted API key. Takes 60 seconds — ChurnLens registers a webhook and is live immediately.',
               },
               {
                 step: '02',
@@ -277,7 +277,7 @@ export default function LandingPage() {
               >
                 {plan.highlight && (
                   <div className="mb-4 self-start rounded-full bg-teal-700 px-4 py-1 text-xs font-bold uppercase tracking-widest text-white">
-                    Most popular
+                    Recommended
                   </div>
                 )}
                 <div className="mb-1 text-lg font-bold font-display text-zinc-900 dark:text-zinc-100">

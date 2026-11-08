@@ -745,7 +745,7 @@ export default function SettingsPage() {
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <p className="m-0 text-sm font-medium text-rose-800 dark:text-rose-300">
                   <strong>Danger zone.</strong> Disconnects Stripe and stops surveys immediately.
-                  All data — except opt-out records — is erased {LEGAL.deletionWindowDays} days
+                  All data, including opt-out records, is erased {LEGAL.deletionWindowDays} days
                   after you request it.
                 </p>
                 <button

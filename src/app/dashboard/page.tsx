@@ -4,6 +4,9 @@ import { redirect } from 'next/navigation';
 import { getOrgIdFromCookieStore } from '@/lib/auth';
 import { query, queryOne } from '@/lib/db';
 import type { Theme, SurveyResponse } from '@/lib/db';
+import { legalFooterReady } from '@/lib/legal';
+import { countFreeTierSurveys, surveySendStatus } from '@/lib/survey-status';
+import type { SurveySendStatus } from '@/lib/survey-status';
 import Wordmark from '@/components/Wordmark';
 import ThemeToggle from '@/components/ThemeToggle';
 
@@ -42,11 +45,24 @@ function fmtWeek(dateStr: string): string {
 async function getDashboardData(orgId: string) {
   // Same test /api/settings/status uses, so the dashboard status line and the
   // settings page can never disagree about whether Stripe is connected.
-  const org = await queryOne<{ stripe_api_key_enc: string | null; stripe_account_id: string | null }>(
-    'SELECT stripe_api_key_enc, stripe_account_id FROM organizations WHERE id = $1',
+  const org = await queryOne<{
+    stripe_api_key_enc: string | null;
+    stripe_account_id: string | null;
+    plan: string;
+    deletion_requested_at: string | null;
+  }>(
+    'SELECT stripe_api_key_enc, stripe_account_id, plan, deletion_requested_at FROM organizations WHERE id = $1',
     [orgId],
   );
   const stripeConnected = !!(org?.stripe_api_key_enc || org?.stripe_account_id);
+  const plan = org?.plan ?? 'free';
+  const sendStatus = surveySendStatus({
+    stripeConnected,
+    deletionRequested: !!org?.deletion_requested_at,
+    legalFooterReady: legalFooterReady(),
+    plan,
+    surveysThisMonth: plan === 'free' ? await countFreeTierSurveys(orgId) : 0,
+  });
 
   const latestWeek = await queryOne<{ week_of: string }>(
     'SELECT week_of FROM themes WHERE org_id = $1 ORDER BY week_of DESC LIMIT 1',
@@ -86,7 +102,44 @@ async function getDashboardData(orgId: string) {
   const weekResponses = themes.reduce((acc, t) => acc + t.response_count, 0);
   const pending = totalSent - responded;
 
-  return { themes, responses, latestWeek: latestWeek?.week_of ?? null, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending, stripeConnected };
+  return { themes, responses, latestWeek: latestWeek?.week_of ?? null, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending, plan, sendStatus };
+}
+
+/** One-line answer to "is a cancellation right now going to be surveyed?" */
+function SendStatusLine({ status }: { status: SurveySendStatus }) {
+  const dot = (tone: 'ok' | 'warn') => (
+    <span className={`font-bold ${tone === 'ok' ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}`}>●</span>
+  );
+  switch (status.kind) {
+    case 'sending':
+      return <p className="text-sm font-medium text-muted">{dot('ok')} Stripe connected · surveys sending automatically</p>;
+    case 'stripe_not_connected':
+      return (
+        <p className="text-sm font-medium text-muted">
+          {dot('warn')} Stripe not connected — no surveys will send.{' '}
+          <Link href="/settings" className="underline underline-offset-2 hover:text-zinc-900 dark:hover:text-white">
+            Connect it in settings
+          </Link>
+        </p>
+      );
+    case 'deletion_pending':
+      return <p className="text-sm font-medium text-muted">{dot('warn')} Account deletion requested — surveys have stopped.</p>;
+    case 'paused_by_churnlens':
+      return (
+        <p className="text-sm font-medium text-muted">
+          {dot('warn')} Surveys are paused on our side — cancellations are not being surveyed
+          right now. Nothing in your setup needs fixing.
+        </p>
+      );
+    case 'free_tier_limit':
+      return (
+        <p className="text-sm font-medium text-muted">
+          {dot('warn')} Free plan limit reached — {status.limit} of {status.limit} surveys sent
+          this month. New cancellations won&apos;t be surveyed until{' '}
+          {status.resetsOn.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}.
+        </p>
+      );
+  }
 }
 
 export default async function DashboardPage() {
@@ -96,8 +149,10 @@ export default async function DashboardPage() {
   // them back here once they've signed in or signed up.
   if (!orgId) redirect('/login?next=/dashboard');
 
-  const { themes, responses, latestWeek, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending, stripeConnected } =
+  const { themes, responses, latestWeek, totalSent, responded, mrrLost, responseRate, weekMrr, weekResponses, pending, plan, sendStatus } =
     await getDashboardData(orgId);
+  // /api/themes only clusters paid orgs, so a free org must not be told themes are on their way.
+  const themesIncluded = plan !== 'free';
 
   const hasAnyData = totalSent > 0 || responses.length > 0;
   const hasThemes = themes.length > 0;
@@ -153,20 +208,7 @@ export default async function DashboardPage() {
           <h1 className="text-4xl font-extrabold font-display tracking-tight text-zinc-900 dark:text-white mb-3 transition-colors duration-500">
             Dashboard
           </h1>
-          {stripeConnected ? (
-            <p className="text-sm font-medium text-muted">
-              <span className="font-bold text-emerald-600 dark:text-emerald-400">●</span>{' '}
-              Stripe connected · surveys firing automatically
-            </p>
-          ) : (
-            <p className="text-sm font-medium text-muted">
-              <span className="font-bold text-amber-600 dark:text-amber-400">●</span>{' '}
-              Stripe not connected — no surveys will send.{' '}
-              <Link href="/settings" className="underline underline-offset-2 hover:text-zinc-900 dark:hover:text-white">
-                Connect it in settings
-              </Link>
-            </p>
-          )}
+          <SendStatusLine status={sendStatus} />
         </div>
 
         {/* ── Empty state ── */}
@@ -177,8 +219,8 @@ export default async function DashboardPage() {
               Waiting for your first cancellation
             </h2>
             <p className="mt-3 max-w-sm text-sm font-medium text-muted leading-relaxed">
-              ChurnLens is active. When a customer cancels, they{"'"}ll receive a
-              survey and their response will appear here.
+              When a customer cancels, they{"'"}ll receive a survey and their response
+              will appear here.
             </p>
           </div>
         )}
@@ -211,9 +253,11 @@ export default async function DashboardPage() {
                   <p className="mt-1 text-sm font-medium text-muted">
                     {hasThemes
                       ? `AI-synthesised from ${weekResponses} responses — week of ${fmtWeek(latestWeek!)}`
-                      : pending > 0
-                        ? `${pending} response${pending !== 1 ? 's' : ''} pending — themes generate Monday 06:00 UTC`
-                        : 'Themes will appear here after the first Monday digest run'}
+                      : !themesIncluded
+                        ? 'AI themes are included in the Starter and Growth plans'
+                        : pending > 0
+                          ? `${pending} response${pending !== 1 ? 's' : ''} pending — themes generate Monday 06:00 UTC`
+                          : 'Themes will appear here after the first Monday digest run'}
                   </p>
                 </div>
                 {hasThemes && (
@@ -262,7 +306,11 @@ export default async function DashboardPage() {
                 <div className="rounded-2xl border-2 border-dashed border-zinc-200 dark:border-zinc-700 py-10 text-center text-sm font-medium text-muted">
                   {weekMrr === 0 && responded === 0
                     ? 'No completed responses yet — check back after your first surveys are submitted.'
-                    : `${responded} completed response${responded !== 1 ? 's' : ''} collected. Themes will be generated on the next Monday run.`}
+                    : `${responded} completed response${responded !== 1 ? 's' : ''} collected. ${
+                        themesIncluded
+                          ? 'Themes will be generated on the next Monday run.'
+                          : 'Upgrade to Starter to have them grouped into AI themes each week.'
+                      }`}
                 </div>
               )}
             </div>
