@@ -6,6 +6,8 @@ import { getResend, FROM_EMAIL } from '@/lib/resend';
 import { checkRateLimit, clientIp } from '@/lib/ratelimit';
 import { assertSameOrigin } from '@/lib/auth';
 import { sanitizeNext } from '@/lib/next-paths';
+import { reportError } from '@/lib/report-error';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 const TOKEN_TTL_MS = 15 * 60 * 1000;
 
@@ -18,6 +20,32 @@ const POSTGRES_UNIQUE_VIOLATION = '23505';
 
 function isUniqueViolation(err: unknown): boolean {
   return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === POSTGRES_UNIQUE_VIOLATION;
+}
+
+/**
+ * The WHATWG "valid email address" — exactly what the login form's
+ * <input type="email"> already enforces in the browser before it lets the
+ * form submit, so this refuses nothing a founder typing into it could send.
+ * Only a hand-made request is turned away. (Both forms that ever created a
+ * users row used type="email", so no existing account fails it either.)
+ *
+ * It matters because this route is unauthenticated and everything after it
+ * trusts the address. Its character classes admit no control character and
+ * no DEL: a NUL byte reaching Postgres is error 22021, which the catch-all
+ * below reports, so before this check anyone could page the operator once
+ * per request. The rest would be stored as part of an account's address and
+ * handed to Resend. Display names, address lists, spaces and a second @
+ * would reach Resend too, which rejects them — another report on demand.
+ *
+ * 254 is the longest address SMTP can deliver to (RFC 5321's 256-octet path
+ * minus its angle brackets). It also bounds the rate limiter's per-email keys.
+ */
+const MAX_EMAIL_LENGTH = 254;
+const WHATWG_VALID_EMAIL =
+  /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+
+function isPlausibleEmail(email: string): boolean {
+  return email.length <= MAX_EMAIL_LENGTH && WHATWG_VALID_EMAIL.test(email);
 }
 
 /**
@@ -35,7 +63,7 @@ function isUniqueViolation(err: unknown): boolean {
  * bucket (mass account creation); each of the first two breaches returns
  * immediately, before any account is created or looked up.
  */
-export async function POST(req: NextRequest) {
+async function requestLoginLink(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
 
@@ -55,10 +83,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid request body.' }, { status: 400 });
   }
 
-  if (typeof email !== 'string' || !email.includes('@')) {
+  // Checked after trimming, so the stray whitespace a paste can carry is
+  // still forgiven, and before anything else sees the address — the
+  // per-email rate-limit bucket, the database, Resend.
+  const normEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+  if (!isPlausibleEmail(normEmail)) {
     return NextResponse.json({ error: 'A valid email address is required.' }, { status: 400 });
   }
-  const normEmail = email.trim().toLowerCase();
   const redirectTo = sanitizeNext(next);
 
   // Per-email throttle. On breach we still return ok (no enumeration) but skip
@@ -139,6 +170,10 @@ export async function POST(req: NextRequest) {
       [tokenHash, orgId, normEmail, expiresAt, redirectTo],
     );
 
+    // Opening this only forwards to the /login/confirm page; the session is
+    // minted by that page's same-origin POST (see /api/auth/verify). The URL
+    // itself is unchanged from the one-step flow so that links already in
+    // inboxes, and links mailed across a deploy or rollback, keep working.
     const loginUrl = `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/verify?token=${token}`;
 
     try {
@@ -155,9 +190,10 @@ Here's your ChurnLens login link:
 
 → ${loginUrl}
 
-This link signs you in — or, if this is your first time, finishes creating
-your account. It's valid for 15 minutes and can only be used once. If you
-didn't request this, you can safely ignore this email — nothing will happen.
+Open it and confirm to sign in — or, if this is your first time, to finish
+creating your account. It's valid for 15 minutes and can only be used once.
+If you didn't request this, you can safely ignore this email — nothing will
+happen.
 
 — ChurnLens`,
       });
@@ -166,12 +202,16 @@ didn't request this, you can safely ignore this email — nothing will happen.
         throw new Error(`Resend send failed: ${error.name}: ${error.message}`);
       }
     } catch (err) {
-      // Log but don't leak send status to the caller.
-      console.error('Login email send failed:', err);
+      // Reported, never surfaced to the caller (enumeration safety) — which
+      // makes this report the only sign that nobody can sign in. Org id
+      // only; reportError also redacts the address if Resend's error quotes it.
+      reportError('auth.login-email', err, { orgId });
     }
   } catch (err) {
-    console.error('Login request failed after rate limits passed:', err);
+    reportError('auth.login-request', err);
   }
 
   return NextResponse.json({ ok: true });
 }
+
+export const POST = withErrorReporting('auth.login-request', requestLoginLink);

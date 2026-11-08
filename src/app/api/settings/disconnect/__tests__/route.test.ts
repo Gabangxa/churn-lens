@@ -33,6 +33,8 @@ vi.mock('stripe', () => {
 });
 
 import { DELETE } from '../route';
+// Real: ALERT_EMAIL is pinned empty for every suite (vitest.config.ts).
+import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 
 const ORG_ID = 'org-abc';
 const APP_URL = 'https://app.churnlens.com';
@@ -188,5 +190,24 @@ describe('DELETE /api/settings/disconnect — clearing the connection', () => {
 
     expect(res.status).toBe(303);
     expect(queryMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('DELETE /api/settings/disconnect — an unexpected failure', () => {
+  beforeEach(() => resetErrorReports());
+
+  it('is reported and answered 500, not left for Next to log', async () => {
+    queryOneMock.mockRejectedValue(new Error('connection terminated'));
+
+    const res = await DELETE(disconnectRequest());
+
+    expect(res.status).toBe(500);
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'settings.disconnect',
+        message: 'connection terminated',
+        meta: { step: 'unhandled', method: 'DELETE' },
+      }),
+    ]);
   });
 });

@@ -42,7 +42,7 @@ up() {
       # pg_isready inside the container reports a healthy database that
       # nothing on the host can reach. The data is throwaway either way.
       echo "[e2e-db] removing stopped ${CONTAINER} and recreating it…"
-      docker rm -f "${CONTAINER}" >/dev/null
+      docker rm -fv "${CONTAINER}" >/dev/null
     fi
     echo "[e2e-db] creating ${CONTAINER} (${IMAGE}) on 127.0.0.1:${HOST_PORT}…"
     docker run -d \
@@ -79,7 +79,9 @@ up() {
 down() {
   if container_exists; then
     echo "[e2e-db] removing ${CONTAINER}…"
-    docker rm -f "${CONTAINER}" >/dev/null
+    # -v: the image keeps its data in an anonymous volume that plain `rm` leaves
+    # behind, and nothing can reattach it once the container is gone.
+    docker rm -fv "${CONTAINER}" >/dev/null
     echo "[e2e-db] gone."
   else
     echo "[e2e-db] ${CONTAINER} does not exist."

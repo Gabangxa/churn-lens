@@ -8,10 +8,16 @@ module.exports = {
   ],
   theme: {
     extend: {
+      // The variables are set on <html> by next/font in src/app/layout.tsx and
+      // hold the self-hosted family name plus its metric-matched fallback; the
+      // generic stacks after them are unchanged from the Google Fonts @import
+      // days and still catch any glyph the self-hosted faces lack. The
+      // variables must stay on <html>: an undefined var() invalidates the
+      // whole font-family declaration rather than falling through to these.
       fontFamily: {
-        sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
-        display: ['"Space Grotesk"', 'ui-sans-serif', 'system-ui', 'sans-serif'],
-        mono: ['"JetBrains Mono"', 'ui-monospace', 'monospace'],
+        sans: ['var(--font-inter)', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        display: ['var(--font-space-grotesk)', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        mono: ['var(--font-jetbrains-mono)', 'ui-monospace', 'monospace'],
       },
       animation: {
         blob: 'blob 10s infinite alternate',

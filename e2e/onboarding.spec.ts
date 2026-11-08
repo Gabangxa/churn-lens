@@ -24,14 +24,25 @@ test.describe('onboarding', () => {
     await expect(page.locator('input[type="email"]')).toHaveCount(0);
 
     await page.getByLabel('Stripe restricted API key').fill('sk_live_notrestricted');
+
+    // Terms/DPA acceptance is a deliberate act: never pre-ticked, and the form
+    // will not submit without it.
+    const agree = page.getByLabel('I agree to the Terms of Service and Data Processing Agreement');
+    await expect(agree).not.toBeChecked();
+    await expect(page.getByRole('button', { name: 'Save and activate' })).toBeDisabled();
+    await agree.check();
+
     await page.getByRole('button', { name: 'Save and activate' }).click();
 
     await expect(page.getByText(/restricted API key \(starts with rk_\)/)).toBeVisible();
 
-    const org = await queryOne<{ stripe_api_key_enc: string | null }>(
-      'SELECT stripe_api_key_enc FROM organizations WHERE id = $1',
-      [orgId],
-    );
+    // A refused key records nothing — not the key, and not the acceptance
+    // either, which connect only ever writes alongside a stored key.
+    const org = await queryOne<{
+      stripe_api_key_enc: string | null;
+      legal_accepted_version: string | null;
+    }>('SELECT stripe_api_key_enc, legal_accepted_version FROM organizations WHERE id = $1', [orgId]);
     expect(org!.stripe_api_key_enc).toBeNull();
+    expect(org!.legal_accepted_version).toBeNull();
   });
 });

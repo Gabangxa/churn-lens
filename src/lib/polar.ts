@@ -44,6 +44,15 @@ export function isPolarConfigured(): boolean {
   return !!process.env.POLAR_ACCESS_TOKEN;
 }
 
+/**
+ * Whether the Polar webhook can verify anything in this environment. The
+ * webhook's counterpart to isPolarConfigured: without a secret it answers 503
+ * instead of reaching getPolarWebhookSecret's throw.
+ */
+export function isPolarWebhookConfigured(): boolean {
+  return !!process.env.POLAR_WEBHOOK_SECRET;
+}
+
 export function getPolarWebhookSecret(): string {
   const secret = process.env.POLAR_WEBHOOK_SECRET;
   if (!secret) {

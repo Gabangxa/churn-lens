@@ -23,9 +23,24 @@ function sslConfig() {
   return { rejectUnauthorized: false };
 }
 
+// lock_timeout: this script is Railway's preDeploy command, so it runs against
+// the live database while the old build is still serving. ALTER TABLE takes an
+// ACCESS EXCLUSIVE lock before it checks IF NOT EXISTS, so every deploy queues
+// for one on organizations and friends — and while that request waits, every
+// later read and write of the table waits behind it. One stray open
+// transaction would otherwise stall all live traffic for as long as it stayed
+// open. With a timeout the statement gives up, the script exits non-zero, the
+// deploy fails, the old build keeps serving, and the queue drains; every step
+// here is idempotent, so redeploying once the lock is free just finishes the
+// job. 5s is far above any lock wait our own short request transactions cause.
+// Per connection (libpq `options`), so the dedupe transaction's dedicated
+// client gets it too. A `?options=` in DATABASE_URL would replace it —
+// node-postgres lets the URL win — so do not put one there.
+// scripts/__tests__/migrate.db.test.ts holds a lock and proves all of this.
 const pool = new Pool({
   connectionString: dbUrl || undefined,
   ssl: sslConfig(),
+  options: '-c lock_timeout=5s',
 });
 
 async function migrate() {
@@ -236,8 +251,9 @@ async function migrate() {
     // `LIKE users`: IF NOT EXISTS can never widen a table that already exists,
     // so a column-for-column clone would break `INSERT ... SELECT u.*` the day
     // users gains a column — only in production, where the table already
-    // exists at the old width. Retention: review and drop this table once the
-    // dedupe has been confirmed in production; it holds email addresses.
+    // exists at the old width. Retention: it holds email addresses, so the
+    // daily purge job (src/app/api/purge, step g) deletes each snapshot 30
+    // days after its removed_at. Audit or recover a dedupe within that window.
     await dedupeClient.query(`
       CREATE TABLE IF NOT EXISTS users_dedupe_backup (
         id uuid NOT NULL,
@@ -471,11 +487,225 @@ async function migrate() {
     CREATE INDEX IF NOT EXISTS cron_runs_ran_at ON cron_runs (ran_at);
   `);
 
+  // Server-side session revocation. A session is a signed cookie carrying its
+  // own issued-at (src/lib/auth.ts), so on its own nothing can end one early:
+  // logout used to delete the cookie from the one browser that clicked it,
+  // and a copy held anywhere else kept working. Every session for this org
+  // issued before this instant is rejected; logout and an account-deletion
+  // request move it forward, never back. NULL = never revoked, which is what
+  // every existing row should read as. Nullable with no default, so adding it
+  // is a catalog-only change — no table rewrite, no backfill.
+  await pool.query(`
+    ALTER TABLE organizations
+      ADD COLUMN IF NOT EXISTS sessions_valid_after timestamptz;
+  `);
+
+  // When Stripe first rejected the org's stored key (401: revoked or rolled;
+  // 403: a restricted key missing a permission), or the webhook found the key
+  // belongs to another Stripe account or mode than its events. The Stripe
+  // webhook used to 500 on that, so Stripe retried for days with a key that
+  // could never work and nobody told the founder. It now answers 200 and
+  // stamps this, and the dashboard status line (src/lib/survey-status.ts)
+  // tells the founder to reconnect. NULL means "no known problem": cleared by
+  // /api/onboarding/connect when a key is saved, by a disconnect, and by the
+  // webhook when a later call with the same key succeeds. Nullable with no
+  // default and no backfill, so every existing org reads as fine and a
+  // rollback to code that ignores the column is harmless.
+  await pool.query(`
+    ALTER TABLE organizations
+      ADD COLUMN IF NOT EXISTS stripe_key_invalid_at timestamptz;
+  `);
+
+  // The connected Stripe account's public business name (business_profile.name
+  // only — settings.dashboard.display_name is the founder's internal label and
+  // is never shown to customers), cached so the survey email and the survey
+  // page can say which business is asking (POPIA s18) when the founder
+  // has set no display name. Reading it needs an account permission onboarding
+  // does not ask the restricted key for, so it is best-effort: written by
+  // /api/onboarding/connect on every key save (NULL when the key cannot read
+  // it, so a previous account's name never outlives its key) and filled lazily
+  // by the Stripe webhook. Nullable, no default, no backfill: NULL means the
+  // generic copy, exactly what every org had before this column.
+  await pool.query(`
+    ALTER TABLE organizations
+      ADD COLUMN IF NOT EXISTS stripe_business_name text;
+  `);
+
+  // Acceptance of the Terms of Service and Data Processing Agreement. POPIA
+  // s21 requires a written contract between the responsible party (the
+  // founder's org) and its operator (ChurnLens) before we process the org's
+  // customers' personal information, and the DPA is meant to be that
+  // contract — but until these columns existed nothing ever showed it to a
+  // founder or recorded that one had agreed to it.
+  //
+  // legal_accepted_version is currentLegalDocsVersion() (src/lib/legal-version.ts)
+  // at the moment of acceptance, so a later change to the documents can tell
+  // who agreed to which wording; legal_accepted_at is always the database's
+  // now(), never a time the client sent. Both NULL means "no acceptance on
+  // record" — which is true of every org that connected before this shipped,
+  // so there is deliberately no backfill: inventing an acceptance for them
+  // would be exactly the false record these columns exist to replace. The
+  // dashboard asks those orgs to accept instead.
+  await pool.query(`
+    ALTER TABLE organizations
+      ADD COLUMN IF NOT EXISTS legal_accepted_at timestamptz,
+      ADD COLUMN IF NOT EXISTS legal_accepted_version text;
+  `);
+
+  // The two columns are one fact: a version with no time, or a time with no
+  // version, is not evidence of anything. Both write paths set them together
+  // in one statement, and both rely on "version set implies time set" to keep
+  // the original timestamp on a re-accept — so the database enforces it
+  // rather than trusting every future writer to. Every existing row has both
+  // NULL, so adding it validates instantly. Catalog-guarded because ADD
+  // CONSTRAINT has no IF NOT EXISTS.
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'organizations_legal_acceptance_pair_check'
+          AND conrelid = 'organizations'::regclass
+      ) THEN
+        ALTER TABLE organizations
+          ADD CONSTRAINT organizations_legal_acceptance_pair_check
+          CHECK ((legal_accepted_at IS NULL) = (legal_accepted_version IS NULL));
+      END IF;
+    END $$;
+  `);
+
+  // Every Terms/DPA acceptance an org has made: one row per version, inserted
+  // and never updated. The organizations.legal_accepted_* columns above say
+  // only which version an org accepted most recently, so accepting a new
+  // version overwrote the one record of the earlier agreement — the wording
+  // that covered everything processed in between. Those columns stay as the
+  // cache of the current acceptance (they hold currentLegalDocsVersion() from
+  // src/lib/legal-version.ts, '-draft' suffix included); this is the history.
+  // Both are written by recordLegalAcceptance (src/lib/legal-acceptance.ts) in
+  // one statement, so they cannot disagree about the current one.
+  //
+  // accepted_at is always the database's now() at acceptance (or the cache's
+  // kept original time), never a client's. source says which door it came
+  // through: 'connect' (the onboarding checkbox, alongside a Stripe key) or
+  // 'banner' (the dashboard's "I agree", POST /api/legal/accept).
+  //
+  // ON DELETE CASCADE: erasing an account erases its acceptance history too,
+  // like every other per-org table. Whether acceptance evidence should outlive
+  // erasure is a question for a lawyer; this keeps today's erasure promise.
+  //
+  // No backfill: this table ships in the same release as the cache columns,
+  // so no deployed database holds an acceptance without a row here. A local
+  // database that recorded one before this table existed recorded it without
+  // the '-draft' label, so that org is simply asked again.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS legal_acceptances (
+      org_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      version text NOT NULL,
+      accepted_at timestamptz NOT NULL DEFAULT now(),
+      source text NOT NULL CHECK (source IN ('connect', 'banner')),
+      PRIMARY KEY (org_id, version)
+    );
+  `);
+
+  // Polar billing, per subscription. organizations.plan used to follow one
+  // pointer and one watermark per org (polar_subscription_id, polar_synced_at),
+  // which cannot order events across two subscriptions: a revoke delivered
+  // before its own grant was skipped and the late grant then left the org paid
+  // indefinitely, and a paying subscription could sit on free until its next
+  // event. Each subscription now keeps its own latest-known state here, ordered
+  // by its own modified_at, and the org's plan is recomputed from every row
+  // (src/lib/org-plan.ts) — so delivery order across subscriptions no longer
+  // matters. Holds Polar ids, a status and a timestamp only: no personal data,
+  // and it goes with the org on erasure (ON DELETE CASCADE).
+  //
+  // The org columns stay: polar_subscription_id still marks an org that has
+  // touched Polar (the purge's abandoned-signup check reads it), and both are
+  // kept current so a rollback to the watermark code finds sane values.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS polar_subscriptions (
+      id text PRIMARY KEY,
+      org_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      status text NOT NULL,
+      product_id text NOT NULL,
+      modified_at timestamptz NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS polar_subscriptions_org_id ON polar_subscriptions (org_id);
+  `);
+
+  // A plan granted by hand through POST /api/admin/plan. It used to be written
+  // straight into organizations.plan, where the next Polar event for the org
+  // (a renewal, an expired checkout) overwrote it. Now it is one input to the
+  // same recompute as the subscriptions: the org gets the higher of the two.
+  // NULL = no comp. 'free' is not a comp — that is the absence of one.
+  //
+  // The backfill runs ONLY when the column is introduced, guarded like
+  // last_login_at above. Until now the admin route was the only writer of a
+  // paid plan for an org that never reached Polar, so a paid plan with no
+  // Polar subscription on record IS a comp; without carrying it over, the
+  // first recompute would silently take it away. Re-running it on later
+  // deploys would instead turn any hand-edited plan into a permanent comp.
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'organizations' AND column_name = 'comp_plan'
+      ) THEN
+        ALTER TABLE organizations ADD COLUMN IF NOT EXISTS comp_plan text;
+        UPDATE organizations SET comp_plan = plan
+        WHERE plan IN ('starter', 'growth') AND polar_subscription_id IS NULL;
+      END IF;
+    END $$;
+  `);
+
+  // Catalog-guarded because ADD CONSTRAINT has no IF NOT EXISTS. NULL passes a
+  // CHECK, so "no comp" needs no special case.
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'organizations_comp_plan_check'
+          AND conrelid = 'organizations'::regclass
+      ) THEN
+        ALTER TABLE organizations
+          ADD CONSTRAINT organizations_comp_plan_check
+          CHECK (comp_plan IN ('starter', 'growth'));
+      END IF;
+    END $$;
+  `);
+
+  // The business name the survey email for this row actually carried: the
+  // configured display name or cached Stripe account name it was sent with,
+  // or NULL for the generic copy. Written in the same UPDATE that stamps
+  // survey_email_sent_at (Stripe webhook and Settings test send alike), so
+  // a re-sent email overwrites it with what the re-send said. The survey
+  // page shows this instead of re-resolving the org's name when the link is
+  // opened, so a rename, reconnect or disconnect in between cannot make the
+  // page name a different business than the email did (POPIA s18).
+  // Nullable, no default, no backfill: existing rows — like rows whose
+  // email named no business — fall back to the org's current name, which is
+  // what every survey page did before this column.
+  await pool.query(`
+    ALTER TABLE survey_responses
+      ADD COLUMN IF NOT EXISTS business_name text;
+  `);
+
   console.log('Database migration complete');
   await pool.end();
 }
 
 migrate().catch((err) => {
   console.error('Migration failed:', err);
+  if (err && err.code === '55P03') {
+    // lock_not_available: the lock_timeout above fired. Said plainly because
+    // this lands in Railway's deploy log, read by whoever wonders why the
+    // deploy failed when the schema did not change.
+    console.error(
+      '[migrate] Gave up waiting for a table lock: another session held it past lock_timeout. ' +
+        'Every step is idempotent and none is half-applied; on Railway the previous build is still serving. Look for a long-open ' +
+        "transaction (pg_stat_activity, state 'idle in transaction'), end it, then redeploy.",
+    );
+  }
   process.exit(1);
 });

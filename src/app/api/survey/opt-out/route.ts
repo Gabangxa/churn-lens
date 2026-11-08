@@ -3,6 +3,7 @@ import { verifySurveyToken } from '@/lib/crypto';
 import { queryOne, execute } from '@/lib/db';
 import { checkRateLimit, clientIp } from '@/lib/ratelimit';
 import { redirectUrl } from '@/lib/app-url';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 /**
  * One-click unsubscribe from exit surveys (CAN-SPAM / RFC 8058).
@@ -37,7 +38,7 @@ async function suppress(token: string | null): Promise<void> {
   }
 }
 
-export async function GET(req: NextRequest) {
+async function optOutFromLink(req: NextRequest) {
   const rl = checkRateLimit(`optout:${clientIp(req)}`, 20, 60_000);
   if (!rl.allowed) {
     return NextResponse.json(
@@ -65,7 +66,7 @@ export async function GET(req: NextRequest) {
  * renders this response, so sending someone to a page they'll never see would
  * be meaningless, and providers may treat a non-2xx as "click doesn't work".
  */
-export async function POST(req: NextRequest) {
+async function optOutOneClick(req: NextRequest) {
   const rl = checkRateLimit(`optout:${clientIp(req)}`, 20, 60_000);
   if (!rl.allowed) {
     return NextResponse.json(
@@ -80,3 +81,6 @@ export async function POST(req: NextRequest) {
   await suppress(token);
   return NextResponse.json({ received: true });
 }
+
+export const GET = withErrorReporting('survey.opt-out', optOutFromLink);
+export const POST = withErrorReporting('survey.opt-out', optOutOneClick);

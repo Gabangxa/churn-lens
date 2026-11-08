@@ -4,14 +4,31 @@ import { verifySurveyToken } from '@/lib/crypto';
 import { redirectUrl } from '@/lib/app-url';
 import { BUILTIN_CANCELLATION_REASONS, loadSurveyConfig } from '@/lib/survey-config';
 import { MAX_COMEBACK_TEXT, MAX_OPEN_TEXT, MAX_REASON, truncateFreeText } from '@/lib/survey-limits';
+import { isBadInputDbError, reportError, warnBadInput } from '@/lib/report-error';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
-export async function POST(req: NextRequest) {
-  const body = await req.formData();
+async function submitSurvey(req: NextRequest) {
+  // Anyone can POST here, so a body that is not a form is their mistake, not
+  // a failure: answered here, it never reaches withErrorReporting's alert.
+  let body: FormData;
+  try {
+    body = await req.formData();
+  } catch {
+    return NextResponse.json({ error: 'Expected a form submission' }, { status: 400 });
+  }
 
-  const token = body.get('token') as string | null;
-  const reason = body.get('reason') as string | null;
-  const openText = body.get('open_text') as string | null;
-  const comebackText = body.get('comeback_text') as string | null;
+  // FormData.get() hands back a File for a file part. Every field here is
+  // text, so a File is a malformed request, answered before string methods
+  // throw on it (which, wrapped, would page the operator from anyone's POST).
+  const fields: Record<string, string | null> = {};
+  for (const name of ['token', 'reason', 'open_text', 'comeback_text']) {
+    const value = body.get(name);
+    if (value !== null && typeof value !== 'string') {
+      return NextResponse.json({ error: `Invalid ${name}` }, { status: 400 });
+    }
+    fields[name] = value;
+  }
+  const { token, reason, open_text: openText, comeback_text: comebackText } = fields;
 
   if (!token || !reason) {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
@@ -106,7 +123,21 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Survey not found or already submitted' }, { status: 404 });
     }
   } catch (err) {
-    console.error('Survey update error:', err);
+    // Postgres refusing a bound value as malformed (isBadInputDbError) should
+    // not happen here: the answers went through truncateFreeText, and the
+    // token is the exact string signSurveyToken issued (verifySurveyToken
+    // accepts nothing else). Should one get through anyway, it came in a
+    // request anyone holding a link can repeat at will, so it is a 400 and
+    // one warning line, not a way to page the operator.
+    if (isBadInputDbError(err)) {
+      warnBadInput('survey.submit', err, { orgId: payload.orgId });
+      return NextResponse.json({ error: 'Invalid request' }, { status: 400 });
+    }
+    // Anything else is the database. The link is single-use and the customer
+    // has already cancelled, so a lost answer does not come back. Org id
+    // only: the token is a credential and the answer is the customer's own
+    // words.
+    reportError('survey.submit', err, { orgId: payload.orgId });
     return NextResponse.json({ error: 'Failed to save response' }, { status: 500 });
   }
 
@@ -115,3 +146,5 @@ export async function POST(req: NextRequest) {
     { status: 303 },
   );
 }
+
+export const POST = withErrorReporting('survey.submit', submitSurvey);

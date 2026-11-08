@@ -19,8 +19,24 @@ vi.mock('../lib/cron', async (importOriginal) => {
   return { ...actual, cronRunRecord: (...args: unknown[]) => cronRunRecordMock(...args) };
 });
 
+// The "reported once" tests below run the real /api/themes handler behind
+// the stubbed fetch; this is its database. Nothing else here reaches it
+// (cronRunRecord is stubbed above), so the default is to fail loudly.
+const dbQueryMock = vi.fn();
+const dbExecuteMock = vi.fn();
+vi.mock('@/lib/db', () => ({
+  query: (...args: unknown[]) => dbQueryMock(...args),
+  queryOne: (...args: unknown[]) => dbQueryMock(...args),
+  execute: (...args: unknown[]) => dbExecuteMock(...args),
+  withTransaction: () => Promise.reject(new Error('withTransaction is not expected in this suite')),
+}));
+
 import { register } from '../instrumentation';
+import { POST as runThemesRoute } from '../app/api/themes/route';
 import { getSchedulerState, resetSchedulerState } from '../lib/scheduler-state';
+// Real, not mocked: these tests assert on what reportError recorded. ALERT_EMAIL
+// is pinned empty for every suite (vitest.config.ts), so nothing is emailed.
+import { getErrorReportSnapshot, resetErrorReports } from '../lib/report-error';
 
 const FIRST_POLL_MS = 30 * 1000;
 const POLL_INTERVAL_MS = 10 * 60 * 1000;
@@ -71,11 +87,16 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(MONDAY_0800);
   resetSchedulerState();
+  // Also detaches the process listeners an earlier test's register() installed.
+  resetErrorReports();
 
   validateEnvMock.mockReset();
   validateEnvMock.mockImplementation(() => {});
   cronRunRecordMock.mockReset();
   stubWeeklyRecord(null);
+
+  dbQueryMock.mockReset().mockRejectedValue(new Error('database is not expected in this test'));
+  dbExecuteMock.mockReset().mockRejectedValue(new Error('database is not expected in this test'));
 
   fetchMock = vi.fn().mockResolvedValue(okResponse());
   vi.stubGlobal('fetch', fetchMock);
@@ -90,6 +111,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  resetErrorReports();
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.unstubAllGlobals();
@@ -589,5 +611,220 @@ describe('register — scheduler-state (read by /api/admin/status)', () => {
 
     expect(getSchedulerState().lastPollError).toBeNull();
     expect(getSchedulerState().lastPollAt).not.toBe(firstPollAt);
+  });
+});
+
+describe('register — error reporting (src/lib/report-error.ts)', () => {
+  /** The fingerprint summaries reportError holds for one context. */
+  function reported(context: string) {
+    return getErrorReportSnapshot().fingerprints.filter((f) => f.context === context);
+  }
+
+  /** Node passes `origin` to monitor listeners; @types/node's emit() overload omits it. */
+  function emitUncaughtMonitor(err: Error) {
+    const emit = process.emit.bind(process) as (event: string, ...args: unknown[]) => boolean;
+    emit('uncaughtExceptionMonitor', err, 'uncaughtException');
+  }
+
+  it('hooks process-level failures into reportError on boot', async () => {
+    await register();
+
+    emitUncaughtMonitor(new Error('kaboom'));
+
+    expect(reported('process.uncaughtException')).toEqual([expect.objectContaining({ message: 'kaboom', count: 1 })]);
+  });
+
+  it('hooks them even when E2E_DISABLE_SCHEDULER=1 — they have nothing to do with the scheduler', async () => {
+    vi.stubEnv('E2E_DISABLE_SCHEDULER', '1');
+    await register();
+
+    emitUncaughtMonitor(new Error('kaboom'));
+
+    expect(reported('process.uncaughtException')).toHaveLength(1);
+  });
+
+  it('does not hook anything outside the nodejs runtime', async () => {
+    vi.stubEnv('NEXT_RUNTIME', 'edge');
+    const before = process.listenerCount('uncaughtExceptionMonitor');
+
+    await register();
+
+    expect(process.listenerCount('uncaughtExceptionMonitor')).toBe(before);
+  });
+
+  it('reports a cron route answering non-2xx with its path and the body that says why', async () => {
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 500,
+      headers: new Headers(),
+      json: async () => ({}),
+      text: async () => '{"error":"connection terminated","weekOf":"2026-03-09"}',
+    });
+
+    await bootAndPoll();
+
+    const [themes] = reported('cron.scheduler').filter((f) => f.message.startsWith('/api/themes'));
+    expect(themes.message).toBe('/api/themes returned 500: {"error":"connection terminated","weekOf":"2026-03-09"}');
+    expect(getErrorReportSnapshot().recent.find((r) => r.message.startsWith('/api/themes'))?.meta).toEqual({
+      path: '/api/themes',
+      weekOf: WEEK_OF,
+    });
+    // The scheduler-state message the status endpoint shows stays the short form.
+    expect(getSchedulerState().lastPollError).toBe('/api/digest returned 500');
+  });
+
+  it('hands reportError the whole body, so an address near the old 500-char cut is redacted, not halved', async () => {
+    // '{"error":"' + 480 x's + ' ' puts 'jane.doe' at 491 and its '@' at 499:
+    // cut at 500 before redaction, the local part no longer looked like an
+    // address and went out verbatim.
+    const body = JSON.stringify({ error: `${'x'.repeat(480)} jane.doe@customer.example could not be saved` });
+    expect(body.indexOf('jane.doe@')).toBe(491);
+    fetchMock.mockResolvedValue({ ok: false, status: 500, headers: new Headers(), json: async () => ({}), text: async () => body });
+    const errorLog = vi.mocked(console.error);
+
+    await bootAndPoll();
+
+    const [themes] = reported('cron.scheduler').filter((f) => f.message.startsWith('/api/themes'));
+    expect(themes.message).toContain('[redacted email] could not be saved');
+    expect(JSON.stringify(getErrorReportSnapshot())).not.toContain('jane');
+    const logged = errorLog.mock.calls.map(([line]) => String(line)).join('\n');
+    expect(logged).not.toContain('jane');
+  });
+
+  it('bounds a huge non-2xx body in the report and leaves the synthetic stack out of it', async () => {
+    // A proxy's HTML error page can be any size. The stack of the Error the
+    // scheduler builds would only repeat the body and point at its own fetch
+    // wrapper; the path in meta already says which route failed.
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: async () => ({}),
+      text: async () => `<html>${'bad gateway '.repeat(10_000)}</html>`,
+    });
+    const errorLog = vi.mocked(console.error);
+
+    await bootAndPoll();
+
+    const [themes] = reported('cron.scheduler').filter((f) => f.message.startsWith('/api/themes'));
+    expect(themes.message.length).toBeLessThanOrEqual(1000 + '…[truncated]'.length);
+    expect(themes.message).toMatch(/…\[truncated\]$/);
+    const line = errorLog.mock.calls
+      .map(([raw]) => JSON.parse(String(raw)) as { message: string; stack: string | null })
+      .find((l) => l.message.startsWith('[cron.scheduler] /api/themes returned 502'));
+    expect(line?.stack).toBeNull();
+  });
+
+  it('reports a cron route call that throws (timeout, connection refused)', async () => {
+    fetchMock.mockRejectedValue(new Error('fetch failed'));
+
+    await bootAndPoll();
+
+    expect(reported('cron.scheduler')).toEqual([expect.objectContaining({ message: 'fetch failed', count: 2 })]);
+  });
+
+  it('reports a cron_runs read failure with the job it was evaluating', async () => {
+    cronRunRecordMock.mockImplementation(async (job: string) => {
+      if (job === 'themes') throw new Error('connection terminated');
+      return PURGE_INERT;
+    });
+
+    await bootAndPoll();
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({ context: 'cron.scheduler', message: 'connection terminated', meta: { job: 'themes' } }),
+    ]);
+  });
+
+  it('reports an exhausted week once per boot, not on every poll', async () => {
+    stubWeeklyRecord({ status: 'failed', ranAt: new Date('2026-03-16T06:05:00Z'), attempts: 5 });
+
+    await bootAndPoll();
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 3);
+
+    expect(getErrorReportSnapshot().recent.map((r) => [r.message, r.meta])).toEqual([
+      [`digest for week ${WEEK_OF} has failed 5 times — giving up until it's manually retried.`, { job: 'digest', weekOf: WEEK_OF }],
+      [`themes for week ${WEEK_OF} has failed 5 times — giving up until it's manually retried.`, { job: 'themes', weekOf: WEEK_OF }],
+    ]);
+  });
+
+  describe('a cron route that reported its own failure', () => {
+    // Between 06:00 and 07:00 only themes is due (purge is inert), so the one
+    // call the poll makes reaches the real /api/themes handler.
+    beforeEach(() => {
+      vi.setSystemTime(new Date('2026-03-16T06:30:00Z'));
+      fetchMock.mockImplementation(async (url: string, init: RequestInit) => {
+        if (!String(url).endsWith('/api/themes')) throw new Error(`unexpected call to ${String(url)}`);
+        return runThemesRoute(new Request(url, { method: init.method, headers: init.headers }));
+      });
+    });
+
+    it('is reported once, by the route, when the route catches the failure itself', async () => {
+      dbQueryMock.mockImplementation(async (sql: string) => {
+        if (sql.includes('INSERT INTO cron_runs')) return [{ job: 'themes' }];
+        throw new Error('connection terminated');
+      });
+      dbExecuteMock.mockResolvedValue(1);
+
+      await bootAndPoll();
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(getErrorReportSnapshot().totalReported).toBe(1);
+      expect(getErrorReportSnapshot().recent).toEqual([
+        expect.objectContaining({ context: 'cron.themes', message: 'connection terminated' }),
+      ]);
+      // Still a failed poll as far as /api/admin/status is concerned.
+      expect(getSchedulerState().lastPollError).toBe('/api/themes returned 500');
+    });
+
+    it('is reported once, by withErrorReporting, when a throw escapes the route', async () => {
+      dbQueryMock.mockRejectedValue(new Error('connection terminated'));
+
+      await bootAndPoll();
+
+      expect(getErrorReportSnapshot().totalReported).toBe(1);
+      expect(getErrorReportSnapshot().recent).toEqual([
+        expect.objectContaining({ context: 'cron.themes', meta: { step: 'unhandled', method: 'POST' } }),
+      ]);
+      expect(getSchedulerState().lastPollError).toBe('/api/themes returned 500');
+    });
+  });
+
+  it.each([404, 502, 503, 504])(
+    'still reports a %i even if it carries the reported mark: only a route 500 is trusted with it',
+    async (status) => {
+      fetchMock.mockImplementation(
+        async () => new Response('upstream trouble', { status, headers: { 'x-churnlens-reported': '1' } }),
+      );
+
+      await bootAndPoll();
+
+      expect(reported('cron.scheduler').map((f) => f.message).sort()).toEqual([
+        `/api/digest returned ${status}: upstream trouble`,
+        `/api/themes returned ${status}: upstream trouble`,
+      ]);
+    },
+  );
+
+  it('still reports a 500 without the mark (a failure no route reported)', async () => {
+    fetchMock.mockImplementation(async () => new Response('Internal Server Error', { status: 500 }));
+
+    await bootAndPoll();
+
+    expect(reported('cron.scheduler')).toHaveLength(2);
+  });
+
+  it('still reports a 2xx whose body is not JSON', async () => {
+    fetchMock.mockImplementation(async () => new Response('<html>maintenance</html>', { status: 200 }));
+
+    await bootAndPoll();
+
+    expect(reported('cron.scheduler')).toHaveLength(1);
+  });
+
+  it('reports nothing on a clean poll', async () => {
+    await bootAndPoll();
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
   });
 });

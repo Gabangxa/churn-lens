@@ -30,12 +30,15 @@ vi.mock('@/lib/survey-email', () => ({
   sendSurveyEmail: (...args: unknown[]) => sendSurveyEmailMock(...args),
 }));
 
-const loadSurveyConfigMock = vi.fn();
+const loadSurveyPresentationMock = vi.fn();
 vi.mock('@/lib/survey-config', () => ({
-  loadSurveyConfig: (...args: unknown[]) => loadSurveyConfigMock(...args),
+  loadSurveyPresentation: (...args: unknown[]) => loadSurveyPresentationMock(...args),
 }));
 
 import { POST } from '../route';
+// Real: these tests assert on what the route reported. ALERT_EMAIL is pinned
+// empty for every suite (vitest.config.ts), so nothing is emailed.
+import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 
 const ORG_ID = 'org-abc';
 const APP_URL = 'https://app.churnlens.com';
@@ -53,7 +56,9 @@ beforeEach(() => {
   signSurveyTokenMock.mockReset().mockReturnValue('signed.survey.token');
   checkRateLimitMock.mockReset().mockReturnValue({ allowed: true, retryAfterSec: 0 });
   sendSurveyEmailMock.mockReset().mockResolvedValue(undefined);
-  loadSurveyConfigMock.mockReset().mockResolvedValue({ displayName: null, logoUrl: null, customReasons: [] });
+  loadSurveyPresentationMock
+    .mockReset()
+    .mockResolvedValue({ displayName: null, logoUrl: null, customReasons: [], businessName: null });
   process.env.NEXT_PUBLIC_APP_URL = APP_URL;
 });
 
@@ -101,5 +106,87 @@ describe('POST /api/survey/test — guards', () => {
     expect(sendSurveyEmailMock).toHaveBeenCalledWith(
       expect.objectContaining({ to: 'founder@example.com', isTest: true }),
     );
+  });
+
+  it('names the business exactly as a real survey would, Stripe-name fallback included', async () => {
+    // A test send that named "the founder" while real customers got "Acme"
+    // would show the founder something their customers never see.
+    loadSurveyPresentationMock.mockResolvedValue({
+      displayName: null,
+      logoUrl: null,
+      customReasons: [],
+      businessName: 'Acme From Stripe',
+    });
+
+    await POST(testSurveyRequest());
+
+    expect(loadSurveyPresentationMock).toHaveBeenCalledWith(ORG_ID);
+    expect(sendSurveyEmailMock).toHaveBeenCalledWith(
+      expect.objectContaining({ displayName: 'Acme From Stripe' }),
+    );
+  });
+
+  it('records the name the email carried, with the sent stamp, for the survey page to repeat', async () => {
+    loadSurveyPresentationMock.mockResolvedValue({
+      displayName: null,
+      logoUrl: null,
+      customReasons: [],
+      businessName: 'Acme From Stripe',
+    });
+
+    await POST(testSurveyRequest());
+
+    const stamp = executeMock.mock.calls.find(([sql]) => /survey_email_sent_at = now\(\)/.test(sql as string));
+    expect(stamp?.[0]).toMatch(/business_name = \$3/);
+    expect(stamp?.[1]).toEqual([expect.stringMatching(/^test_/), ORG_ID, 'Acme From Stripe']);
+  });
+});
+
+describe('POST /api/survey/test — error reporting', () => {
+  beforeEach(() => {
+    resetErrorReports();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("reports a failed test send with the org id, never the founder's address", async () => {
+    // The same send path real cancellations take, so a failure here is an
+    // early warning for theirs. Resend errors can quote the recipient.
+    sendSurveyEmailMock.mockRejectedValue(new Error('Invalid to field: founder@example.com'));
+
+    const res = await POST(testSurveyRequest());
+
+    expect(res.status).toBe(500);
+    const { recent } = getErrorReportSnapshot();
+    expect(recent).toEqual([
+      expect.objectContaining({ context: 'survey.test', meta: { orgId: ORG_ID } }),
+    ]);
+    expect(JSON.stringify(recent)).not.toContain('founder@example.com');
+  });
+
+  it('reports a sent test whose survey_email_sent_at stamp failed, and still answers success', async () => {
+    executeMock.mockResolvedValueOnce(1); // INSERT
+    executeMock.mockRejectedValueOnce(new Error('connection reset')); // stamp
+
+    const res = await POST(testSurveyRequest());
+
+    expect(res.status).toBe(200);
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'survey.test',
+        meta: expect.objectContaining({ orgId: ORG_ID, step: 'mark_sent' }),
+      }),
+    ]);
+  });
+
+  it('does not report a rate-limited test send', async () => {
+    checkRateLimitMock.mockReturnValue({ allowed: false, retryAfterSec: 60 });
+
+    await POST(testSurveyRequest());
+
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
   });
 });

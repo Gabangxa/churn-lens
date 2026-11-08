@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
-import { E2E_BASE_URL, TEST_DATABASE_URL } from '../env';
+import { TEST_DATABASE_URL } from '../env';
 
 /**
  * Direct database access for the e2e specs: seed the preconditions a flow
@@ -68,26 +68,46 @@ export interface SeedOrgOptions {
   email: string;
   name?: string;
   /**
-   * Give the org a Stripe connection. The value is an opaque non-null string,
-   * NOT real ciphertext: nothing in the flows under test decrypts it (only
-   * disconnectStripe does, and only when stripe_webhook_id is also set, which
-   * this helper never sets). Everything else — the verify route's
-   * onboarding-vs-dashboard decision, /api/settings/status, the dashboard's
-   * status line, the purge job's abandoned-signup rule — tests the column for
-   * NULL. Keeping it opaque also means no test can accidentally reach Stripe.
+   * Store a Stripe key. The value is an opaque non-null string, NOT real
+   * ciphertext: nothing in the flows under test decrypts it (only
+   * disconnectStripe does, and only when stripe_webhook_id is also set — see
+   * withStripeWebhook). Everything else — /api/settings/status, the
+   * dashboard's status line, the purge job's abandoned-signup rule — tests the
+   * column for NULL. Keeping it opaque also means no test can accidentally
+   * reach Stripe.
+   *
+   * On its own this is a HALF-connected org (what a connect that saved the
+   * key and then failed to register the webhook used to leave behind), which
+   * sign-in sends to /onboarding whatever redirect_to says and the dashboard
+   * calls "setup incomplete". Add withStripeWebhook for a connected org.
    */
   withStripeKey?: boolean;
+  /**
+   * Also record a registered webhook endpoint (stripe_webhook_id and its
+   * signing secret, opaque placeholders like the key), completing the
+   * connection: sign-in then honours redirect_to and defaults to /dashboard,
+   * and the dashboard reports surveys as sending. Requires withStripeKey. Do
+   * not use it in a flow that disconnects Stripe (account deletion, Settings
+   * disconnect): disconnectStripe would try to decrypt the placeholder key to
+   * delete the endpoint, fail, and report an error.
+   */
+  withStripeWebhook?: boolean;
   createdAt?: Date;
   deletionRequestedAt?: Date;
   lastLoginAt?: Date;
 }
 
 export async function seedOrg(options: SeedOrgOptions): Promise<{ orgId: string }> {
+  if (options.withStripeWebhook && !options.withStripeKey) {
+    // No real org is in that state: connect never stores one without the other.
+    throw new Error('seedOrg: withStripeWebhook requires withStripeKey');
+  }
   const orgId = randomUUID();
   await query(
     `INSERT INTO organizations
-       (id, name, created_at, last_login_at, deletion_requested_at, stripe_api_key_enc)
-     VALUES ($1, $2, COALESCE($3::timestamptz, now()), $4, $5, $6)`,
+       (id, name, created_at, last_login_at, deletion_requested_at, stripe_api_key_enc,
+        stripe_webhook_id, stripe_webhook_secret_enc)
+     VALUES ($1, $2, COALESCE($3::timestamptz, now()), $4, $5, $6, $7, $8)`,
     [
       orgId,
       options.name ?? 'E2E Organization',
@@ -95,6 +115,8 @@ export async function seedOrg(options: SeedOrgOptions): Promise<{ orgId: string 
       options.lastLoginAt ?? null,
       options.deletionRequestedAt ?? null,
       options.withStripeKey ? 'e2e-placeholder-not-real-ciphertext' : null,
+      options.withStripeWebhook ? 'we_e2e_placeholder_not_registered' : null,
+      options.withStripeWebhook ? 'e2e-placeholder-not-real-ciphertext' : null,
     ],
   );
   await query(
@@ -120,11 +142,20 @@ export interface SeedLoginTokenOptions {
   expiresInMs?: number;
 }
 
+/**
+ * Write a magic-link token the way /api/auth/request does (hash only) and
+ * return the raw token plus the path of the link the email would carry.
+ *
+ * A path, not an absolute URL, so it resolves against the run's configured
+ * baseURL in page.goto — the same server everything else in the run talks to.
+ * Opening it lands on the /login/confirm page; nothing is signed in until
+ * that page's "Sign in" is pressed (see confirmSignIn in ./session).
+ */
 export async function seedLoginToken(
   orgId: string,
   email: string,
   options: SeedLoginTokenOptions = {},
-): Promise<{ rawToken: string; verifyUrl: string }> {
+): Promise<{ rawToken: string; verifyPath: string }> {
   // 32 random bytes, base64url — the shape generateLoginToken() emits.
   const rawToken = randomBytes(32).toString('base64url');
   const expiresAt = new Date(Date.now() + (options.expiresInMs ?? 15 * 60 * 1000));
@@ -141,7 +172,59 @@ export async function seedLoginToken(
   );
   return {
     rawToken,
-    verifyUrl: `${E2E_BASE_URL}/api/auth/verify?token=${encodeURIComponent(rawToken)}`,
+    verifyPath: `/api/auth/verify?token=${encodeURIComponent(rawToken)}`,
+  };
+}
+
+/** login_tokens.used_at for a raw token (null while unspent); throws if no such token was seeded. */
+export async function loginTokenUsedAt(rawToken: string): Promise<string | null> {
+  const row = await queryOne<{ used_at: string | null }>(
+    'SELECT used_at FROM login_tokens WHERE token_hash = $1',
+    [hashLoginToken(rawToken)],
+  );
+  if (!row) throw new Error('no login_tokens row for that token');
+  return row.used_at;
+}
+
+/** Columns a spec can make the database refuse to write; see refuseOrgColumnWrites. */
+export type RefusableOrgColumn =
+  /** Written by revokeAllSessions: logout, account deletion. */
+  | 'sessions_valid_after'
+  /** Cleared by disconnectStripe: Settings disconnect, account deletion. */
+  | 'stripe_api_key_enc';
+
+/**
+ * Make the database refuse every UPDATE that writes `column` on one org's
+ * row, as an outage or a lock timeout would, for specs about what the founder
+ * is told when a flow fails half-way. A real trigger on the real table, so the
+ * server's own error handling runs unmodified — nothing in the app is stubbed.
+ *
+ * Returns the undo; call it in a `finally`. The trigger only matches this one
+ * org id, so one left behind by a crashed run cannot affect any other spec.
+ */
+export async function refuseOrgColumnWrites(
+  orgId: string,
+  column: RefusableOrgColumn,
+): Promise<() => Promise<void>> {
+  // DDL takes no bind parameters, so the id is spliced in: check it is the
+  // uuid seedOrg generated and nothing else.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(orgId)) {
+    throw new Error(`refuseOrgColumnWrites: ${JSON.stringify(orgId)} is not an org id`);
+  }
+  const trigger = `e2e_refuse_${randomBytes(6).toString('hex')}`;
+  await query(`
+    CREATE OR REPLACE FUNCTION e2e_refuse_org_write() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      RAISE EXCEPTION 'e2e: write to organizations.% refused on purpose', TG_ARGV[0];
+    END $$
+  `);
+  await query(`
+    CREATE TRIGGER ${trigger} BEFORE UPDATE OF ${column} ON organizations
+    FOR EACH ROW WHEN (OLD.id = '${orgId}')
+    EXECUTE FUNCTION e2e_refuse_org_write('${column}')
+  `);
+  return async () => {
+    await query(`DROP TRIGGER IF EXISTS ${trigger} ON organizations`);
   };
 }
 

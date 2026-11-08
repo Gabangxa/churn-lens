@@ -16,7 +16,9 @@ import {
   type PollAction,
 } from '@/lib/cron';
 import { getSchedulerState, type SchedulerState } from '@/lib/scheduler-state';
+import { getErrorReportSnapshot, type ErrorReportSnapshot } from '@/lib/report-error';
 import { legalFooterReady } from '@/lib/legal';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 /**
  * Read-only operational snapshot for the founder's local monitor
@@ -82,6 +84,13 @@ export interface StatusResponse {
   };
   db: { ok: boolean; latencyMs: number | null; error?: string };
   scheduler: SchedulerState;
+  /**
+   * What reportError has recorded in THIS process since it started (in-memory,
+   * so a restart or redeploy empties it), and whether ALERT_EMAIL is set.
+   * Read from memory, not the database, so it is still there during a DB
+   * outage — exactly when it is most needed. Already redacted; ids only.
+   */
+  reportedErrors: ErrorReportSnapshot;
   pipeline: PipelineSection | null;
   activity: ActivitySection | null;
   legal: { footerReady: boolean };
@@ -252,7 +261,7 @@ async function loadActivity(now: Date, weekOfStr: string): Promise<ActivitySecti
   };
 }
 
-export async function GET(req: Request) {
+async function operationalStatus(req: Request) {
   if (!verifyCronSecret(req.headers.get('authorization'))) {
     return json({ error: 'Unauthorized' }, 401);
   }
@@ -287,9 +296,14 @@ export async function GET(req: Request) {
     },
     db,
     scheduler: getSchedulerState(),
+    reportedErrors: getErrorReportSnapshot(),
     pipeline,
     activity,
     legal: { footerReady: legalFooterReady() },
     errors,
   });
 }
+
+// Wrapped like every route, though everything above already degrades rather
+// than throws: whatever still escapes is reported instead of a bare 500.
+export const GET = withErrorReporting('admin.status', operationalStatus);

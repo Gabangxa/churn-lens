@@ -11,17 +11,24 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 const clientQueryMock = vi.fn();
 const releaseMock = vi.fn();
 const poolQueryMock = vi.fn();
+// The listeners db.ts attaches to the pool, so a test can fire a pool event.
+const poolListeners = vi.hoisted(() => new Map<string, (err: Error) => void>());
 
 vi.mock('pg', () => {
   class Pool {
     query = (...args: unknown[]) => poolQueryMock(...args);
     connect = async () => ({ query: clientQueryMock, release: releaseMock });
-    on = () => undefined;
+    on = (event: string, listener: (err: Error) => void) => {
+      poolListeners.set(event, listener);
+    };
   }
   return { Pool, default: { Pool } };
 });
 
 import { withTransaction, query, queryOne, execute } from '../db';
+// Real: the error-reporting tests assert on what was reported. ALERT_EMAIL is
+// pinned empty for every suite (vitest.config.ts).
+import { getErrorReportSnapshot, resetErrorReports } from '../report-error';
 
 const TEST_DB_URL = 'postgres://user:pw@localhost:5432/churnlens_test';
 
@@ -162,5 +169,53 @@ describe('configuration', () => {
     const fresh = await import('../db');
 
     await expect(fresh.query('SELECT 1')).rejects.toThrow('DATABASE_URL is not set.');
+  });
+});
+
+describe('error reporting', () => {
+  beforeEach(() => {
+    resetErrorReports();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('reports an idle connection dying under the pool (database restart, failover)', async () => {
+    await query('SELECT 1'); // the pool, and its listener, exist from the first query
+
+    poolListeners.get('error')!(new Error('terminating connection due to administrator command'));
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({ context: 'db.pool', message: 'terminating connection due to administrator command' }),
+    ]);
+  });
+
+  it('reports a failed ROLLBACK, while the caller still gets the original error', async () => {
+    clientQueryMock.mockImplementation(async (sql: string) => {
+      if (sql === 'ROLLBACK') throw new Error('connection already dead');
+      return { rows: [], rowCount: 0 };
+    });
+
+    await expect(
+      withTransaction(async () => {
+        throw new Error('the real failure');
+      }),
+    ).rejects.toThrow('the real failure');
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({ context: 'db.transaction', message: 'connection already dead', meta: { step: 'rollback' } }),
+    ]);
+  });
+
+  it('reports nothing for a transaction that simply rolls back its own failure', async () => {
+    await expect(
+      withTransaction(async () => {
+        throw new Error('duplicate key');
+      }),
+    ).rejects.toThrow('duplicate key');
+
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
   });
 });

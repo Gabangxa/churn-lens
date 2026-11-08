@@ -52,6 +52,9 @@ vi.mock('@/lib/week', () => ({
 }));
 
 import { POST } from '../route';
+// Real: these tests assert on what the route reported. ALERT_EMAIL is pinned
+// empty for every suite (vitest.config.ts), so nothing is emailed.
+import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 
 function themesRequest() {
   return new Request('http://localhost/api/themes', {
@@ -204,6 +207,8 @@ describe('POST /api/themes — run-level failures', () => {
 
     expect(res.status).toBe(500);
     expect(body).toEqual({ error: 'connection terminated', weekOf: WEEK_OF });
+    // Reported here, so marked for the scheduler not to report it again.
+    expect(res.headers.get('x-churnlens-reported')).toBe('1');
     // Without this the row stays 'running' and the week is unretryable until
     // the 2h stale window elapses.
     expect(finishCronRunMock).toHaveBeenCalledWith('themes', WEEK_OF, {
@@ -468,5 +473,72 @@ describe('POST /api/themes — theme rows', () => {
         (sql as string).includes('UPDATE survey_responses SET theme_tags'),
       ),
     ).toHaveLength(0);
+  });
+});
+
+describe('POST /api/themes — error reporting', () => {
+  beforeEach(() => {
+    resetErrorReports();
+  });
+
+  it('reports an OpenAI clustering failure with the org and week, and never the survey text', async () => {
+    clusterResponsesMock.mockRejectedValueOnce(new Error('429 Rate limit reached for gpt-4o-mini'));
+
+    await POST(themesRequest());
+
+    const { recent } = getErrorReportSnapshot();
+    expect(recent).toEqual([
+      expect.objectContaining({
+        context: 'cron.themes.openai',
+        message: '429 Rate limit reached for gpt-4o-mini',
+        meta: { orgId: 'org-1', weekOf: WEEK_OF },
+      }),
+    ]);
+    expect(JSON.stringify(recent)).not.toContain('pricey');
+  });
+
+  it("reports one org's unexpected failure with its id, while the run carries on", async () => {
+    breakQuery((sql) => (sql.includes('SELECT mrr_lost') ? new Error('connection terminated') : null));
+
+    const res = await POST(themesRequest());
+
+    expect(res.status).toBe(200);
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({ context: 'cron.themes', meta: { orgId: 'org-1', weekOf: WEEK_OF } }),
+    ]);
+  });
+
+  it('reports a run-level failure with the week', async () => {
+    breakQuery((sql) => (sql.includes('FROM organizations') ? new Error('connection terminated') : null));
+
+    await POST(themesRequest());
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({ context: 'cron.themes', message: 'connection terminated', meta: { weekOf: WEEK_OF } }),
+    ]);
+  });
+
+  it('reports nothing on a clean run', async () => {
+    await POST(themesRequest());
+
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+  });
+
+  it.each([
+    ['claiming the run', () => claimCronRunMock.mockRejectedValueOnce(new Error('connection terminated'))],
+    ['recording a finished run', () => finishCronRunMock.mockRejectedValueOnce(new Error('connection terminated'))],
+  ])('reports a throw outside the run\'s own catch (%s) instead of leaving Next to log a bare 500', async (_label, breakIt) => {
+    breakIt();
+
+    const res = await POST(themesRequest());
+
+    expect(res.status).toBe(500);
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'cron.themes',
+        message: 'connection terminated',
+        meta: { step: 'unhandled', method: 'POST' },
+      }),
+    ]);
   });
 });

@@ -1,5 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { NextRequest, NextResponse } from 'next/server';
+import { DatabaseError } from 'pg';
 
 const requireOrgIdMock = vi.fn();
 const assertSameOriginMock = vi.fn();
@@ -16,6 +17,9 @@ vi.mock('@/lib/db', () => ({
 }));
 
 import { GET, PUT } from '../route';
+// Real: these tests assert on what the route reported. ALERT_EMAIL is pinned
+// empty for every suite (vitest.config.ts), so nothing is emailed.
+import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 
 const ORG_ID = 'org-abc';
 
@@ -201,5 +205,79 @@ describe('PUT /api/settings/survey-config', () => {
     const body = await res.json();
     expect(body.error).toMatch(/Failed to save/i);
     consoleErrorSpy.mockRestore();
+  });
+});
+
+describe('/api/settings/survey-config — error reporting', () => {
+  beforeEach(() => {
+    resetErrorReports();
+    authOk();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('reports a failed save with the org id — validation passed, so it is the database', async () => {
+    executeMock.mockRejectedValueOnce(new Error('connection reset'));
+
+    await PUT(putRequest({ displayName: 'Acme' }));
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({ context: 'settings.survey-config', message: 'connection reset', meta: { orgId: ORG_ID } }),
+    ]);
+  });
+
+  it('answers 400 and warns, without alerting, when Postgres refuses a value validation let through', async () => {
+    // survey_config is jsonb, which cannot hold U+0000: a NUL that survives
+    // validation fails the UPDATE with 22P05 (with-error-reporting.db.test.ts
+    // pins that against a real engine). The founder's own input, not an outage.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const refused = new DatabaseError('unsupported Unicode escape sequence', 0, 'error');
+    refused.code = '22P05';
+    executeMock.mockRejectedValueOnce(refused);
+
+    const res = await PUT(putRequest({ displayName: 'Acme' }));
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'Your survey settings contain characters that cannot be saved.' });
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+    expect(warnSpy.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toEqual([
+      expect.objectContaining({ level: 'warn', context: 'settings.survey-config', code: '22P05', meta: { orgId: ORG_ID } }),
+    ]);
+  });
+
+  it('does not report a save the founder got wrong — that is a 400 with a field', async () => {
+    const res = await PUT(putRequest({ displayName: 'x'.repeat(500) }));
+
+    expect(res.status).toBe(400);
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+  });
+
+  it('reports a failing session check and answers 500, rather than leaving Next to log it', async () => {
+    requireOrgIdMock.mockRejectedValue(new Error('connection terminated'));
+
+    const res = await GET(getRequest());
+
+    expect(res.status).toBe(500);
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'settings.survey-config',
+        message: 'connection terminated',
+        meta: { step: 'unhandled', method: 'GET' },
+      }),
+    ]);
+  });
+
+  it('reports a config read that fell back to the defaults, since nothing else would show it', async () => {
+    queryOneMock.mockRejectedValueOnce(new Error('connection terminated'));
+
+    const res = await GET(getRequest());
+
+    expect(res.status).toBe(200);
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({ context: 'survey-config.load', message: 'connection terminated', meta: { orgId: ORG_ID } }),
+    ]);
   });
 });

@@ -21,6 +21,39 @@ type ReasonRow = { id: number; value: string };
 
 type SurveyConfigField = 'displayName' | 'logoUrl' | 'customReasons';
 
+/**
+ * What POST /api/settings/account/delete reports it could not do. Each is
+ * non-fatal there (the deletion request is committed first), so the response
+ * is still a 200 — and each leaves something live that the founder can end
+ * by hand, which is what these say.
+ */
+function deletionFollowUpsFor(data: { sessions?: unknown; stripe?: unknown }): string[] {
+  const followUps: string[] = [];
+  if (data.sessions === 'revoke_failed') {
+    // This browser's cookie was cleared regardless; the org-wide revocation
+    // is what failed. Logging out runs that revocation again.
+    followUps.push(
+      'This browser is signed out, but your other devices may still be signed in. Sign in again and log out to end them.',
+    );
+  }
+  if (data.stripe === 'disconnect_failed') {
+    // No survey goes out either way (the Stripe webhook skips an org with a
+    // deletion request), but the stored key and the registered endpoint stay
+    // until the purge job disconnects again at erasure.
+    followUps.push(
+      'We could not disconnect Stripe. No more surveys will be sent, but ChurnLens still holds your Stripe key and its webhook is still registered on your Stripe account until your data is erased. To cut it off now, delete the ChurnLens endpoint under Developers → Webhooks in your Stripe Dashboard and roll the restricted key you gave us.',
+    );
+  }
+  return followUps;
+}
+
+/** The route answers with the purge date, which is the request time plus the grace window. */
+function deletionRequestedAtFromPurgeAfter(purgeAfter: string): string {
+  return new Date(
+    new Date(purgeAfter).getTime() - LEGAL.deletionWindowDays * 24 * 60 * 60 * 1000,
+  ).toISOString();
+}
+
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString(undefined, {
     year: 'numeric',
@@ -32,6 +65,12 @@ function formatDate(iso: string): string {
 export default function SettingsPage() {
   const router = useRouter();
   const [connected, setConnected] = useState<boolean | null>(null);
+  // A key with no webhook endpoint: stored, but Stripe has nowhere to send
+  // cancellations (see /api/settings/status).
+  const [setupIncomplete, setSetupIncomplete] = useState(false);
+  // The status could not be read. Shown instead of "Not connected", which
+  // would tell a connected founder to connect again.
+  const [statusError, setStatusError] = useState<string | null>(null);
   const [disconnecting, setDisconnecting] = useState(false);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -39,6 +78,10 @@ export default function SettingsPage() {
   const [confirmDeleteAccount, setConfirmDeleteAccount] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
   const [deleteAccountError, setDeleteAccountError] = useState<string | null>(null);
+  // What account deletion could not finish, for the founder to finish by
+  // hand. Stays until they leave the page: each one describes something that
+  // is still true (a device still signed in, a webhook still registered).
+  const [deletionFollowUps, setDeletionFollowUps] = useState<string[]>([]);
   const [sendingTest, setSendingTest] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [billingNotice, setBillingNotice] = useState<
@@ -89,11 +132,18 @@ export default function SettingsPage() {
           router.push('/login?next=/settings');
           return;
         }
+        if (!res.ok) {
+          setStatusError('Could not load your Stripe connection status. Reload the page to try again.');
+          return;
+        }
         const data = await res.json();
         setConnected(data.connected ?? false);
+        setSetupIncomplete(data.setupIncomplete ?? false);
         setDeletionRequestedAt(data.deletionRequestedAt ?? null);
       } catch {
-        setConnected(false);
+        // The request itself failed (offline, a dropped connection): as
+        // unknown as a 500, and no more a reason to say "Not connected".
+        setStatusError('Could not load your Stripe connection status. Reload the page to try again.');
       }
     }
     fetchStatus();
@@ -257,25 +307,34 @@ export default function SettingsPage() {
         setDeleteAccountError(data.error || 'Failed to delete account.');
         return;
       }
+      const followUps = deletionFollowUpsFor(data);
       if (data.billing === 'revoke_failed') {
-        // The account is already deleted server-side (Stripe disconnected,
-        // deletion_requested_at set, session cookie cleared) — but Polar
-        // wasn't told, so it will keep billing a subscription we failed to
-        // revoke. Stay on this page rather than navigating away, so the
-        // founder has a chance to click through to Polar's portal and cancel
-        // it themselves before this tab becomes useless (its session is
-        // already gone either way).
+        // Deletion is requested (deletion_requested_at set, Stripe
+        // disconnected unless followUps says otherwise) — but Polar wasn't
+        // told, so it will keep billing a subscription we failed to revoke.
+        // For the portal link below to work, the route deliberately left this
+        // browser's session alive, and so did not sign the org out anywhere
+        // else either: the founder has to hear both.
         setBillingNotice({
           tone: 'warn',
           message:
-            'Your account was deleted, but we could not automatically cancel your Polar subscription. Cancel it from the billing portal to stop future charges.',
+            'Your account was deleted, but we could not automatically cancel your Polar subscription. Cancel it from the billing portal to stop future charges. You are still signed in here and on your other devices so you can do that; log out afterwards to sign out everywhere.',
           showPortalLink: true,
         });
+      }
+      if (data.billing === 'revoke_failed' || followUps.length > 0) {
+        // Something is left for the founder to do by hand, so stay on this
+        // page rather than navigating away as if deletion had gone cleanly.
+        // The page switches to its "deletion requested" state (as a reload
+        // would show it), which also disables a second, pointless request.
+        setDeletionFollowUps(followUps);
+        setDeletionRequestedAt(deletionRequestedAtFromPurgeAfter(data.purgeAfter));
+        setConfirmDeleteAccount(false);
         return;
       }
-      // Deletion is requested and the session cookie is already cleared server
-      // side — send the browser home rather than to a settings page for an
-      // account that (from this browser's perspective) is no longer signed in.
+      // Deletion is requested, every device is signed out and this browser's
+      // cookie is already cleared — send it home rather than to a settings
+      // page for an account it is no longer signed in to.
       window.location.assign('/');
     } catch {
       setDeleteAccountError('Network error. Please try again.');
@@ -568,7 +627,14 @@ export default function SettingsPage() {
             ChurnLens uses your restricted API key to listen for cancellation events.
           </p>
 
-          {connected === null ? (
+          {statusError ? (
+            <p
+              role="alert"
+              className="rounded-2xl border-2 border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-sm font-bold text-rose-700 dark:text-rose-400"
+            >
+              {statusError}
+            </p>
+          ) : connected === null ? (
             <div className="flex items-center gap-2 text-sm font-medium text-muted">
               <div className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-200 dark:border-zinc-700 border-t-teal-600" />
               Loading…
@@ -582,6 +648,16 @@ export default function SettingsPage() {
               <p className="text-sm font-medium text-muted">
                 Your Stripe restricted API key is stored and encrypted with AES-256-GCM.
               </p>
+
+              {setupIncomplete && (
+                <p className="rounded-2xl border-2 border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-sm font-bold text-amber-800 dark:text-amber-300">
+                  Stripe setup is incomplete — cancellations can&apos;t reach ChurnLens yet, so no
+                  surveys will send.{' '}
+                  <Link href="/onboarding" className="underline underline-offset-2 hover:no-underline">
+                    Finish connecting Stripe
+                  </Link>
+                </p>
+              )}
 
               {error && (
                 <p className="rounded-2xl border-2 border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-sm font-bold text-rose-700 dark:text-rose-400">
@@ -694,11 +770,11 @@ export default function SettingsPage() {
                 </>
               )}
               {billingNotice.showPortalLink && (
-                // Account deletion already went through (Stripe disconnected,
-                // session cleared) even though the Polar revoke failed — the
-                // only thing left to do is cancel from Polar's own portal, so
-                // this stays a plain anchor (opens in a new tab) rather than
-                // navigating this page away before the founder can click it.
+                // Account deletion already went through even though the Polar
+                // revoke failed, and the route kept this browser's session so
+                // that this link works — the thing left to do is cancel from
+                // Polar's own portal, so this stays a plain anchor (opens in a
+                // new tab) rather than navigating this page away first.
                 <p className="mt-1.5 font-medium">
                   <a
                     href="/api/billing/portal"
@@ -738,6 +814,17 @@ export default function SettingsPage() {
             <p className="mb-4 rounded-2xl border-2 border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-sm font-bold text-rose-700 dark:text-rose-400">
               {deleteAccountError}
             </p>
+          )}
+
+          {deletionFollowUps.length > 0 && (
+            <div className="mb-4 rounded-2xl border-2 border-amber-400/60 bg-amber-400/10 px-4 py-2.5 text-sm text-amber-800 dark:text-amber-300">
+              <p className="font-bold">Your account was deleted, with something left for you to do:</p>
+              <ul className="mt-1.5 list-disc space-y-1 pl-5 font-medium">
+                {deletionFollowUps.map((followUp) => (
+                  <li key={followUp}>{followUp}</li>
+                ))}
+              </ul>
+            </div>
           )}
 
           <div className="rounded-2xl border-2 border-rose-300 dark:border-rose-500/40 bg-rose-50 dark:bg-rose-500/10 p-4">

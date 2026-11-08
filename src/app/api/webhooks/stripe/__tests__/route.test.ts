@@ -39,7 +39,18 @@ vi.mock('@/lib/survey-email', () => ({
 }));
 
 vi.mock('@/lib/survey-config', () => ({
-  loadSurveyConfig: async () => ({ displayName: null, logoUrl: null, customReasons: [] }),
+  loadSurveyPresentation: async () => ({
+    displayName: null,
+    logoUrl: null,
+    customReasons: [],
+    businessName: null,
+  }),
+}));
+
+// The optional Stripe account-name lookup; route.db.test.ts runs it for real.
+vi.mock('@/lib/stripe-business-name', () => ({
+  fetchStripeBusinessName: async () => null,
+  cacheStripeBusinessName: async () => true,
 }));
 
 const legalFooterReadyMock = vi.fn();
@@ -58,6 +69,10 @@ vi.mock('stripe', () => {
 });
 
 import { POST } from '../[orgId]/route';
+// Real: the error-reporting tests below assert on what the route reported.
+// ALERT_EMAIL is pinned empty for every suite (vitest.config.ts), so nothing
+// is emailed.
+import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────
 
@@ -108,6 +123,8 @@ function orgRow(overrides: Record<string, unknown> = {}) {
     plan: 'growth',
     stripe_api_key_enc: 'enc-api-key',
     stripe_webhook_secret_enc: 'enc-webhook-secret',
+    deletion_requested_at: null,
+    stripe_key_invalid_at: null,
     ...overrides,
   };
 }
@@ -193,6 +210,30 @@ afterEach(() => {
 // monthlyCentsForItem is module-local (Next 14 rejects extra route.ts exports),
 // so the arithmetic is exercised through POST and read off the INSERT's
 // mrr_lost parameter — which is the value customers actually see.
+
+describe('a body that never arrives', () => {
+  it('answers 400 and reports nothing when the sender hangs up mid-body', async () => {
+    // What undici's body read throws when the client aborts. Escaping the
+    // handler, it would reach withErrorReporting and alert the operator.
+    const aborted = new ReadableStream({
+      start(controller) {
+        controller.error(new Error('aborted'));
+      },
+    });
+    const req = new NextRequest(`http://localhost/api/webhooks/stripe/${ORG_ID}`, {
+      method: 'POST',
+      headers: { 'stripe-signature': 'sig_test' },
+      body: aborted,
+      duplex: 'half',
+    } as ConstructorParameters<typeof NextRequest>[1]);
+
+    const res = await POST(req, { params: { orgId: ORG_ID } });
+
+    expect(res.status).toBe(400);
+    expect(queryOneMock).not.toHaveBeenCalled();
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+  });
+});
 
 describe('mrr_lost normalization', () => {
   it('records a $50/month plan as 50', async () => {
@@ -297,7 +338,8 @@ describe('first delivery of a cancellation', () => {
     const [sql, params] = executeMock.mock.calls[1];
     expect(sql).toMatch(/UPDATE survey_responses/);
     expect(sql).toMatch(/survey_email_sent_at\s*=\s*now\(\)/);
-    expect(params).toEqual([SUB_ID, ORG_ID]);
+    // Plus the name the email carried (none here), for the survey page.
+    expect(params).toEqual([SUB_ID, ORG_ID, null]);
   });
 
   it('claims the send in the INSERT, before the email goes out', async () => {
@@ -666,6 +708,20 @@ describe('pre-send guards', () => {
     expect(executeMock).not.toHaveBeenCalled();
   });
 
+  it('skips involuntary churn without retrieving the customer or recording anything', async () => {
+    // route.db.test.ts covers this end to end; this keeps it pinned without a DB.
+    constructEventMock.mockReturnValue(
+      deletedEvent({ cancellationDetails: { reason: 'payment_failed', feedback: null, comment: null } }),
+    );
+
+    const res = await callPost();
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ received: true, skipped: 'involuntary_churn' });
+    expect(customersRetrieveMock).not.toHaveBeenCalled();
+    expect(executeMock).not.toHaveBeenCalled();
+  });
+
   it('skips a customer who previously opted out', async () => {
     queryCountMock.mockReset();
     queryCountMock.mockResolvedValue(1); // unsubscribes hit
@@ -674,9 +730,13 @@ describe('pre-send guards', () => {
     expect(sendSurveyEmailMock).not.toHaveBeenCalled();
   });
 
-  it('skips once a free org has hit its monthly cap', async () => {
+  it('skips a new subscription once a free org has hit its monthly cap', async () => {
+    // Redeliveries of an already-recorded subscription are not capped; that,
+    // and the cap boundary itself, are covered against real rows in
+    // route.db.test.ts.
     queryOneMock.mockReset();
-    queryOneMock.mockResolvedValue(orgRow({ plan: 'free' }));
+    queryOneMock.mockResolvedValueOnce(orgRow({ plan: 'free' }));
+    queryOneMock.mockResolvedValueOnce(null); // no survey_responses row for this subscription yet
     queryCountMock.mockReset();
     queryCountMock.mockResolvedValueOnce(10); // free-tier count
     const res = await callPost();
@@ -699,25 +759,37 @@ describe('pre-send guards', () => {
     expect(executeMock).not.toHaveBeenCalled();
   });
 
-  it('skips when the legal footer is unfilled, before the signature is even verified', async () => {
+  it('skips when the legal footer is unfilled, right after the signature is verified', async () => {
     legalFooterReadyMock.mockReturnValue(false);
 
     const res = await callPost();
 
     expect(await res.json()).toEqual({ received: true, skipped: 'legal_footer_unfilled' });
-    expect(constructEventMock).not.toHaveBeenCalled();
+    expect(constructEventMock).toHaveBeenCalledTimes(1);
     expect(customersRetrieveMock).not.toHaveBeenCalled();
     expect(sendSurveyEmailMock).not.toHaveBeenCalled();
     expect(executeMock).not.toHaveBeenCalled();
   });
+
+  it('still rejects a bad signature while the legal footer is unfilled', async () => {
+    legalFooterReadyMock.mockReturnValue(false);
+    constructEventMock.mockImplementation(() => {
+      throw new Error('No signatures found matching the expected signature for payload');
+    });
+
+    const res = await callPost();
+
+    expect(res.status).toBe(400);
+  });
 });
 
 // ─── Legal footer guard ────────────────────────────────────────────────────
-// Hoisted next to the deletion_pending check — before signature verification,
-// before the customer is retrieved, and before EITHER survey_responses write
-// path (the portal-feedback insert and the email-claim insert). Nothing is
-// recorded and no attempt is burned; a later, separate test below covers the
-// belt-and-braces catch for the (practically unreachable) case where
+// Right after signature verification (so only a genuine delivery can raise
+// the operator alert it carries) — before the deletion_pending and event-type
+// checks, before the customer is retrieved, and before EITHER survey_responses
+// write path (the portal-feedback insert and the email-claim insert). Nothing
+// is recorded and no attempt is burned; a later, separate test below covers
+// the belt-and-braces catch for the (practically unreachable) case where
 // sendSurveyEmail itself still throws LegalFooterUnfilledError.
 
 describe('when the legal footer is unfilled', () => {
@@ -751,10 +823,9 @@ describe('when the legal footer is unfilled', () => {
 
     const res = await callPost();
 
-    // Never even reaches constructEvent, so the event type is irrelevant —
-    // this pins that the check really is hoisted above it, not merely
-    // agreeing with what invoice.paid would have answered anyway.
-    expect(constructEventMock).not.toHaveBeenCalled();
+    // invoice.paid would otherwise answer a bare { received: true }: this
+    // pins that the check sits above the event-type filter, not merely
+    // agreeing with what that filter would have answered anyway.
     expect(await res.json()).toEqual({ received: true, skipped: 'legal_footer_unfilled' });
   });
 });
@@ -889,5 +960,158 @@ describe('discriminating the legal-footer refusal from a delivery failure', () =
       /UPDATE survey_responses[\s\S]*survey_email_sent_at/.test(String(sql)),
     );
     expect(stampWrites).toHaveLength(0);
+  });
+});
+
+// ─── Error reporting ──────────────────────────────────────────────────────
+// What reaches reportError (and so the operator's inbox), and what stays a log
+// line. Stripe's own failures (a rejected key, a transient lookup error) need
+// the real SDK's error classes and are pinned in route.db.test.ts.
+
+describe('error reporting', () => {
+  beforeEach(() => {
+    resetErrorReports();
+  });
+
+  function reported() {
+    return getErrorReportSnapshot().recent;
+  }
+
+  it('reports nothing for a cancellation that is surveyed normally', async () => {
+    await callPost();
+
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+  });
+
+  it('does not report a bad signature — anyone holding the URL can send one', async () => {
+    constructEventMock.mockImplementation(() => {
+      throw new Error('No signatures found matching the expected signature for payload');
+    });
+
+    const res = await callPost();
+
+    expect(res.status).toBe(400);
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+  });
+
+  it('does not report the legal-footer block for a bad signature — anyone holding the URL can send one', async () => {
+    legalFooterReadyMock.mockReturnValue(false);
+    constructEventMock.mockImplementation(() => {
+      throw new Error('No signatures found matching the expected signature for payload');
+    });
+
+    await callPost();
+
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+  });
+
+  it('reports the pre-claim legal-footer block, naming the file to fix', async () => {
+    legalFooterReadyMock.mockReturnValue(false);
+
+    await callPost();
+
+    expect(reported()).toEqual([
+      expect.objectContaining({
+        context: 'webhook.stripe',
+        meta: { orgId: ORG_ID, step: 'legal_footer' },
+      }),
+    ]);
+    expect(reported()[0].message).toContain('src/lib/legal.ts');
+  });
+
+  it('groups every org blocked by the legal footer under one fingerprint, so it alerts once, not per org', async () => {
+    legalFooterReadyMock.mockReturnValue(false);
+    queryOneMock.mockResolvedValueOnce(orgRow({ id: '11111111-1111-4111-8111-111111111111' }));
+    await callPost();
+    queryOneMock.mockResolvedValueOnce(orgRow({ id: '22222222-2222-4222-8222-222222222222' }));
+    await callPost();
+
+    expect(getErrorReportSnapshot().fingerprints).toEqual([
+      expect.objectContaining({ context: 'webhook.stripe', count: 2 }),
+    ]);
+  });
+
+  it('reports the post-claim legal-footer refusal with the subscription it stranded', async () => {
+    sendSurveyEmailMock.mockRejectedValue(new MockLegalFooterUnfilledError('unfilled'));
+
+    await callPost();
+
+    expect(reported()).toEqual([
+      expect.objectContaining({
+        context: 'webhook.stripe',
+        meta: { orgId: ORG_ID, subscriptionId: SUB_ID, step: 'legal_footer' },
+      }),
+    ]);
+  });
+
+  it("reports a failed send with the org and subscription, never the customer's address", async () => {
+    // Resend validation errors can quote the recipient.
+    sendSurveyEmailMock.mockRejectedValue(new Error(`Invalid to field: ${CUSTOMER_EMAIL}`));
+
+    await callPost();
+
+    expect(reported()).toEqual([
+      expect.objectContaining({
+        context: 'webhook.stripe.send',
+        message: 'Invalid to field: [redacted email]',
+        meta: { orgId: ORG_ID, subscriptionId: SUB_ID },
+      }),
+    ]);
+    expect(JSON.stringify(getErrorReportSnapshot())).not.toContain(CUSTOMER_EMAIL);
+  });
+
+  it('reports a send that has exhausted its attempts — the customer will never be surveyed', async () => {
+    executeMock.mockReset();
+    executeMock.mockResolvedValueOnce(0); // INSERT conflicts: the row exists
+    queryOneMock.mockReset();
+    queryOneMock.mockResolvedValueOnce(orgRow());
+    queryOneMock.mockResolvedValueOnce(null); // claim refused
+    queryOneMock.mockResolvedValueOnce(existingRow({ survey_email_attempts: 5 }));
+
+    const res = await callPost();
+
+    expect(await res.json()).toEqual({ received: true, skipped: 'email_send_exhausted' });
+    expect(reported()).toEqual([
+      expect.objectContaining({
+        context: 'webhook.stripe.send',
+        meta: { orgId: ORG_ID, subscriptionId: SUB_ID, step: 'exhausted' },
+      }),
+    ]);
+    // Ids in meta, not the message, so exhausted sends share one fingerprint.
+    expect(reported()[0].message).not.toContain(SUB_ID);
+  });
+
+  it('reports a sent email whose survey_email_sent_at stamp failed', async () => {
+    executeMock.mockReset();
+    executeMock.mockResolvedValueOnce(1); // INSERT
+    executeMock.mockRejectedValueOnce(new Error('connection reset')); // sent_at UPDATE
+
+    await callPost();
+
+    expect(reported()).toEqual([
+      expect.objectContaining({
+        context: 'webhook.stripe',
+        message: 'connection reset',
+        meta: { orgId: ORG_ID, subscriptionId: SUB_ID, step: 'mark_sent' },
+      }),
+    ]);
+  });
+
+  it('reports a failure to clear a key flag that a successful call disproved, and still surveys', async () => {
+    queryOneMock.mockResolvedValue(orgRow({ stripe_key_invalid_at: new Date('2026-09-01T00:00:00Z') }));
+    executeMock.mockReset();
+    executeMock.mockRejectedValueOnce(new Error('connection reset')); // clearing UPDATE
+    executeMock.mockResolvedValue(1);
+
+    const res = await callPost();
+
+    expect(res.status).toBe(200);
+    expect(sendSurveyEmailMock).toHaveBeenCalledTimes(1);
+    expect(reported()).toEqual([
+      expect.objectContaining({
+        context: 'webhook.stripe',
+        meta: { orgId: ORG_ID, step: 'clear_key_invalid' },
+      }),
+    ]);
   });
 });

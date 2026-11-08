@@ -50,6 +50,10 @@ vi.mock('@/lib/week', () => ({
 }));
 
 import { POST } from '../route';
+// Real: these tests assert on what the route reported. ALERT_EMAIL is pinned
+// empty for every suite (vitest.config.ts), so reportError never reaches the
+// mocked Resend above and the send counts below stay the digest's own.
+import { getErrorReportSnapshot, resetErrorReports } from '@/lib/report-error';
 
 function digestRequest() {
   return new Request('http://localhost/api/digest', {
@@ -469,6 +473,8 @@ describe('POST /api/digest — run-level failures', () => {
 
     expect(res.status).toBe(500);
     expect(body).toEqual({ error: 'connection terminated', weekOf: WEEK_OF });
+    // Reported here, so marked for the scheduler not to report it again.
+    expect(res.headers.get('x-churnlens-reported')).toBe('1');
     expect(finishCronRunMock).toHaveBeenCalledWith('digest', WEEK_OF, {
       status: 'failed',
       processed: 0,
@@ -570,5 +576,85 @@ describe('POST /api/digest — email contents', () => {
 
     const text = (resendSendMock.mock.calls[0][0] as { text: string }).text;
     expect(text).toContain('Hey there,');
+  });
+});
+
+describe('POST /api/digest — error reporting', () => {
+  beforeEach(() => {
+    resetErrorReports();
+  });
+
+  it("reports a Resend send error with the org and week, never the founder's address", async () => {
+    // Resend's validation errors can quote the recipient.
+    resendSendMock.mockResolvedValueOnce({
+      data: null,
+      error: { name: 'validation_error', message: `Invalid to field: ${FOUNDER.email}` },
+    });
+
+    await POST(digestRequest());
+
+    const { recent } = getErrorReportSnapshot();
+    expect(recent).toEqual([
+      expect.objectContaining({
+        context: 'cron.digest.send',
+        name: 'validation_error',
+        message: 'Invalid to field: [redacted email]',
+        meta: { orgId: ORG.id, weekOf: WEEK_OF },
+      }),
+    ]);
+    expect(JSON.stringify(recent)).not.toContain(FOUNDER.email);
+  });
+
+  it("reports one org's unexpected failure with its id", async () => {
+    const base = queryOneMock.getMockImplementation()!;
+    queryOneMock.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      if (sql.includes('FROM users')) throw new Error('connection terminated');
+      return base(sql, params);
+    });
+
+    await POST(digestRequest());
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({ context: 'cron.digest', meta: { orgId: ORG.id, weekOf: WEEK_OF } }),
+    ]);
+  });
+
+  it('reports a run-level failure with the week', async () => {
+    queryMock.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM themes WHERE week_of')) throw new Error('connection terminated');
+      return [];
+    });
+
+    await POST(digestRequest());
+
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({ context: 'cron.digest', message: 'connection terminated', meta: { weekOf: WEEK_OF } }),
+    ]);
+  });
+
+  it('does not report an org with no owner — a skip, not a failure', async () => {
+    queryOneMock.mockImplementation(async () => null);
+
+    await POST(digestRequest());
+
+    expect(getErrorReportSnapshot().totalReported).toBe(0);
+  });
+
+  it.each([
+    ['claiming the run', () => claimCronRunMock.mockRejectedValueOnce(new Error('connection terminated'))],
+    ['recording a finished run', () => finishCronRunMock.mockRejectedValueOnce(new Error('connection terminated'))],
+  ])('reports a throw outside the run\'s own catch (%s) instead of leaving Next to log a bare 500', async (_label, breakIt) => {
+    breakIt();
+
+    const res = await POST(digestRequest());
+
+    expect(res.status).toBe(500);
+    expect(getErrorReportSnapshot().recent).toEqual([
+      expect.objectContaining({
+        context: 'cron.digest',
+        message: 'connection terminated',
+        meta: { step: 'unhandled', method: 'POST' },
+      }),
+    ]);
   });
 });

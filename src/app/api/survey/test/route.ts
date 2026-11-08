@@ -5,18 +5,20 @@ import { signSurveyToken } from '@/lib/crypto';
 import { assertSameOrigin, requireOrgId } from '@/lib/auth';
 import { checkRateLimit } from '@/lib/ratelimit';
 import { sendSurveyEmail } from '@/lib/survey-email';
-import { loadSurveyConfig } from '@/lib/survey-config';
+import { loadSurveyPresentation } from '@/lib/survey-config';
+import { reportError } from '@/lib/report-error';
+import { withErrorReporting } from '@/lib/with-error-reporting';
 
 /**
  * Send the founder a test exit survey at their own email — exercises the
  * real email → survey → dashboard loop. The response row is flagged is_test
  * so it never counts toward stats, themes, digests, or the free-tier cap.
  */
-export async function POST(req: NextRequest) {
+async function sendTestSurvey(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
 
-  const authResult = requireOrgId(req);
+  const authResult = await requireOrgId(req);
   if ('error' in authResult) return authResult.error;
   const { orgId } = authResult;
 
@@ -66,7 +68,11 @@ export async function POST(req: NextRequest) {
       [orgId, owner.email, owner.name ?? 'Test customer', testSubscriptionId, token],
     );
 
-    const config = await loadSurveyConfig(orgId);
+    // Resolved exactly as for a real cancellation (display name, else the
+    // cached Stripe account name), so the test shows the founder what their
+    // customers will see. It reads the cache only: a test send does not go to
+    // Stripe for the name.
+    const presentation = await loadSurveyPresentation(orgId);
 
     await sendSurveyEmail({
       to: owner.email,
@@ -74,30 +80,39 @@ export async function POST(req: NextRequest) {
       surveyUrl: `${appUrl}/survey/${token}`,
       optOutUrl: `${appUrl}/api/survey/opt-out?token=${token}`,
       isTest: true,
-      displayName: config.displayName,
+      displayName: presentation.businessName,
     });
 
     // Same delivery bookkeeping as the webhook path so the two never drift:
     // survey_email_sent_at NULL always means "no email ever went out", whichever
-    // route wrote the row. Its own try/catch keeps a bookkeeping failure from
-    // reporting an email that did send as a failed one.
+    // route wrote the row, and business_name is the name the email carried,
+    // which the survey page repeats. Its own try/catch keeps a bookkeeping
+    // failure from reporting an email that did send as a failed one.
     try {
       await execute(
         `UPDATE survey_responses
-         SET survey_email_sent_at = now(), survey_email_attempts = survey_email_attempts + 1
+         SET survey_email_sent_at = now(), survey_email_attempts = survey_email_attempts + 1,
+             business_name = $3
          WHERE stripe_subscription_id = $1 AND org_id = $2`,
-        [testSubscriptionId, orgId],
+        [testSubscriptionId, orgId, presentation.businessName],
       );
     } catch (bookkeepingErr) {
-      console.error(
-        `Test survey sent but marking survey_email_sent_at failed for ${testSubscriptionId}:`,
-        bookkeepingErr,
-      );
+      reportError('survey.test', bookkeepingErr, {
+        orgId,
+        subscriptionId: testSubscriptionId,
+        step: 'mark_sent',
+      });
     }
   } catch (err) {
-    console.error('Test survey send failed:', err);
+    // The same send path real cancellations use (Resend, the legal footer
+    // guard, the survey_responses insert), so a founder's test failing is an
+    // early sign the real ones will too. The founder's own address can appear
+    // in a Resend error; reportError redacts it.
+    reportError('survey.test', err, { orgId });
     return NextResponse.json({ error: 'Failed to send test survey.' }, { status: 500 });
   }
 
   return NextResponse.json({ success: true, sentTo: owner.email });
 }
+
+export const POST = withErrorReporting('survey.test', sendTestSurvey);

@@ -27,6 +27,8 @@ const APPLICATION_TABLES = [
   'digest_sends',
   'cron_runs',
   'users_dedupe_backup',
+  'legal_acceptances',
+  'polar_subscriptions',
 ];
 
 function redact(url: string): string {

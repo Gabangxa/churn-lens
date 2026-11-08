@@ -14,6 +14,7 @@
  * `{ displayName: null, logoUrl: null, customReasons: [] }` — today's behavior.
  */
 import { queryOne } from '@/lib/db';
+import { reportError } from '@/lib/report-error';
 
 // Single source of truth for the built-in reasons, shared with the survey
 // page so rendering and validation (dedupe-against-built-ins) can never drift.
@@ -56,12 +57,25 @@ function stripControlChars(value: string): string {
   return value.replace(/[\x00-\x1F\x7F]/g, '');
 }
 
-function isHttpsUrl(value: string): boolean {
+// The same character class, for values where removing a character would
+// change their meaning (a URL) and which are refused instead.
+function hasControlChars(value: string): boolean {
+  // eslint-disable-next-line no-control-regex
+  return /[\x00-\x1F\x7F]/.test(value);
+}
+
+/**
+ * The URL as the browser will request it (its parsed href), or null when it
+ * is not an https URL. Callers refuse control characters first: the parser
+ * accepts them, percent-encoding some (NUL becomes %00) and silently dropping
+ * others (tab, newline), so the saved value would differ from what was typed.
+ */
+function httpsHref(value: string): string | null {
   try {
     const url = new URL(value);
-    return url.protocol === 'https:';
+    return url.protocol === 'https:' ? url.href : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -81,6 +95,22 @@ function dedupeAgainstBuiltinsAndSelf(reasons: string[]): string[] {
 }
 
 /**
+ * A business name as it may appear in survey copy ("the Acme team", "Sent on
+ * behalf of Acme"), or null when there is none fit to print. Control
+ * characters — line breaks included — are stripped, so a name can only ever
+ * occupy its own place in one line of the plain-text email. Empty or
+ * over-limit values read as absent (the generic copy) rather than being cut
+ * off mid-word. One rule for the configured display name and for the Stripe
+ * account's name, which is just as untrusted.
+ */
+export function normalizeBusinessName(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = stripControlChars(raw).trim();
+  if (trimmed.length === 0 || trimmed.length > SURVEY_CONFIG_LIMITS.displayNameMaxLen) return null;
+  return trimmed;
+}
+
+/**
  * Defensive normalizer for whatever is stored in the DB. Never throws — any
  * missing/malformed key falls back to its default rather than erroring the
  * survey render. Also re-applies the length/count limits and dedupe so a
@@ -92,23 +122,16 @@ function normalizeStoredConfig(raw: unknown): SurveyConfig {
   }
   const obj = raw as Record<string, unknown>;
 
-  let displayName: string | null = null;
-  if (typeof obj.display_name === 'string') {
-    const trimmed = stripControlChars(obj.display_name).trim();
-    if (trimmed.length > 0 && trimmed.length <= SURVEY_CONFIG_LIMITS.displayNameMaxLen) {
-      displayName = trimmed;
-    }
-  }
+  const displayName = normalizeBusinessName(obj.display_name);
 
+  // The same rules validateSurveyConfig applies, so a hand-edited row cannot
+  // render a URL the write path would have refused.
   let logoUrl: string | null = null;
   if (typeof obj.logo_url === 'string') {
     const trimmed = obj.logo_url.trim();
-    if (
-      trimmed.length > 0 &&
-      trimmed.length <= SURVEY_CONFIG_LIMITS.logoUrlMaxLen &&
-      isHttpsUrl(trimmed)
-    ) {
-      logoUrl = trimmed;
+    const href = hasControlChars(trimmed) ? null : httpsHref(trimmed);
+    if (href !== null && href.length <= SURVEY_CONFIG_LIMITS.logoUrlMaxLen) {
+      logoUrl = href;
     }
   }
 
@@ -139,8 +162,91 @@ export async function loadSurveyConfig(orgId: string): Promise<SurveyConfig> {
     if (!row) return { ...DEFAULT_CONFIG, customReasons: [] };
     return normalizeStoredConfig(row.survey_config);
   } catch (err) {
-    console.error(`Failed to load survey_config for org ${orgId}:`, err);
+    // Callers degrade to the zero-config copy, so nothing visibly breaks —
+    // which is why it is reported: surveys silently lose the org's own name,
+    // logo and reasons until the database answers again.
+    reportError('survey-config.load', err, { orgId });
     return { ...DEFAULT_CONFIG, customReasons: [] };
+  }
+}
+
+/** The survey config plus the business the survey says is asking. */
+export interface SurveyPresentation extends SurveyConfig {
+  /**
+   * Who the churned customer is told the survey is from — POPIA s18 requires
+   * the data subject be told the responsible party's identity. In order: the
+   * configured display name; else the connected Stripe account's business
+   * name, as cached in organizations.stripe_business_name by
+   * /api/onboarding/connect or the Stripe webhook; else null, which keeps
+   * today's generic copy (no new required setup — the 2026-07-12 zero-config
+   * decision).
+   *
+   * The survey emails resolve it here at send time and record what they
+   * sent in survey_responses.business_name; the survey page shows that
+   * record (loadSurveyPagePresentation), so the page names the business the
+   * email named even if the org's name changed in between.
+   */
+  businessName: string | null;
+}
+
+/** The config and resolved name for one organizations row. */
+function presentationFromRow(row: { survey_config: unknown; stripe_business_name: unknown }): SurveyPresentation {
+  const config = normalizeStoredConfig(row.survey_config);
+  return {
+    ...config,
+    // Normalized again on read, like every stored config field, so a
+    // hand-edited row cannot put a line break into the email.
+    businessName: config.displayName ?? normalizeBusinessName(row.stripe_business_name),
+  };
+}
+
+/**
+ * loadSurveyConfig plus the resolved businessName, in one read: the org's
+ * name as it is now, for the survey emails. Never throws, with the same
+ * fall-back-to-defaults contract as loadSurveyConfig.
+ */
+export async function loadSurveyPresentation(orgId: string): Promise<SurveyPresentation> {
+  try {
+    const row = await queryOne<{ survey_config: unknown; stripe_business_name: unknown }>(
+      'SELECT survey_config, stripe_business_name FROM organizations WHERE id = $1',
+      [orgId],
+    );
+    if (!row) return { ...DEFAULT_CONFIG, customReasons: [], businessName: null };
+    return presentationFromRow(row);
+  } catch (err) {
+    // As loadSurveyConfig: degraded rather than failed, so reported — here the
+    // survey also stops naming the business that is asking (POPIA s18).
+    reportError('survey-config.load', err, { orgId });
+    return { ...DEFAULT_CONFIG, customReasons: [], businessName: null };
+  }
+}
+
+/**
+ * The presentation for the survey page a link opens, in one read: the org's
+ * config, with businessName taken from what the email for this token said
+ * (survey_responses.business_name) when that was recorded. Re-resolved when
+ * the page is opened, the name could differ from the email's — after a
+ * rename, a reconnect to another Stripe account, or a disconnect. Without a
+ * record (a row sent before names were recorded, an email that used the
+ * generic copy, a preview link with no row) it is the org's current name, as
+ * loadSurveyPresentation resolves it. Scoped to orgId as well as the token,
+ * so no other org's record can be shown. Never throws.
+ */
+export async function loadSurveyPagePresentation(orgId: string, token: string): Promise<SurveyPresentation> {
+  try {
+    const row = await queryOne<{ survey_config: unknown; stripe_business_name: unknown; sent_business_name: unknown }>(
+      `SELECT o.survey_config, o.stripe_business_name, r.business_name AS sent_business_name
+       FROM organizations o
+       LEFT JOIN survey_responses r ON r.token = $2 AND r.org_id = o.id
+       WHERE o.id = $1`,
+      [orgId, token],
+    );
+    if (!row) return { ...DEFAULT_CONFIG, customReasons: [], businessName: null };
+    const current = presentationFromRow(row);
+    return { ...current, businessName: normalizeBusinessName(row.sent_business_name) ?? current.businessName };
+  } catch (err) {
+    reportError('survey-config.load', err, { orgId });
+    return { ...DEFAULT_CONFIG, customReasons: [], businessName: null };
   }
 }
 
@@ -195,17 +301,28 @@ export function validateSurveyConfig(input: unknown): SurveyConfigValidationResu
     }
     const trimmed = rawLogoUrl.trim();
     if (trimmed.length > 0) {
+      const tooLongError = `Logo URL must be ${SURVEY_CONFIG_LIMITS.logoUrlMaxLen} characters or fewer.`;
       if (trimmed.length > SURVEY_CONFIG_LIMITS.logoUrlMaxLen) {
-        return {
-          ok: false,
-          error: `Logo URL must be ${SURVEY_CONFIG_LIMITS.logoUrlMaxLen} characters or fewer.`,
-          field: 'logoUrl',
-        };
+        return { ok: false, error: tooLongError, field: 'logoUrl' };
       }
-      if (!isHttpsUrl(trimmed)) {
+      // Refused, not stripped: a URL with a character removed is a different
+      // URL. And Postgres jsonb cannot store a NUL at all (22P05), so letting
+      // one through turned a pasted typo into a failed save and an operator
+      // alert instead of this field error.
+      if (hasControlChars(trimmed)) {
+        return { ok: false, error: 'Logo URL must not contain control characters.', field: 'logoUrl' };
+      }
+      const href = httpsHref(trimmed);
+      if (href === null) {
         return { ok: false, error: 'Logo URL must be a valid https:// URL.', field: 'logoUrl' };
       }
-      logoUrl = trimmed;
+      // Stored as parsed, so it is exactly what the survey page will request.
+      // Checked again because parsing can lengthen it (a space becomes %20),
+      // and the read path drops anything over the limit.
+      if (href.length > SURVEY_CONFIG_LIMITS.logoUrlMaxLen) {
+        return { ok: false, error: tooLongError, field: 'logoUrl' };
+      }
+      logoUrl = href;
     }
   }
 

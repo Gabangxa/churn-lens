@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "engines": {
-    "node": "20.x"
+    "node": "22.x"
   },
   "scripts": {
     "dev": "next dev -p 5000",
@@ -34,7 +34,7 @@
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",
-    "@types/node": "^20.19.37",
+    "@types/node": "^22.20.5",
     "@types/react": "^18.3.28",
     "@types/react-dom": "^18.3.7",
     "autoprefixer": "^10.4.27",

@@ -41,11 +41,20 @@ ChurnLens fills the gap: exit interviews + AI theme synthesis at indie-founder p
 
 `/login` is both signup and login: posting an email to `/api/auth/request` creates
 an org and an owner user the first time it sees that address, then emails a
-magic link either way. `/api/auth/verify` is the *only* route that ever mints
-a session — it sends a founder with no Stripe key yet to `/onboarding`,
-everyone else to wherever they were headed (or `/dashboard`). `/api/onboarding/connect`
+magic link either way. Opening the emailed link (`GET /api/auth/verify?token=`)
+only forwards to `/login/confirm`, which shows the address the link was sent to
+and a Sign in button; that button's same-origin `POST /api/auth/verify` is the
+*only* request that ever mints a session. It sends a founder whose org has not
+finished connecting Stripe (no key, or a key but no registered webhook) to
+`/onboarding`, everyone else to wherever they were headed (or `/dashboard`). `/api/onboarding/connect`
 requires that session and only ever attaches a Stripe key to it; it can no
-longer create an org or accept an email on its own.
+longer create an org or accept an email on its own. It also refuses the key
+unless the request accepts the current Terms of Service and DPA
+(`currentLegalDocsVersion()` in `src/lib/legal-version.ts`: `LEGAL_DOCS_VERSION`,
+labelled `-draft` while `src/lib/legal.ts` has placeholders), and records that
+acceptance in the same transaction that stores the key — in `legal_acceptances`,
+which keeps every version an org has accepted, and in the
+`organizations.legal_accepted_*` columns, which hold the current one.
 
 ---
 
@@ -67,6 +76,7 @@ src/
 │       ├── auth/                  # Magic-link request/verify, logout
 │       ├── survey/                # Survey submission + opt-out
 │       ├── settings/              # Survey config, status, disconnect
+│       ├── legal/accept/          # Record Terms/DPA acceptance (dashboard banner)
 │       ├── themes/                # AI clustering cron (Mon 06:00 UTC)
 │       ├── digest/                # Weekly email cron (Mon 07:00 UTC)
 │       └── health/                # Railway healthcheck
@@ -164,14 +174,15 @@ scheduler cannot race the cron spec.
 | Spec | Flow |
 |------|------|
 | `e2e/landing.spec.ts` | Marketing links: no anchor points at the session-gated `/onboarding`, pricing CTAs carry `?plan=`, header CTA goes to `/login` |
-| `e2e/auth.spec.ts` | Signup through the real form (email normalization, plan carried into `redirect_to`, no session yet), magic-link verification, replayed and expired links, signed-out redirects to `/login?next=…` |
+| `e2e/auth.spec.ts` | Signup through the real form (email normalization, plan carried into `redirect_to`, no session yet), magic-link verification, replayed and expired links, signed-out redirects to `/login?next=…`, the confirm step (opening a link signs nobody in; an attacker's link opened in a signed-in browser cannot switch its session), half-connected orgs landing on onboarding, a logout that cannot end other devices |
 | `e2e/csrf.spec.ts` | `assertSameOrigin` wired in front of connect / login / checkout, and an off-site `next` dropped rather than stored |
-| `e2e/onboarding.spec.ts` | Key-only form behind a session (no email field — that was the account-takeover hole) and the `rk_` validation error |
-| `e2e/account.spec.ts` | Delete account from Settings: two-step confirm, Stripe columns cleared, session ended |
+| `e2e/onboarding.spec.ts` | Key-only form behind a session (no email field — that was the account-takeover hole), the unticked-by-default Terms/DPA checkbox, and the `rk_` validation error |
+| `e2e/dashboard.spec.ts` | Status line tells the truth about whether surveys send (involuntary churn named as not surveyed); an org whose Stripe key was rejected (or belongs to a different Stripe account or mode) told to reconnect; free orgs not promised AI themes; Terms/DPA banner for an org with no acceptance on record, and "I agree" recording it; an org with a key but no webhook endpoint told to finish connecting; an org whose surveys would name no business asked for a business name until it has one |
+| `e2e/account.spec.ts` | Delete account from Settings: two-step confirm, Stripe columns cleared, session ended, and what Settings says when session revocation, the Stripe disconnect or the Polar revoke fails |
 | `e2e/cron.spec.ts` | `CRON_SECRET` gate on all three jobs; the purge job's retention, erasure, abandoned-signup and orphaned-opt-out rules against real rows; themes + digest recorded as succeeded |
 | `e2e/legal.spec.ts` | Privacy / Terms / DPA render with the draft banner, POPIA specifics, unsubscribe page's privacy link |
 
-Sign-in is seeded (a `login_tokens` row written directly, then the link is clicked)
+Sign-in is seeded (a `login_tokens` row written directly, then the link is opened and the confirm page's Sign in pressed)
 rather than requested through `/api/auth/request`, because that route is the one
 place a real user's inbox is involved and it is rate limited.
 
@@ -248,17 +259,164 @@ almost always well past even the 8h-capped backoff window, so the next poll (wit
    ```
 
    All variables in `src/lib/env.ts` are required — the server refuses to boot without them.
+
+   Also set `ALERT_EMAIL=<an inbox you read>` (optional, but nothing pages you without it).
+   `src/lib/report-error.ts` emails it when a cron job, the scheduler, a survey email or
+   save, the Stripe or Polar webhook, billing, a login-link send, logout, account deletion,
+   onboarding, the database pool or the process itself fails, and when an API route
+   throws something it did not handle (`src/lib/with-error-reporting.ts`). A failure
+   alerts at once; while it keeps recurring, the next alert for it waits 1 hour, then 4,
+   then a day (starting over after a quiet day), each carrying how many occurrences were
+   suppressed. At most 10 alerts an hour and 24 a day overall, sent at least 600 ms apart,
+   since alerts share the Resend quota and rate limit with survey emails and login links.
+   A request's own bad input (a value Postgres refuses for its type, say) is a 400 and a
+   warning line, never an alert. Anything email-shaped is redacted. Unset, errors are
+   still logged as one JSON line each and listed by the monitor below; the server warns
+   once at boot.
 4. **Settings → Networking → Generate Domain** (populates `RAILWAY_PUBLIC_DOMAIN`), then deploy.
    The pre-deploy step runs `scripts/migrate.js`; the healthcheck waits on `/api/health`.
 
 DB TLS is handled automatically: no SSL over Railway's `*.railway.internal` private network
 (override with `DATABASE_SSL=require`), verified TLS elsewhere when `DATABASE_CA_CERT` is set.
 
+### Deploying fix/launch-hardening
+
+The first deploy of this branch over `main`:
+
+1. **Set `ALERT_EMAIL`** (see step 3 above). Alerts are sent from `RESEND_FROM_EMAIL`, like
+   survey emails, login links and the digest, and both its default (`src/lib/resend.ts`) and
+   the example above use `churnlens.com`, a domain that does not resolve. Resend only sends
+   from a domain verified in the Resend account, so verify one there and set
+   `RESEND_FROM_EMAIL` to an address on it, or no alert, survey or login mail goes out.
+2. **Polar only when billing goes live.** The `POLAR_*` variables and the webhook registration
+   (`.env.example`, Polar section) are not needed before then; without them checkout answers
+   503 "Billing is not configured for this plan yet." and reports nothing, and
+   `/api/webhooks/polar` answers 503 "Polar webhooks not configured", logs one warning per
+   process and reports nothing. Set `POLAR_WEBHOOK_SECRET` before, or together with,
+   `POLAR_ACCESS_TOKEN` and the product ids, and in the same change that registers the
+   webhook: Polar's deliveries get that 503 until it is set. If the token or a product id is
+   set but the secret is not, checkout can take money whose events are refused, so the first
+   refused delivery in each process is reported as `webhook.polar` (`step: not_configured`).
+   Once the secret is set, a delivery whose signature does not verify gets 403.
+3. **Expect every founder to be signed out once.** The session cookie format changed
+   (`<orgId>.<issuedAt>.<hmac>`), and the old `<orgId>.<hmac>` cookies are refused. Every org
+   also sees the Terms/DPA banner on the dashboard, since none has an acceptance on record;
+   acceptances are recorded as `<LEGAL_DOCS_VERSION>-draft` until `src/lib/legal.ts` is filled.
+4. **Before deploying, run against production:**
+
+   ```sql
+   -- Expect 0. A row is an org whose Polar subscription has no row in the
+   -- per-subscription ledger (polar_subscriptions), on any plan. Before this deploy the
+   -- ledger does not exist, so that is every org with a pointer:
+   SELECT id, plan, polar_subscription_id FROM organizations WHERE polar_subscription_id IS NOT NULL;
+
+   -- The same list once the ledger exists (after this deploy, or after rolling forward
+   -- from an older build, step 8):
+   SELECT o.id, o.plan, o.polar_subscription_id FROM organizations o
+   WHERE o.polar_subscription_id IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM polar_subscriptions s WHERE s.id = o.polar_subscription_id);
+
+   -- Orgs with a Stripe key but no webhook endpoint. They will show "Stripe setup is
+   -- incomplete" and be sent to /onboarding on sign-in to finish connecting.
+   SELECT id FROM organizations
+   WHERE stripe_api_key_enc IS NOT NULL
+     AND (stripe_webhook_id IS NULL OR stripe_webhook_secret_enc IS NULL);
+   ```
+
+   The recompute cannot see an unledgered subscription, so it never lowers that org's plan:
+   not below what the older build left, and not below what a comp or another subscription
+   raises it to later. When it would have, it reports `billing.recompute`
+   (`missing_ledger_row`) and `/api/admin/plan` answers `held: "missing_ledger_row"`. The
+   hold ends by itself when Polar sends an event for that subscription. To end it sooner,
+   for each listed org, either:
+
+   - add the ledger row, copying the subscription's status, product id and `modified_at`
+     from Polar (`modified_at` exactly, so Polar's later events for it still apply):
+
+     ```sql
+     INSERT INTO polar_subscriptions (id, org_id, status, product_id, modified_at)
+     VALUES ('<subscription id>', '<org id>', '<status>', '<product id>', '<modified_at>');
+     ```
+
+   - or, only for a subscription known to have ended, clear the pointer. The recompute below
+     points it at any ledgered subscription the org has; with none it stays NULL, which
+     account deletion reads as "never reached Polar", so it asks Polar for nothing to cancel.
+
+     ```sql
+     UPDATE organizations SET polar_subscription_id = NULL WHERE id = '<org id>';
+     ```
+
+   then recompute through the admin route, re-sending the org's current `comp_plan` so the
+   comp is not changed, and check the response no longer says `held`:
+
+   ```sql
+   SELECT comp_plan FROM organizations WHERE id = '<org id>';
+   ```
+
+   ```sh
+   # "plan" is that comp_plan as a JSON string ("starter" / "growth"), or null if it was NULL.
+   curl -X POST "$NEXT_PUBLIC_APP_URL/api/admin/plan" -H "Authorization: Bearer $CRON_SECRET" \
+     -H 'content-type: application/json' -d '{"orgId":"<org id>","plan":<comp_plan or null>}'
+   ```
+5. **If the pre-deploy migrate fails with "Gave up waiting for a table lock"**, another session
+   held a lock past the 5 s `lock_timeout`. Nothing is half-applied and the old build keeps
+   serving: find the `idle in transaction` session in `pg_stat_activity`, end it
+   (`pg_terminate_backend(pid)`), and redeploy.
+6. **Confirm no Railway variable pins Node 20.** `engines.node` is now `22.x`, which Railpack
+   reads, but a `RAILPACK_NODE_VERSION` (or, on the older Nixpacks builder,
+   `NIXPACKS_NODE_VERSION`) variable overrides it.
+7. **When filling in `src/lib/legal.ts`**, bump `LEGAL_DOCS_VERSION` and `LEGAL_DOCS_SHA256`
+   in `src/lib/legal-version.ts` in the same commit. The guard test
+   (`src/lib/__tests__/legal-version.test.ts`) fails until the hash matches the new text.
+   Filling it in also drops the `-draft` label, so every org is asked to accept again.
+8. **Rolling back:** never past the session rewrite (next section). Also:
+   - across a `LEGAL_DOCS_VERSION` change, the acceptance history stops being reliable: the
+     older build asks for and records its own version, so acceptances of two wordings
+     interleave (and `main` records none: its connect asks for no acceptance).
+   - Polar state an older build writes needs a resync after rolling forward. `main` writes
+     `plan` and `polar_subscription_id` but no `polar_subscriptions` row, and writes an admin
+     comp straight into `plan` rather than `comp_plan`: re-grant such comps through
+     `/api/admin/plan`, and expect the `billing.recompute` report from step 4 for those
+     subscriptions. Run step 4's ledger query after rolling forward and release each org it
+     lists as described there.
+
+### Rolling back
+
+Migrations are additive and idempotent, so older code generally runs against the newer
+schema and Railway's "redeploy a previous deployment" is safe for most changes.
+**Sessions are the exception: never roll back to `c3e33d7` (main as of the session
+rewrite) or anything older once the session commits (`609b947`, `5621af0`, `3805068`,
+`e8df58a`) have been deployed.** That code signs the cookie with `ENCRYPTION_KEY` itself, gives it 365 days,
+and never reads `organizations.sessions_valid_after`. Rolling back to it:
+
+- **revives every pre-deploy cookie.** The new code refuses old `<orgId>.<hmac>` cookies
+  but only deletes one when a browser presents it to an API route, so plenty are still
+  in browsers — and a stolen or copied one is not in a browser at all. After a rollback
+  each is valid again for the rest of its 365 days.
+- **voids every revocation.** "Log out" signing the org out on every device, and account
+  deletion doing the same, both work by stamping `sessions_valid_after`, which the old
+  code ignores. Nothing the founder ended stays ended.
+- **brings back the one-step magic link**, where merely opening `/api/auth/verify?token=`
+  signs the browser in: login CSRF into an attacker's org, and mail scanners burning
+  links. (The emailed URL never changed, so links already in inboxes work either way.)
+- signs out everyone who signed in after the deploy: the old code cannot verify the
+  new `<orgId>.<issuedAt>.<hmac>` cookie. Rolling forward again does the same to anyone
+  who signed in during the rollback.
+
+So after a security-motivated logout (a lost laptop, a leaked cookie), or once anyone has
+used "Log out" to end other sessions, **roll forward** with a fix — never back to
+`c3e33d7`. Rotating `ENCRYPTION_KEY` is not a way out of a bad rollback: it also
+encrypts every stored Stripe key, which would stop decrypting.
+
 ### Local monitor
 
 `scripts/monitor.js` is a founder-only dashboard: app health, scheduler/cron pipeline
 state (per-job status, attempts, due/action), activity counts (orgs, logins, surveys,
-digest sends, unsubscribes), and a near-live tail of Railway's logs (fetched every 15 s; the CLI does not stream when piped).
+digest sends, unsubscribes), the errors `reportError` has recorded since the server last
+booted (grouped by fingerprint, with whether alert emails are on and actually sending),
+and a near-live tail of Railway's logs (fetched every 15 s; the CLI does not stream when piped).
+The errors panel is in-memory on the server, so a restart or redeploy empties it; the
+JSON log lines in Railway are the durable record.
 
 ```bash
 railway run npm run monitor
